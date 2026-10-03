@@ -281,6 +281,9 @@ export class SystemService {
             if (state.avd_name) {
               this.launchingAvd.set(state.avd_name);
             }
+            // A page refresh / another tab may have started this launch: keep the
+            // live tracker running instead of silently dropping it.
+            this.startEmulatorStatusPolling();
           }
         },
         error: (err) => {

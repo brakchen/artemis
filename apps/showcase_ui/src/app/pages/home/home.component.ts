@@ -567,6 +567,7 @@ export class HomeComponent implements OnInit, OnDestroy {
   private focusListener = () => {
     // Silently re-check environment when user returns to the browser tab
     this.systemService.fetchReadiness().subscribe();
+    this.systemService.fetchEmulatorStatus().subscribe({ error: () => {} });
   };
 
   constructor() {
@@ -591,6 +592,8 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.systemService.fetchReadiness().subscribe();
     this.systemService.fetchModelConfigEnv().subscribe();
     this.systemService.fetchLlmProviders().subscribe();
+    // Restore any in-flight (or failed) emulator launch after a refresh.
+    this.systemService.fetchEmulatorStatus().subscribe({ error: () => {} });
     this.systemService.fetchAdbServerStatus().subscribe({
       next: status => {
         if (status.endpoint.mode === 'remote') {
