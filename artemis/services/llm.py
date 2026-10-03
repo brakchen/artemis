@@ -45,6 +45,7 @@ from artemis.data_engine.trace import CURRENT_TRACE_ID, DataEngineCallbackHandle
 from artemis.llm.google import is_google_chat_model, is_google_provider
 from artemis.llm.providers import (
     KEY_REQUIRED_BUILTINS,
+    resolve_model_config,
     resolve_provider_for_model,
 )
 from artemis.llm.reliability import (
@@ -884,9 +885,19 @@ def get_google_llm(
     include_thoughts: bool | None = None,
     enable_grounding: bool = False,
 ) -> BaseChatModel:
+    """Build the "always Gemini" helper model, registry-aware.
+
+    Callers of this helper hard-code Google, but the endpoint still resolves
+    through the provider registry: a registered default provider (and a
+    credential-less built-in) takes over here too, so installations running on
+    a custom provider never need ``GOOGLE_API_KEY`` — even on these paths.
+    """
+    resolved = resolve_model_config("google", model_name)
     ep = ModelEndpoint(
-        provider=ModelProvider.GOOGLE,
-        model_name=model_name,
+        provider=ModelProvider.from_string(resolved.provider),
+        model_name=resolved.model,
+        api_key=resolved.api_key,
+        api_base=resolved.api_base,
         temperature=temperature or 0.0,
         timeout_seconds=timeout or 60.0,
         thinking_budget=thinking_budget,
@@ -968,7 +979,7 @@ def _resolve_endpoint(
         api_base = entry.api_base
         provider_temperature = entry.temperature
         provider_timeout = entry.timeout_seconds
-        if model_is_alias or resolution.source == "fallback":
+        if model_is_alias or resolution.source in ("fallback", "default"):
             # The entry carries its own model pair (default + fallback), mirroring
             # artemis.jsonc's default/fallback block. An alias or a substituted
             # provider would otherwise receive a model name from another vendor.

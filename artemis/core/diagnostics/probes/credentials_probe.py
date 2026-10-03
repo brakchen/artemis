@@ -50,6 +50,7 @@ class LLMCredentialsProbe(BaseProbe):
         import os
 
         from artemis.config.settings import is_placeholder_key
+        from artemis.llm.providers import KEY_REQUIRED_BUILTINS, active_default_provider
 
         gemini_key = settings.get_api_key("google")
         openai_key = settings.get_api_key("openai")
@@ -147,6 +148,25 @@ class LLMCredentialsProbe(BaseProbe):
         if ocr_key and not is_placeholder_key(ocr_key):
             api_keys_map["ocr"] = ocr_key.get_secret_value()
 
+        # A registered default provider overrides every key-carrying built-in,
+        # with or without its own key: it is the LLM that will actually run.
+        # Built-in keys are then not consulted, so they must not fail live
+        # verification either (they belong to a credential the runtime never
+        # uses) — drop them from the verified set and report them as ignored.
+        default_entry = active_default_provider()
+        if default_entry is not None:
+            metadata_keys = [
+                p for p in configured_providers if p["provider"] in KEY_REQUIRED_BUILTINS
+            ]
+            configured_providers = [
+                p for p in configured_providers if p["provider"] not in KEY_REQUIRED_BUILTINS
+            ]
+            for key_id in tuple(api_keys_map):
+                if key_id in KEY_REQUIRED_BUILTINS:
+                    api_keys_map.pop(key_id)
+        else:
+            metadata_keys = []
+
         current_active_key = (
             gemini_key.get_secret_value()
             if gemini_key
@@ -161,6 +181,47 @@ class LLMCredentialsProbe(BaseProbe):
             "current_gemini_key": gemini_key.get_secret_value() if gemini_key else "",
             "api_keys": api_keys_map,
         }
+        if default_entry is not None:
+            metadata["default_provider"] = {
+                "name": default_entry.name,
+                "model": default_entry.model,
+                "fallback_model": default_entry.fallback_model,
+                "api_base": default_entry.api_base,
+            }
+            metadata["ignored_builtin_keys"] = [p["label"] for p in metadata_keys]
+            # No built-in credential is in use, so none should be reported (or
+            # redacted) as the active one.
+            metadata["current_key"] = ""
+            metadata["current_gemini_key"] = ""
+
+        # Case 0: a registered default provider is active → it is the LLM for
+        # every node, so no built-in key is required at all.
+        if default_entry is not None:
+            model_label = default_entry.model or "default model"
+            return ProbeResult(
+                id=self.probe_id,
+                category=self.category,
+                title="Multimodal LLM API Key",
+                status=ProbeStatus.PASS,
+                is_blocker=self.is_blocker,
+                summary=f"Active (default provider '{default_entry.name}')",
+                description=(
+                    f"Custom provider '{default_entry.name}' is the default LLM "
+                    f"({model_label} @ {default_entry.api_base or 'its endpoint'}) and overrides "
+                    "built-in providers; no built-in API key is needed."
+                ),
+                metadata=metadata,
+                actions=[
+                    ProbeAction(
+                        action_type="hint",
+                        label="Default Provider Active",
+                        payload=(
+                            f"'{default_entry.name}' serves every model node. "
+                            "Manage it with `artemis providers list`."
+                        ),
+                    )
+                ],
+            )
 
         # Case 1: Gemini API Key configured (Standard / Recommended)
         if gemini_key:

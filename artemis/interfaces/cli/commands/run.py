@@ -441,9 +441,13 @@ def run_command(
             console.print(
                 Panel(
                     f"[bold red]✖ Authentication Error:[/bold red] {err_msg}\n\n"
-                    "💡 [bold cyan]Quick Fix:[/bold cyan] Run [bold green]artemis init[/bold green] to configure your API key in 10 seconds,\n"
-                    "or add [bold]GEMINI_API_KEY=your_key[/bold] to [dim].env[/dim].",
-                    title="Missing API Key",
+                    "💡 [bold cyan]Quick Fix (pick one):[/bold cyan]\n"
+                    "  1. Run [bold green]artemis init[/bold green] to configure an API key in 10 seconds,\n"
+                    "     or add [bold]GEMINI_API_KEY=your_key[/bold] to [dim].env[/dim].\n"
+                    "  2. Use your own LLM instead (no built-in key needed):\n"
+                    "     [bold]artemis providers add --name my-llm --base-url https://host/v1 --model <model>[/bold]\n"
+                    "     Registering the first provider makes it the default, and the default is used by every node.",
+                    title="Missing LLM Credentials",
                     expand=False,
                 )
             )

@@ -175,7 +175,12 @@ export class HomeComponent implements OnInit, OnDestroy {
   /** True when a registered provider takes over from the file's provider. */
   public effectiveOverrideActive = computed(() => {
     const eff = this.effectiveDefaultModel();
-    return !!eff && (eff.resolved_via === 'fallback' || eff.resolved_via === 'alias');
+    // 'default' = the registered default won on precedence (it wins even when
+    // the built-in has a key); 'fallback'/'alias' = the built-in was unusable.
+    return (
+      !!eff &&
+      (eff.resolved_via === 'fallback' || eff.resolved_via === 'alias' || eff.resolved_via === 'default')
+    );
   });
 
   // Google Gemini API Key State

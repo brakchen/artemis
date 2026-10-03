@@ -117,10 +117,72 @@ def test_fallback_to_default_when_builtin_has_no_key(active_registry: LLMProvide
     assert resolution.source == "fallback"
     assert resolution.entry is not None and resolution.entry.name == "my-proxy"
 
-    # A configured built-in keeps its own provider.
-    assert resolve_provider_for_model("google", builtin_has_key=True).source == "builtin"
+    # A registered default is *the* LLM: it also wins over a built-in that has
+    # its own key, so a default is all an installation ever needs.
+    assert resolve_provider_for_model("google", builtin_has_key=True).source == "default"
     # Local endpoints need no key, so they are never swapped out.
     assert resolve_provider_for_model("ollama", builtin_has_key=None).source == "builtin"
+
+
+def test_builtin_stays_when_no_default_is_registered(no_default_llm_provider) -> None:
+    """Without a default entry the built-ins keep their original behaviour."""
+    assert resolve_provider_for_model("google", builtin_has_key=True).source == "builtin"
+    assert resolve_provider_for_model("google", builtin_has_key=False).source == "builtin"
+    assert resolve_provider_for_model("ollama", builtin_has_key=None).source == "builtin"
+
+
+def test_provider_credentials_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_default_llm_provider
+) -> None:
+    """A set default provider satisfies every 'requires ..._API_KEY' check."""
+    from artemis.config import settings
+    from artemis.llm.providers import provider_credentials_available
+
+    for attr in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GCP_API_KEY"):
+        monkeypatch.setattr(settings, attr, None)
+        monkeypatch.delenv(attr, raising=False)
+
+    # No key and no default → the built-in cannot authenticate.
+    assert provider_credentials_available("google") is False
+    # ... a key exported after import still counts.
+    monkeypatch.setenv("GEMINI_API_KEY", "env-key-123456")
+    assert provider_credentials_available("google") is True
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    # Key-less endpoints (local/ADC) are validated on their own path.
+    assert provider_credentials_available("ollama") is True
+    assert provider_credentials_available("vertexai") is True
+
+    # Registering a provider makes it the default, which satisfies the check.
+    registry = LLMProviderRegistry(path=tmp_path / "llm_providers.json")
+    registry.add(name="my-proxy", api_key="sk-1", api_base="https://a.example/v1", model="gpt-4o")
+    monkeypatch.setattr(providers_module, "provider_registry", registry)
+    assert provider_credentials_available("google") is True
+
+    # Dropping the default restores the built-in requirement.
+    registry.remove("my-proxy")
+    assert provider_credentials_available("google") is False
+
+
+def test_validate_provider_accepts_default_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_default_llm_provider
+) -> None:
+    """Config validation must not demand GOOGLE_API_KEY when a default is set."""
+    from artemis.config import settings
+    from third_party.mobile_use.config.llm import LLM
+
+    for attr in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GCP_API_KEY"):
+        monkeypatch.setattr(settings, attr, None)
+        monkeypatch.delenv(attr, raising=False)
+
+    planner = LLM(provider="google", model="gemini-3.8-flash")
+    with pytest.raises(Exception, match=r"requires GOOGLE_API_KEY in \.env"):
+        planner.validate_provider("Planner")
+
+    registry = LLMProviderRegistry(path=tmp_path / "llm_providers.json")
+    registry.add(name="my-proxy", api_key="sk-1", api_base="https://a.example/v1", model="gpt-4o")
+    monkeypatch.setattr(providers_module, "provider_registry", registry)
+
+    planner.validate_provider("Planner")  # no raise: the default provider is the LLM
 
 
 def test_registry_survives_reload(registry: LLMProviderRegistry) -> None:
@@ -146,9 +208,16 @@ def test_provider_model_validation() -> None:
 def test_build_models_list_url() -> None:
     from artemis.llm.providers import build_models_list_url
 
-    assert build_models_list_url("https://api.example.com/v1") == "https://api.example.com/v1/models"
-    assert build_models_list_url("https://api.example.com/v1/") == "https://api.example.com/v1/models"
-    assert build_models_list_url("https://api.example.com/v1/models") == "https://api.example.com/v1/models"
+    assert (
+        build_models_list_url("https://api.example.com/v1") == "https://api.example.com/v1/models"
+    )
+    assert (
+        build_models_list_url("https://api.example.com/v1/") == "https://api.example.com/v1/models"
+    )
+    assert (
+        build_models_list_url("https://api.example.com/v1/models")
+        == "https://api.example.com/v1/models"
+    )
     assert build_models_list_url("http://localhost:11434/v1") == "http://localhost:11434/v1/models"
 
     with pytest.raises(ValueError):

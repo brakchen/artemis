@@ -144,7 +144,12 @@ class Agent(AgentBase):
                 key = settings.GOOGLE_API_KEY.get_secret_value()
 
             if not key:
-                logger.warning("Skipping LLM pre-warming: No API key available.")
+                # Gemini-only warm-up: a custom default provider (OpenAI-compatible
+                # gateway) is warmed up by the router on its first request.
+                logger.info(
+                    "Skipping Gemini LLM pre-warming: no Google API key available. "
+                    "Custom default providers warm up on first use."
+                )
                 publish_startup_progress(
                     "model_ready",
                     "Model connection will initialize on first use",

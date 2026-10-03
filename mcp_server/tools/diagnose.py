@@ -230,6 +230,11 @@ def _credential_steps(env_file: str | None) -> list[str]:
         "  Ask the user to add a provider key (for example GEMINI_API_KEY=...) to "
         f"{location}, or to the MCP server's env block in the IDE's MCP config. "
         "Never ask them to paste the key into the chat.",
+        "  Alternative without any built-in key: register a custom OpenAI-compatible "
+        "provider and make it the default — `artemis providers add --name <name> "
+        "--base-url <url> --model <model>` (run it in a terminal; the registry file is "
+        "re-read on every request, so no MCP restart is needed). Every node then uses "
+        "that provider.",
         "  `artemis init` is interactive and cannot run from a tool call; edit the env file instead.",
         "  Keys are read when the server starts: restart the MCP server (reload MCP servers in "
         "the IDE) after adding one.",

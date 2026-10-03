@@ -19,7 +19,6 @@
 """LLM provider models, the base LLM configuration model and its loaders."""
 
 from collections.abc import Callable
-import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,7 +27,6 @@ from google.auth.exceptions import DefaultCredentialsError
 from pydantic import BaseModel, ValidationError
 
 from artemis.config.constants import AgentNode, LLMProvider, LLMUtilsNode
-from artemis.config.settings import settings
 from artemis.utils.cython_compat import CyFunctionDetector
 from third_party.mobile_use.utils.file import load_jsonc
 from third_party.mobile_use.utils.logger import get_logger
@@ -37,6 +35,16 @@ logger = get_logger(__name__)
 
 LLMUtilsNodeWithFallback = LLMUtilsNode
 AgentNodeWithFallback = AgentNode
+
+#: Environment variable that satisfies each key-carrying built-in provider,
+#: used only to render an actionable "missing key" message.
+_BUILTIN_ENV_KEY: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openrouter": "OPEN_ROUTER_API_KEY",
+    "xai": "XAI_API_KEY",
+}
 
 
 def validate_vertex_ai_credentials() -> None:
@@ -65,24 +73,32 @@ class LLM(BaseModel):
     enable_grounding: bool | None = None
 
     def validate_provider(self, name: str) -> None:
-        """Ensure the required API key or credentials exist in settings for this provider."""
-        if self.provider == "openai":
-            if not settings.OPENAI_API_KEY:
-                raise Exception(f"{name} requires OPENAI_API_KEY in .env")
-        elif self.provider == "google":
-            if not settings.GOOGLE_API_KEY:
-                raise Exception(f"{name} requires GOOGLE_API_KEY in .env")
-        elif self.provider == "vertexai":
+        """Ensure this node's provider can authenticate a request.
+
+        A registered default provider (``artemis providers add`` + the default
+        entry) satisfies the check for every key-carrying built-in: when one is
+        set it *is* the LLM this node runs on, so no ``..._API_KEY`` is needed
+        in ``.env``. The configured built-in key itself also still counts.
+        """
+        provider = str(self.provider or "").strip().lower()
+
+        if provider == "vertexai":
+            # Vertex AI authenticates with Application Default Credentials and
+            # cannot be replaced by the registry (its endpoints are Google's).
             validate_vertex_ai_credentials()
-        elif self.provider == "anthropic":
-            if not (settings.ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY")):
-                raise Exception(f"{name} requires ANTHROPIC_API_KEY in .env")
-        elif self.provider == "openrouter":
-            if not settings.OPEN_ROUTER_API_KEY:
-                raise Exception(f"{name} requires OPEN_ROUTER_API_KEY in .env")
-        elif self.provider == "xai":
-            if not settings.XAI_API_KEY:
-                raise Exception(f"{name} requires XAI_API_KEY in .env")
+            return
+
+        from artemis.llm.providers import provider_credentials_available
+
+        if provider_credentials_available(provider):
+            return
+
+        env_var = _BUILTIN_ENV_KEY.get(provider, f"{provider.upper()}_API_KEY")
+        raise Exception(
+            f"{name} requires {env_var} in .env — or register a custom provider and "
+            "make it the default (`artemis providers add --name <name> --base-url <url> "
+            "--model <model>`), which is then used for every node."
+        )
 
     def __str__(self) -> str:
         return f"{self.provider}/{self.model}"

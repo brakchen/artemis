@@ -393,7 +393,7 @@ async def test_probe_target_serial_forwards_to_adb_probe():
 
 
 @pytest.mark.asyncio
-async def test_credentials_probe_and_dynamic_update():
+async def test_credentials_probe_and_dynamic_update(no_default_llm_provider):
     """Verify dynamic API key updates and metadata reflection."""
     from artemis.config import settings
 

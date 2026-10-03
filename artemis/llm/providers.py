@@ -26,15 +26,23 @@ Resolution order used by :func:`resolve_provider_for_model`:
 
 1. an explicit registry entry name (``"my-proxy"``) → that entry;
 2. ``"default"`` / ``"auto"`` / empty → the registry default provider;
-3. a built-in provider (google/openai/anthropic/...) → unchanged behaviour, but
-   when the built-in has **no** API key configured and a default custom provider
-   exists, that default is used instead (logged), so "set default provider"
-   actually takes effect without editing ``artemis.jsonc``.
+3. a key-carrying built-in provider (google/openai/anthropic/...) → replaced by
+   the registry default provider **whenever one is set**, whether or not the
+   built-in has its own API key (source ``"default"``, or ``"fallback"`` when
+   the built-in was credential-less). That is the "as long as a default is
+   set, every node uses the default LLM" rule: operators who register a custom
+   provider never need ``GOOGLE_API_KEY``/``OPENAI_API_KEY`` in ``.env``;
+4. anything else (local ``ollama``/``vllm``, ``vertexai`` ADC, unknown names)
+   → untouched.
+
+Removing the default (``artemis providers remove <name>`` when it is the last
+one, or registering another one as default) restores built-in behaviour.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -85,6 +93,19 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 KEY_REQUIRED_BUILTINS: frozenset[str] = frozenset(
     {"google", "gemini", "openai", "anthropic", "claude", "openrouter", "xai", "grok"}
 )
+
+#: Environment variables that satisfy each key-carrying built-in. Mirrors
+#: ``settings.get_api_key`` but also sees variables exported after import.
+_BUILTIN_ENV_KEYS: dict[str, tuple[str, ...]] = {
+    "google": ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GCP_API_KEY"),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GCP_API_KEY"),
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "claude": ("ANTHROPIC_API_KEY",),
+    "openrouter": ("OPEN_ROUTER_API_KEY",),
+    "xai": ("XAI_API_KEY",),
+    "grok": ("XAI_API_KEY",),
+}
 
 
 class LLMProvider(BaseModel):
@@ -348,6 +369,19 @@ def get_providers_file() -> Path:
 provider_registry = LLMProviderRegistry()
 
 
+def active_default_provider() -> LLMProvider | None:
+    """The registry's default provider when it can actually serve traffic.
+
+    Disabled entries count as unset: ``set_default`` can name an entry the
+    operator later switched off, and nothing should silently route to a dead
+    endpoint.
+    """
+    entry = provider_registry.default_provider()
+    if entry is None or not entry.enabled:
+        return None
+    return entry
+
+
 class ProviderResolution(BaseModel):
     """Outcome of mapping a configured ``provider`` value onto the registry."""
 
@@ -355,7 +389,7 @@ class ProviderResolution(BaseModel):
     entry: LLMProvider | None = Field(default=None, description="Matching registry entry, if any")
     source: str = Field(
         default="builtin",
-        description="How the entry was chosen: explicit | alias | fallback | builtin",
+        description="How the entry was chosen: explicit | alias | default | fallback | builtin",
     )
 
 
@@ -375,9 +409,10 @@ def resolve_provider_for_model(
     * ``builtin``  — untouched built-in provider, ``entry`` is ``None``.
 
     ``builtin_has_key`` tells us whether the *built-in* provider configured for
-    this model already has credentials; when it is ``False`` the default
-    provider is used instead. ``None`` disables the fallback (providers that
-    need no key, or unknown names).
+    this model already has credentials. It only selects the ``source`` label
+    (``fallback`` = the built-in had no key, ``default`` = the default provider
+    won on precedence); either way an enabled registry default provider takes
+    the call. ``None`` means "key status unknown" and is treated as ``default``.
     """
     raw = "" if provider_value is None else str(provider_value).strip().lower()
     entry = provider_registry.resolve(raw)
@@ -385,17 +420,26 @@ def resolve_provider_for_model(
         source = "alias" if raw in ("", "default", "auto") else "explicit"
         return ProviderResolution(provider=entry.kind, entry=entry, source=source)
 
-    # `builtin_has_key` is tri-state: None = "not a key-carrying built-in / unknown",
-    # which must never trigger substitution — only an explicit False does.
-    missing_key = isinstance(builtin_has_key, bool) and not builtin_has_key
-    if raw in KEY_REQUIRED_BUILTINS and missing_key:
-        fallback = provider_registry.default_provider()
-        if fallback is not None and fallback.enabled:
-            logger.info(
-                f"Provider '{raw}' has no API key configured; using default "
-                f"LLM provider '{fallback.name}' instead."
+    if raw in KEY_REQUIRED_BUILTINS:
+        default = active_default_provider()
+        if default is not None:
+            # A registered default provider is *the* LLM of the product: it
+            # takes every key-carrying built-in, with or without its own key.
+            missing_key = isinstance(builtin_has_key, bool) and not builtin_has_key
+            if missing_key:
+                logger.info(
+                    f"Provider '{raw}' has no API key configured; using default "
+                    f"LLM provider '{default.name}' instead."
+                )
+            else:
+                logger.debug(
+                    f"Default LLM provider '{default.name}' takes precedence over built-in '{raw}'."
+                )
+            return ProviderResolution(
+                provider=default.kind,
+                entry=default,
+                source="fallback" if missing_key else "default",
             )
-            return ProviderResolution(provider=fallback.kind, entry=fallback, source="fallback")
 
     return ProviderResolution(provider=provider_value, entry=None, source="builtin")
 
@@ -405,17 +449,48 @@ def builtin_provider_has_key(provider_value: Any) -> bool | None:
 
     Returns ``None`` for names that are not key-carrying built-ins (local
     ollama/vllm endpoints, registry names, aliases), which disables the
-    default-provider fallback for them.
+    default-provider reporting for them.
     """
     raw = "" if provider_value is None else str(provider_value).strip().lower()
     if raw not in KEY_REQUIRED_BUILTINS:
         return None
     try:
         from artemis.config import settings
+        from artemis.config.settings import is_placeholder_key
 
-        return settings.get_api_key(raw) is not None
+        if settings.get_api_key(raw) is not None:
+            return True
+        # ``settings`` snapshots the environment at import time; a key exported
+        # later (or written by ``artemis init``) must still count.
+        for env_name in _BUILTIN_ENV_KEYS.get(raw, ()):
+            val = os.environ.get(env_name)
+            if val and val.strip() and not is_placeholder_key(val):
+                return True
+        return False
     except Exception:  # pylint: disable=broad-exception-caught
         return None
+
+
+def provider_credentials_available(provider_value: Any) -> bool:
+    """Whether ``provider_value`` can actually authenticate a request.
+
+    True when the name resolves to a registry entry (explicit or default alias),
+    when it is a key-carrying built-in that has a key *or* an enabled registry
+    default provider, or when it needs no key at all (local endpoints, Vertex AI
+    ADC — those are validated on their own path).
+
+    This is the single gate used by config validation (``LLM.validate_provider``)
+    and the credentials readiness probe, so a registered default provider
+    satisfies every "requires ..._API_KEY in .env" check without a built-in key.
+    """
+    raw = "" if provider_value is None else str(provider_value).strip().lower()
+    if provider_registry.resolve(raw) is not None:
+        return True
+    if raw in KEY_REQUIRED_BUILTINS:
+        if active_default_provider() is not None:
+            return True
+        return builtin_provider_has_key(raw) is True
+    return True
 
 
 class ResolvedModelConfig(BaseModel):
@@ -464,7 +539,7 @@ def resolve_model_config(
     if entry is not None:
         api_key = entry.api_key.get_secret_value()
         api_base = entry.api_base
-        if model_is_alias or resolution.source == "fallback":
+        if model_is_alias or resolution.source in ("fallback", "default"):
             # The entry carries its own model pair (default + fallback),
             # mirroring artemis.jsonc's default/fallback block.
             preferred = entry.fallback_model if use_fallback else entry.model
