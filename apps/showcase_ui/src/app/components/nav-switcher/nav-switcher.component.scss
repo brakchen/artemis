@@ -113,3 +113,43 @@
     }
   }
 }
+
+  /* 语言切换按钮：与 .nav-tab-btn 同风格，左侧加分隔线区分功能区 */
+  .lang-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 12px;
+    box-sizing: border-box;
+    border: none;
+    border-left: 1px solid rgba(203, 213, 225, 0.7);
+    border-radius: 15px;
+    background: transparent;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #475569;
+    cursor: pointer;
+    line-height: 1;
+    white-space: nowrap;
+    transition: background 0.18s ease, color 0.18s ease;
+
+    .tab-icon {
+      font-size: 17px;
+    }
+
+    .tab-label {
+      letter-spacing: 0.2px;
+    }
+
+    &:hover {
+      background: rgba(226, 232, 240, 0.75);
+      color: #1e293b;
+    }
+
+    &:active {
+      transform: scale(0.97);
+    }
+  }

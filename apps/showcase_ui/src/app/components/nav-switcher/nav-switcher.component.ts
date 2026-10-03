@@ -14,14 +14,17 @@
  * limitations under the License.
  */
 
-import { Component, ChangeDetectionStrategy } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject } from '@angular/core';
 
 import { RouterLink, RouterLinkActive } from '@angular/router';
+
+import { I18nService } from '../../core/i18n/i18n.service';
+import { TranslatePipe } from '../../core/i18n/translate.pipe';
 
 @Component({
   selector: 'app-nav-switcher',
   standalone: true,
-  imports: [RouterLink, RouterLinkActive],
+  imports: [RouterLink, RouterLinkActive, TranslatePipe],
   template: `
     <nav class="floating-nav-switcher" aria-label="Main Navigation">
       <a 
@@ -32,7 +35,7 @@ import { RouterLink, RouterLinkActive } from '@angular/router';
         title="Return to Home Launcher to start a new task"
       >
         <span class="material-symbols-outlined tab-icon">add_task</span>
-        <span class="tab-label">New / Home</span>
+        <span class="tab-label">{{ 'New / Home' | t }}</span>
       </a>
       <a 
         routerLink="/workspace" 
@@ -41,11 +44,23 @@ import { RouterLink, RouterLinkActive } from '@angular/router';
         title="Open Workspace"
       >
         <span class="material-symbols-outlined tab-icon">space_dashboard</span>
-        <span class="tab-label">Workspace</span>
+        <span class="tab-label">{{ 'Workspace' | t }}</span>
       </a>
+      <button
+        type="button"
+        class="lang-toggle-btn"
+        (click)="i18n.toggle()"
+        [attr.aria-label]="i18n.isZh() ? 'Switch to English' : '切换为中文'"
+        [title]="i18n.isZh() ? 'Switch to English' : '切换为中文'"
+      >
+        <span class="material-symbols-outlined tab-icon">language</span>
+        <span class="tab-label">{{ i18n.isZh() ? 'EN' : '中文' }}</span>
+      </button>
     </nav>
   `,
   changeDetection: ChangeDetectionStrategy.Eager,
   styleUrls: ['./nav-switcher.component.scss']
 })
-export class NavSwitcherComponent {}
+export class NavSwitcherComponent {
+  public readonly i18n = inject(I18nService);
+}

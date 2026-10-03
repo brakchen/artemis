@@ -18,11 +18,12 @@ import { Component, inject, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { AgentService } from '../../services/agent.service';
+import { TranslatePipe } from '../../core/i18n/translate.pipe';
 
 @Component({
   selector: 'app-legacy-agent-stream',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, TranslatePipe],
   templateUrl: './legacy-agent-stream.component.html',
   changeDetection: ChangeDetectionStrategy.Eager,
   styleUrl: './legacy-agent-stream.component.scss'

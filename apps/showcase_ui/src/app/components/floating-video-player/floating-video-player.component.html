@@ -48,19 +48,19 @@ limitations under the License.
               class="mode-btn"
               [class.active]="agentService.playerMode() === 'video'"
               (click)="agentService.setPlayerMode('video')"
-              title="Video Recording"
+              title="{{ 'Video Recording' | t }}"
               >
               <span class="material-symbols-outlined mode-icon">videocam</span>
-              <span>Video</span>
+              <span>{{ 'Video' | t }}</span>
             </button>
             <button
               class="mode-btn"
               [class.active]="agentService.playerMode() === 'steps'"
               (click)="agentService.setPlayerMode('steps')"
-              title="Step Screenshot Replay"
+              title="{{ 'Step Screenshot Replay' | t }}"
               >
               <span class="material-symbols-outlined mode-icon">slideshow</span>
-              <span>Steps</span>
+              <span>{{ 'Steps' | t }}</span>
             </button>
           </div>
         }
@@ -88,7 +88,7 @@ limitations under the License.
         <button
           class="header-btn close-btn"
           (click)="agentService.closeVideoPlayer()"
-          title="Close"
+          title="{{ 'Close' | t }}"
           aria-label="Close"
           >
           <span class="material-symbols-outlined">close</span>
@@ -106,14 +106,14 @@ limitations under the License.
                 class="live-screen-img"
                 [src]="liveStreamUrl()"
                 (error)="onLiveStreamError()"
-                alt="Live Device Screen"
+                alt="{{ 'Live Device Screen' | t }}"
                 />
                 <div class="live-status-overlay">
                   <div class="live-badge">
                     <span class="pulse-dot"></span>
-                    <span>LIVE</span>
+                    <span>{{ 'LIVE' | t }}</span>
                   </div>
-                  <button class="live-refresh-btn" (click)="retryLiveStream()" title="Refresh Live Stream">
+                  <button class="live-refresh-btn" (click)="retryLiveStream()" title="{{ 'Refresh Live Stream' | t }}">
                     <span class="material-symbols-outlined">refresh</span>
                   </button>
                 </div>
@@ -124,11 +124,10 @@ limitations under the License.
                 <div class="fallback-icon-wrap">
                   <span class="material-symbols-outlined fallback-icon">phonelink_off</span>
                 </div>
-                <h4 class="fallback-title">Device Stream Connecting</h4>
-                <p class="fallback-desc">Waiting for ADB device screen stream...</p>
+                <h4 class="fallback-title">{{ 'Device Stream Connecting' | t }}</h4>
+                <p class="fallback-desc">{{ 'Waiting for ADB device screen stream...' | t }}</p>
                 <button class="retry-btn" (click)="retryLiveStream()">
-                  <span class="material-symbols-outlined">refresh</span> Reconnect
-                </button>
+                  <span class="material-symbols-outlined">refresh</span>{{ 'Reconnect' | t }}</button>
               </div>
             }
           }
@@ -148,7 +147,7 @@ limitations under the License.
                 @if (agentService.recordingPlaybackStatus() === 'failed' || videoLoadError()) {
                   <div class="step-replay-notice">
                     <span class="material-symbols-outlined notice-icon">info</span>
-                    <span>Screen recording unavailable. Replaying step-by-step screenshots.</span>
+                    <span>{{ 'Screen recording unavailable. Replaying step-by-step screenshots.' | t }}</span>
                   </div>
                 }
                 <!-- Step Image Viewport with Action Coordinates Overlay -->
@@ -161,14 +160,14 @@ limitations under the License.
                   @if (isStepImageLoading()) {
                     <div class="step-image-loading-state">
                       <span class="material-symbols-outlined spinning-icon">progress_activity</span>
-                      <span>Loading screenshot...</span>
+                      <span>{{ 'Loading screenshot...' | t }}</span>
                     </div>
                   }
                   <!-- Error / Missing Image Fallback -->
                   @if (stepImageError() && !isStepImageLoading()) {
                     <div class="step-image-error-state">
                       <span class="material-symbols-outlined broken-icon">broken_image</span>
-                      <span>Screenshot preview unavailable for this step</span>
+                      <span>{{ 'Screenshot preview unavailable for this step' | t }}</span>
                     </div>
                   }
                   <!-- Device Screen Frame & Action Coordinates Overlay -->
@@ -182,7 +181,7 @@ limitations under the License.
                         (load)="onStepImageLoad()"
                         (error)="onStepImageError()"
                         (click)="openImageInNewTab()"
-                        title="Click to view image in new tab"
+                        title="{{ 'Click to view image in new tab' | t }}"
                         />
                         <!-- Action Visual Coordinates Overlay (Touch point, swipe arrow, sequence path) -->
                         <div
@@ -218,18 +217,14 @@ limitations under the License.
                                 class="toggle-btn"
                                 [class.active]="viewMode() === 'pre'"
                                 (click)="setStepViewMode('pre', $event)"
-                                title="View screen before action (with touch coordinates)"
-                                >
-                                Pre
-                              </button>
+                                title="{{ 'View screen before action (with touch coordinates)' | t }}"
+                                >{{ 'Pre' | t }}</button>
                               <button
                                 class="toggle-btn"
                                 [class.active]="viewMode() === 'post'"
                                 (click)="setStepViewMode('post', $event)"
-                                title="View resulting screen after action executed"
-                                >
-                                Post
-                              </button>
+                                title="{{ 'View resulting screen after action executed' | t }}"
+                                >{{ 'Post' | t }}</button>
                             </div>
                           }
                           <!-- Pin Card Button -->
@@ -283,15 +278,15 @@ limitations under the License.
                             <span class="material-symbols-outlined">{{ isStepPlaying() ? 'pause' : 'play_arrow' }}</span>
                           </button>
                           <!-- Previous Frame Button -->
-                          <button class="ctrl-btn" (click)="prevStepFrame()" [disabled]="activeStepIndex() <= 0" title="Previous Step">
+                          <button class="ctrl-btn" (click)="prevStepFrame()" [disabled]="activeStepIndex() <= 0" title="{{ 'Previous Step' | t }}">
                             <span class="material-symbols-outlined">skip_previous</span>
                           </button>
                           <!-- Next Frame Button -->
-                          <button class="ctrl-btn" (click)="nextStepFrame()" [disabled]="activeStepIndex() >= totalStepFrames() - 1" title="Next Step">
+                          <button class="ctrl-btn" (click)="nextStepFrame()" [disabled]="activeStepIndex() >= totalStepFrames() - 1" title="{{ 'Next Step' | t }}">
                             <span class="material-symbols-outlined">skip_next</span>
                           </button>
                           <!-- Step Replay / Reset -->
-                          <button class="ctrl-btn" (click)="restartStep()" title="Replay from start">
+                          <button class="ctrl-btn" (click)="restartStep()" title="{{ 'Replay from start' | t }}">
                             <span class="material-symbols-outlined">replay</span>
                           </button>
                           <!-- Step Counter Display -->
@@ -318,7 +313,7 @@ limitations under the License.
                             <span class="material-symbols-outlined">repeat</span>
                           </button>
                           <!-- Open in new tab -->
-                          <button class="ctrl-btn" (click)="openImageInNewTab()" title="Open image in new tab">
+                          <button class="ctrl-btn" (click)="openImageInNewTab()" title="{{ 'Open image in new tab' | t }}">
                             <span class="material-symbols-outlined">open_in_new</span>
                           </button>
                         </div>
@@ -368,7 +363,7 @@ limitations under the License.
                               <span class="material-symbols-outlined">{{ isPlaying() ? 'pause' : 'play_arrow' }}</span>
                             </button>
                             <!-- Replay / Reset -->
-                            <button class="ctrl-btn" (click)="restart()" title="Replay from start">
+                            <button class="ctrl-btn" (click)="restart()" title="{{ 'Replay from start' | t }}">
                               <span class="material-symbols-outlined">replay</span>
                             </button>
                             <!-- Time Display -->
@@ -399,7 +394,7 @@ limitations under the License.
                               <span class="material-symbols-outlined">{{ isMuted() ? 'volume_off' : 'volume_up' }}</span>
                             </button>
                             <!-- Open in new tab -->
-                            <button class="ctrl-btn" (click)="openInNewTab()" title="Open video in new tab">
+                            <button class="ctrl-btn" (click)="openInNewTab()" title="{{ 'Open video in new tab' | t }}">
                               <span class="material-symbols-outlined">open_in_new</span>
                             </button>
                           </div>
@@ -421,8 +416,7 @@ limitations under the License.
                       </p>
                       @if (agentService.recordingPlaybackStatus() === 'failed' || videoLoadError()) {
                         <button class="retry-btn" (click)="videoLoadError.set(false); agentService.retryVideoRecording()">
-                          <span class="material-symbols-outlined">refresh</span> Retry
-                        </button>
+                          <span class="material-symbols-outlined">refresh</span>{{ 'Retry' | t }}</button>
                       }
                     </div>
                   }
