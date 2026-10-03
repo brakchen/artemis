@@ -43,6 +43,10 @@ from artemis.config import (
 from artemis.context import ArtemisContext
 from artemis.data_engine.trace import CURRENT_TRACE_ID, DataEngineCallbackHandler
 from artemis.llm.google import is_google_chat_model, is_google_provider
+from artemis.llm.providers import (
+    KEY_REQUIRED_BUILTINS,
+    resolve_provider_for_model,
+)
 from artemis.llm.reliability import (
     CircuitBreaker,
     FailureCategory,
@@ -893,6 +897,24 @@ def get_google_llm(
     return ModelFactory.create_model(ep)
 
 
+def _builtin_provider_has_key(provider_value: Any) -> bool | None:
+    """Whether the configured built-in provider already has credentials.
+
+    Returns ``None`` for names that are not key-carrying built-ins (local
+    ollama/vllm endpoints, registry names, aliases), which disables the
+    default-provider fallback for them.
+    """
+    raw = "" if provider_value is None else str(provider_value).strip().lower()
+    if raw not in KEY_REQUIRED_BUILTINS:
+        return None
+    try:
+        from artemis.config import settings
+
+        return settings.get_api_key(raw) is not None
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+
+
 def _resolve_endpoint(
     ctx: ArtemisContext,
     name: str,
@@ -923,14 +945,45 @@ def _resolve_endpoint(
         val = getattr(obj, attr, None)
         return val if isinstance(val, expected_type) else None
 
-    provider_val = getattr(cfg, "provider", "google")
-    model_val = getattr(cfg, "model", "gemini-2.5-flash")
+    provider_val = getattr(cfg, "provider", None) or "google"
+    raw_model = getattr(cfg, "model", None)
+    model_val = "" if raw_model is None else str(raw_model).strip()
+    model_is_alias = model_val.lower() in ("", "default", "auto")
+
+    # User-registered providers (OpenAI-compatible base_url + api_key) live in
+    # the LLM provider registry: an explicit entry name, the "default" alias, or
+    # — when the configured built-in provider has no credentials at all — the
+    # registry default provider (see artemis.llm.providers).
+    resolution = resolve_provider_for_model(
+        provider_val,
+        builtin_has_key=_builtin_provider_has_key(provider_val),
+    )
+    api_key: str | None = None
+    api_base: str | None = None
+    provider_temperature: float | None = None
+    provider_timeout: float | None = None
+    if resolution.entry is not None:
+        entry = resolution.entry
+        api_key = entry.api_key.get_secret_value()
+        api_base = entry.api_base
+        provider_temperature = entry.temperature
+        provider_timeout = entry.timeout_seconds
+        if model_is_alias or resolution.source == "fallback":
+            # The entry carries its own model pair (default + fallback), mirroring
+            # artemis.jsonc's default/fallback block. An alias or a substituted
+            # provider would otherwise receive a model name from another vendor.
+            preferred = entry.fallback_model if use_fallback else entry.model
+            model_val = preferred or entry.model or model_val
+    if not model_val:
+        model_val = "gemini-2.5-flash"
 
     return ModelEndpoint(
-        provider=ModelProvider.from_string(provider_val),
-        model_name=str(model_val),
-        temperature=_get_val(cfg, "temperature", (int, float)) or 0.0,
-        timeout_seconds=_get_val(cfg, "timeout", (int, float)) or 60.0,
+        provider=ModelProvider.from_string(resolution.provider),
+        model_name=model_val,
+        api_key=api_key,
+        api_base=api_base,
+        temperature=_get_val(cfg, "temperature", (int, float)) or provider_temperature or 0.0,
+        timeout_seconds=_get_val(cfg, "timeout", (int, float)) or provider_timeout or 60.0,
         thinking_budget=_get_val(cfg, "thinking_budget", int),
         thinking_level=_get_val(cfg, "thinking_level", str),
         reasoning_effort=_get_val(cfg, "reasoning_effort", str),

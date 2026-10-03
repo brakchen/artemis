@@ -22,6 +22,7 @@ from artemis.interfaces.cli.commands.doctor import doctor_command
 from artemis.interfaces.cli.commands.helper import helper_app
 from artemis.interfaces.cli.commands.init import init_command
 from artemis.interfaces.cli.commands.mcp import mcp_command
+from artemis.interfaces.cli.commands.providers import providers_app
 from artemis.interfaces.cli.commands.run import run_command
 from artemis.interfaces.cli.commands.server import server_app
 from artemis.interfaces.cli.commands.server_lifecycle import (
@@ -63,6 +64,11 @@ app.command(name="doctor", help="Check system prerequisites, device status, and 
 app.command(name="batch", help="Execute a batch sequence of automation tasks.")(batch_command)
 app.command(name="mcp", help="Start the Artemis Model Context Protocol (MCP) server.")(mcp_command)
 app.add_typer(server_app, name="server", help="Cloud Run proxy and web dashboard server.")
+app.add_typer(
+    providers_app,
+    name="providers",
+    help="Manage OpenAI-compatible LLM providers (API keys, base URLs, default provider).",
+)
 app.add_typer(trace_app, name="trace", help="Inspect and query execution traces.")
 app.add_typer(
     helper_app, name="helper", help="Manage the Accessibility Helper APK on attached devices."

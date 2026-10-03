@@ -578,24 +578,32 @@
               <span class="metric-label">Default Model</span>
               <div class="metric-val-pill">
                 <span class="provider-dot"></span>
-                <span class="provider-name">{{ modelConfigEnv()?.default_model?.provider || 'google' }}</span>
+                <span class="provider-name">{{ effectiveDefaultModel()?.provider || 'google' }}</span>
                 <span class="model-divider">/</span>
-                <span class="model-name">{{ modelConfigEnv()?.default_model?.model || 'gemini-3.8-flash' }}</span>
+                <span class="model-name">{{ effectiveDefaultModel()?.model || 'gemini-3.8-flash' }}</span>
               </div>
             </div>
           
-            @if (modelConfigEnv()?.default_model?.fallback) {
+            @if (effectiveDefaultModel()) {
             <div class="summary-metric">
               <span class="metric-label">Fallback Model</span>
               <div class="metric-val-pill secondary">
-                <span>{{ modelConfigEnv()?.default_model?.fallback?.provider }}/{{
-                  modelConfigEnv()?.default_model?.fallback?.model }}</span>
+                <span>{{ effectiveDefaultModel()?.fallback?.provider }}/{{ effectiveDefaultModel()?.fallback?.model }}</span>
               </div>
             </div>
             }
           
           </div>
           
+          @if (effectiveOverrideActive()) {
+          <div class="config-effective-hint">
+            <span class="material-symbols-outlined">info</span>
+            <span>Using default LLM provider
+              <code>{{ effectiveDefaultModel()?.provider }}</code> — the configured
+              <code>{{ configuredDefaultLabel() }}</code> has no API key registered.</span>
+          </div>
+          }
+
           <!-- Full JSONC Viewer -->
           @if (showFullConfigFile()) {
           <div class="jsonc-viewer-box">
@@ -651,7 +659,264 @@
           }
         </div>
         </div>
-        
+
+      <!-- Section 3: Custom LLM Providers (OpenAI-compatible) -->
+      <div class="inspector-card">
+        <div class="inspector-card-header">
+          <div class="inspector-header-left">
+            <span class="material-symbols-outlined header-icon">lan</span>
+            <div class="inspector-header-titles">
+              <span class="inspector-title">Custom LLM Providers (OpenAI-compatible)</span>
+              <span class="inspector-subtitle">Register several providers, pick one default · stored in
+                <code>{{ llmRegistryPath() || 'llm_providers.json' }}</code></span>
+            </div>
+          </div>
+
+          <button type="button" class="btn-file-action" title="Refresh provider list" (click)="loadLlmProviders()">
+            <span class="material-symbols-outlined">refresh</span>
+            <span>Refresh</span>
+          </button>
+        </div>
+
+        <!-- Registered providers -->
+        <div class="provider-list">
+          @for (p of llmProviders(); track p.name) {
+          <div class="provider-item" [class.is-default]="p.name === llmDefaultProvider()">
+            <div class="provider-item-head">
+              <code class="provider-item-name">{{ p.name }}</code>
+              @if (p.name === llmDefaultProvider()) {
+              <span class="provider-item-default">
+                <span class="material-symbols-outlined">star</span>
+                <span>Default</span>
+              </span>
+              }
+              <div class="provider-item-actions">
+                @if (p.name !== llmDefaultProvider()) {
+                <button type="button" class="btn-icon-action" title="Make this the default provider"
+                  (click)="setDefaultLlmProvider(p.name)">
+                  <span class="material-symbols-outlined">star</span>
+                </button>
+                }
+                <button type="button" class="btn-icon-action" title="Remove provider"
+                  (click)="removeLlmProvider(p.name)">
+                  <span class="material-symbols-outlined">delete_outline</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="provider-item-url">{{ p.api_base || 'https://api.openai.com/v1' }}</div>
+
+            <div class="provider-item-chips">
+              <span class="provider-chip">
+                <span class="provider-chip-label">DEFAULT</span>
+                <span class="provider-chip-value">{{ p.model || '—' }}</span>
+              </span>
+              <span class="provider-chip">
+                <span class="provider-chip-label">FALLBACK</span>
+                <span class="provider-chip-value">{{ p.fallback_model || '—' }}</span>
+              </span>
+              <span class="provider-chip">
+                <span class="provider-chip-label">KEY</span>
+                <span class="provider-chip-value">{{ p.key_masked }}</span>
+              </span>
+            </div>
+          </div>
+          } @empty {
+          <div class="provider-empty">
+            <span class="provider-empty-text">
+              <span class="material-symbols-outlined">info</span>
+              <span>No custom providers yet — add one below.</span>
+            </span>
+          </div>
+          }
+        </div>
+
+        <!-- Add / update a provider -->
+        <div class="credentials-input-box ocr-box">
+          <div class="input-box-header">
+            <div class="header-label">
+              <span class="material-symbols-outlined label-icon">add_circle</span>
+              <span>Add Provider (OpenAI-compatible):</span>
+            </div>
+          </div>
+
+          <div class="unified-key-row">
+            <div class="unified-key-wrapper">
+              <span class="material-symbols-outlined key-prefix-icon">badge</span>
+              <input type="text" class="unified-key-input" [ngModel]="newProviderName()"
+                (ngModelChange)="newProviderName.set($event)" placeholder="Provider name (e.g. my-proxy)"
+                spellcheck="false" autocomplete="off" />
+            </div>
+          </div>
+
+          <div class="unified-key-row">
+            <div class="unified-key-wrapper">
+              <span class="material-symbols-outlined key-prefix-icon">link</span>
+              <input type="text" class="unified-key-input" [ngModel]="newProviderBaseUrl()"
+                (ngModelChange)="newProviderBaseUrl.set($event)"
+                placeholder="Base URL (e.g. https://api.example.com/v1)" spellcheck="false" autocomplete="off" />
+            </div>
+
+            <button type="button" class="btn-unified-test" title="Fetch the model list this endpoint exposes"
+              [disabled]="isDiscoveringModels() || isSavingProvider() || !newProviderBaseUrl().trim()"
+              (click)="discoverProviderModels()">
+              @if (isDiscoveringModels()) {
+              <span class="material-symbols-outlined spin">sync</span>
+              <span>Fetching...</span>
+              } @else {
+              <span class="material-symbols-outlined">download</span>
+              <span>Fetch Models</span>
+              }
+            </button>
+          </div>
+
+          <!-- Model config: same shape as the Active Model Configuration above
+               (default model + fallback model). "Fetch Models" fills the picker.
+               The picker is an inline, scrollable panel: native <datalist> popups
+               get clipped by .inspector-card{overflow:hidden} and cannot scroll. -->
+          <div class="unified-key-row">
+            <div class="unified-key-wrapper">
+              <span class="material-symbols-outlined key-prefix-icon">deployed_code</span>
+              <input type="text" class="unified-key-input" [ngModel]="newProviderModel()"
+                (ngModelChange)="newProviderModel.set($event)"
+                placeholder="Default model (Fetch Models to pick one)" spellcheck="false" autocomplete="off" />
+            </div>
+            <button type="button" class="btn-unified-test" title="Pick the default model from the fetched list"
+              [disabled]="!discoveredModels().length" (click)="toggleModelPicker('default')">
+              <span class="material-symbols-outlined">{{ modelPickerOpen() === 'default' ? 'expand_less' : 'expand_more' }}</span>
+              <span>Models</span>
+            </button>
+          </div>
+
+          <div class="unified-key-row">
+            <div class="unified-key-wrapper">
+              <span class="material-symbols-outlined key-prefix-icon">swap_horiz</span>
+              <input type="text" class="unified-key-input" [ngModel]="newProviderFallbackModel()"
+                (ngModelChange)="newProviderFallbackModel.set($event)"
+                placeholder="Fallback model (optional)" spellcheck="false" autocomplete="off" />
+            </div>
+            <button type="button" class="btn-unified-test" title="Pick the fallback model from the fetched list"
+              [disabled]="!discoveredModels().length" (click)="toggleModelPicker('fallback')">
+              <span class="material-symbols-outlined">{{ modelPickerOpen() === 'fallback' ? 'expand_less' : 'expand_more' }}</span>
+              <span>Models</span>
+            </button>
+          </div>
+
+          <!-- Inline model list: lives in the document flow and scrolls itself -->
+          @if (modelPickerOpen(); as which) {
+          <div class="model-picker-menu">
+            <div class="model-picker-head">
+              <span class="material-symbols-outlined">list</span>
+              <span>Picking: {{ which === 'default' ? 'Default Model' : 'Fallback Model' }}</span>
+              <span class="model-picker-count">{{ pickerModels().length }} / {{ discoveredModels().length }} model(s)</span>
+              <button type="button" class="btn-icon-action" title="Close list" (click)="toggleModelPicker(which)">
+                <span class="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            <input type="text" class="model-picker-search" [ngModel]="modelPickerQuery()"
+              (ngModelChange)="modelPickerQuery.set($event)" placeholder="Filter models…"
+              spellcheck="false" autocomplete="off" />
+
+            <div class="model-picker-list">
+              @for (m of pickerModels(); track m.id) {
+              <button type="button" class="model-picker-item"
+                [class.is-active]="(which === 'default' ? newProviderModel() : newProviderFallbackModel()) === m.id"
+                (click)="pickModel(which, m.id)">
+                <code>{{ m.id }}</code>
+                @if (m.name) {
+                <span class="model-picker-name">{{ m.name }}</span>
+                }
+              </button>
+              } @empty {
+              <div class="model-picker-empty">No model matches.</div>
+              }
+            </div>
+          </div>
+          }
+
+          <!-- Model summary: rendered exactly like the default/fallback pills above -->
+          <div class="inspector-summary-row">
+            <div class="summary-metric">
+              <span class="metric-label">Default Model</span>
+              <div class="metric-val-pill">
+                <span class="provider-dot"></span>
+                <span class="provider-name">{{ newProviderName() || '—' }}</span>
+                <span class="model-divider">/</span>
+                <span class="model-name">{{ newProviderModel() || '—' }}</span>
+              </div>
+            </div>
+
+            <div class="summary-metric">
+              <span class="metric-label">Fallback Model</span>
+              <div class="metric-val-pill secondary">
+                <span>{{ newProviderName() || '—' }}/{{ newProviderFallbackModel() || '—' }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="unified-key-row">
+            <div class="unified-key-wrapper">
+              <span class="material-symbols-outlined key-prefix-icon">key</span>
+              <input [type]="showNewProviderKey() ? 'text' : 'password'" class="unified-key-input"
+                [class.is-masked]="!showNewProviderKey()" [ngModel]="newProviderApiKey()"
+                (ngModelChange)="newProviderApiKey.set($event)"
+                placeholder="API key (OpenAI-compatible, e.g. sk-...)" spellcheck="false" autocomplete="off" />
+              <button type="button" class="btn-icon-action"
+                [title]="showNewProviderKey() ? 'Mask Key' : 'Show Plaintext'" (click)="toggleNewProviderKeyVisibility()">
+                <span class="material-symbols-outlined">
+                  {{ showNewProviderKey() ? 'visibility_off' : 'visibility' }}
+                </span>
+              </button>
+            </div>
+
+            <button type="button" class="btn-unified-test" title="Test endpoint + key without saving"
+              [disabled]="isTestingProvider() || isSavingProvider() || !newProviderApiKey().trim()"
+              (click)="testLlmProviderKey()">
+              @if (isTestingProvider()) {
+              <span class="material-symbols-outlined spin">sync</span>
+              <span>Testing...</span>
+              } @else {
+              <span class="material-symbols-outlined">network_check</span>
+              <span>Test</span>
+              }
+            </button>
+
+            <button type="button" class="btn-unified-save"
+              [class.btn-dirty]="!!newProviderName().trim() && !!newProviderApiKey().trim()"
+              [disabled]="isSavingProvider() || isTestingProvider() || !newProviderName().trim() || !newProviderApiKey().trim()"
+              (click)="saveLlmProvider()">
+              @if (isSavingProvider()) {
+              <span class="material-symbols-outlined spin">sync</span>
+              <span>Verifying & Saving...</span>
+              } @else {
+              <span class="material-symbols-outlined">save</span>
+              <span>Verify & Save</span>
+              }
+            </button>
+          </div>
+
+          <label class="provider-check-row">
+            <input type="checkbox" [ngModel]="newProviderMakeDefault()" (ngModelChange)="newProviderMakeDefault.set($event)" />
+            <span class="provider-check-title">Set as the default provider</span>
+            <span class="provider-check-hint">used whenever a model config doesn’t name a provider</span>
+          </label>
+
+          @if (providerSaveMessage()) {
+          <div class="feedback-msg success">
+            <span class="material-symbols-outlined">check_circle</span>
+            <span>{{ providerSaveMessage() }}</span>
+          </div>
+          }
+          @if (providerSaveError()) {
+          <div class="feedback-msg error">
+            <span class="material-symbols-outlined">error</span>
+            <span>{{ providerSaveError() }}</span>
+          </div>
+          }
+        </div>
+      </div>
+
         </div>
     }
     </div>
@@ -750,7 +1015,7 @@
                 </div>
 
                 <!-- Multi-Device Switcher if multiple devices detected -->
-                @if (connectedDevices().length > 1) {
+                @if (1 < connectedDevices().length) {
                   <div class="multi-device-switcher">
                     <span class="switcher-label">Select Active Device:</span>
                     <div class="switcher-chips">
@@ -787,12 +1052,19 @@
                       </div>
                       <div class="tracker-titles">
                         <div class="tracker-main-heading">
+                          @if (emulatorLaunchState(); as st) {
                           <h4 class="tracker-title">
-                            Launching Android Emulator: <span class="avd-highlight">{{ emulatorLaunchState()?.avd_name || activeDevice()?.serial || 'Virtual Device' }}</span>
+                            Launching Android Emulator: <span class="avd-highlight">{{ st.avd_name || 'Virtual Device' }}</span>
                           </h4>
-                          <span class="stage-tag-badge">{{ emulatorLaunchState()?.status === 'booting' ? 'OS Booting' : 'Starting' }}</span>
+                          <span class="stage-tag-badge">{{ st.status === 'booting' ? 'OS Booting' : 'Starting' }}</span>
+                          } @else {
+                          <h4 class="tracker-title">
+                            Device Booting: <span class="avd-highlight">{{ activeDevice()?.serial || 'Android Device' }}</span>
+                          </h4>
+                          <span class="stage-tag-badge">Device Booting</span>
+                          }
                         </div>
-                        <p class="tracker-subtitle">{{ emulatorLaunchState()?.stage_message || 'Initializing Android Virtual Device...' }}</p>
+                        <p class="tracker-subtitle">{{ emulatorLaunchState()?.stage_message || (emulatorLaunchState() ? 'Initializing Android Virtual Device...' : 'Waiting for the connected device to finish booting...') }}</p>
                       </div>
                     </div>
                     <div class="tracker-actions">
@@ -809,9 +1081,9 @@
 
                   <!-- Boot Stepper Progress Flow -->
                   <div class="boot-stepper">
-                    <div class="step-item" [class.done]="emulatorLaunchState()?.progress_percent! >= 35" [class.active]="emulatorLaunchState()?.status === 'starting'">
+                    <div class="step-item" [class.done]="35 <= emulatorLaunchState()?.progress_percent!" [class.active]="emulatorLaunchState()?.status === 'starting'">
                       <div class="step-circle">
-                        @if (emulatorLaunchState()?.progress_percent! >= 35) {
+                        @if (35 <= emulatorLaunchState()?.progress_percent!) {
                           <span class="material-symbols-outlined check-icon">check</span>
                         } @else {
                           <span class="spinner-tiny"></span>
@@ -820,11 +1092,11 @@
                       <span class="step-label">1. Process Start</span>
                     </div>
 
-                    <div class="step-line" [class.done]="emulatorLaunchState()?.progress_percent! >= 35"></div>
+                    <div class="step-line" [class.done]="35 <= emulatorLaunchState()?.progress_percent!"></div>
 
-                    <div class="step-item" [class.done]="emulatorLaunchState()?.progress_percent! >= 65" [class.active]="emulatorLaunchState()?.status === 'waiting_for_adb'">
+                    <div class="step-item" [class.done]="65 <= emulatorLaunchState()?.progress_percent!" [class.active]="emulatorLaunchState()?.status === 'waiting_for_adb'">
                       <div class="step-circle">
-                        @if (emulatorLaunchState()?.progress_percent! >= 65) {
+                        @if (65 <= emulatorLaunchState()?.progress_percent!) {
                           <span class="material-symbols-outlined check-icon">check</span>
                         } @else if (emulatorLaunchState()?.status === 'waiting_for_adb') {
                           <span class="spinner-tiny"></span>
@@ -835,7 +1107,7 @@
                       <span class="step-label">2. ADB Handshake</span>
                     </div>
 
-                    <div class="step-line" [class.done]="emulatorLaunchState()?.progress_percent! >= 65"></div>
+                    <div class="step-line" [class.done]="65 <= emulatorLaunchState()?.progress_percent!"></div>
 
                     <div class="step-item" [class.done]="emulatorLaunchState()?.status === 'ready'" [class.active]="emulatorLaunchState()?.status === 'booting' || adbProbe()?.summary === 'Device Booting'">
                       <div class="step-circle">
@@ -863,10 +1135,10 @@
                   <!-- Animated Progress Bar -->
                   <div class="progress-bar-container">
                     <div class="progress-bar-track">
-                      <div class="progress-bar-fill" [style.width.%]="emulatorLaunchState()?.progress_percent || 25"></div>
+                      <div class="progress-bar-fill" [style.width.%]="emulatorProgressPercent()"></div>
                     </div>
                     <div class="progress-bar-meta">
-                      <span class="progress-percent">{{ emulatorLaunchState()?.progress_percent || 25 }}% Complete</span>
+                      <span class="progress-percent">{{ emulatorProgressPercent() }}% Complete</span>
                       <span class="progress-timer">
                         <span class="material-symbols-outlined timer-icon">timer</span>
                         Elapsed: {{ emulatorLaunchState()?.elapsed_seconds || 0 }}s
@@ -901,7 +1173,7 @@
             }
 
             <!-- STATE B-2: EMULATOR LAUNCH FAILED DIAGNOSTIC CARD -->
-            @if (!isDeviceReady() && !isEmulatorLaunching() && emulatorLaunchState()?.status === 'failed') {
+            @if (!isEmulatorLaunching() && emulatorLaunchState()?.status === 'failed') {
               <div class="emulator-failed-container">
                 <div class="emulator-failed-card">
                   <div class="failed-header">
@@ -971,8 +1243,8 @@
                           <span class="method-title">Android Emulator</span>
                         </div>
                         <span class="method-desc">
-                          @if (installedAvds().length > 0) {
-                            {{ installedAvds().length }} local virtual device{{ installedAvds().length > 1 ? 's' : '' }} available
+                          @if (0 < installedAvds().length) {
+                            {{ installedAvds().length }} local virtual device{{ 1 < installedAvds().length ? 's' : '' }} available
                           } @else {
                             Launch a local Android Virtual Device
                           }
@@ -1077,7 +1349,7 @@
                 @if (activeAdbGuideTab() === 'emulator') {
                   <div class="method-details-panel">
                     
-                    @if (installedAvds().length > 0) {
+                    @if (0 < installedAvds().length) {
                       <div class="avds-section">
                         <div class="section-header-bar">
                           <div class="section-title-group">
@@ -1227,7 +1499,7 @@
                                 <div class="step-title">{{ emuHypervisorTitle() }}</div>
                                 <p class="step-text">{{ emuHypervisorDesc() }}</p>
                                 <div class="code-box small-box">
-                                  <span class="terminal-prefix">{{ effectiveOs() === 'windows' ? 'PS>' : '$' }}</span>
+                                  <span class="terminal-prefix">{{ effectiveOs() === 'windows' ? 'PS\u003E' : '$' }}</span>
                                   <code class="code-text">{{ emuHypervisorCmd() }}</code>
                                   <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'emu_kvm'"
                                     (click)="copyToClipboard(emuHypervisorCmd(), 'emu_kvm')">
@@ -1244,7 +1516,7 @@
                                 <div class="step-title">Download Emulator & System Image (API 34)</div>
                                 <p class="step-text">Install Android 14 Google APIs system image using SDK Manager:</p>
                                 <div class="code-box small-box">
-                                  <span class="terminal-prefix">{{ effectiveOs() === 'windows' ? 'PS>' : '$' }}</span>
+                                  <span class="terminal-prefix">{{ effectiveOs() === 'windows' ? 'PS\u003E' : '$' }}</span>
                                   <code class="code-text">{{ emuSdkInstallCmd() }}</code>
                                   <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'emu_sdk'"
                                     (click)="copyToClipboard(emuSdkInstallCmd(), 'emu_sdk')">
@@ -1261,7 +1533,7 @@
                                 <div class="step-title">Create Virtual Device (Pixel 8 AVD)</div>
                                 <p class="step-text">Initialize a new Android Virtual Device named <code>Pixel_8_API_34</code>:</p>
                                 <div class="code-box small-box">
-                                  <span class="terminal-prefix">{{ effectiveOs() === 'windows' ? 'PS>' : '$' }}</span>
+                                  <span class="terminal-prefix">{{ effectiveOs() === 'windows' ? 'PS\u003E' : '$' }}</span>
                                   <code class="code-text">{{ emuCreateAvdCmd() }}</code>
                                   <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'emu_create'"
                                     (click)="copyToClipboard(emuCreateAvdCmd(), 'emu_create')">
@@ -1278,7 +1550,7 @@
                                 <div class="step-title">Start the Emulator</div>
                                 <p class="step-text">Launch the virtual device (or add <code>-no-window</code> for headless execution):</p>
                                 <div class="code-box small-box">
-                                  <span class="terminal-prefix">{{ effectiveOs() === 'windows' ? 'PS>' : '$' }}</span>
+                                  <span class="terminal-prefix">{{ effectiveOs() === 'windows' ? 'PS\u003E' : '$' }}</span>
                                   <code class="code-text">emulator -avd Pixel_8_API_34 -no-boot-anim</code>
                                   <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'emu_run'"
                                     (click)="copyToClipboard('emulator -avd Pixel_8_API_34 -no-boot-anim', 'emu_run')">
@@ -1320,7 +1592,7 @@
                           <span class="material-symbols-outlined step-card-icon">touch_app</span>
                         </div>
                         <div class="step-card-title">Enable Developer Options</div>
-                        <div class="step-card-desc">In phone <strong>Settings > About Phone</strong>, tap <strong>Build Number</strong> 7
+                        <div class="step-card-desc">In phone <strong>Settings &gt; About Phone</strong>, tap <strong>Build Number</strong> 7
                           times.</div>
                       </div>
 
@@ -1330,7 +1602,7 @@
                           <span class="material-symbols-outlined step-card-icon">toggle_on</span>
                         </div>
                         <div class="step-card-title">Enable USB Debugging</div>
-                        <div class="step-card-desc">In <strong>Settings > Developer Options</strong>, turn <strong>USB Debugging</strong> ON.
+                        <div class="step-card-desc">In <strong>Settings &gt; Developer Options</strong>, turn <strong>USB Debugging</strong> ON.
                         </div>
                       </div>
 
@@ -1406,7 +1678,7 @@
                   <div class="info-callout-box">
                     <span class="material-symbols-outlined callout-icon">help_outline</span>
                     <div class="callout-text">
-                      Find IP & port in phone <strong>Settings > Developer Options > Wireless Debugging</strong>.
+                      Find IP & port in phone <strong>Settings &gt; Developer Options &gt; Wireless Debugging</strong>.
                       </div>
                     </div>
                   </div>
@@ -1561,7 +1833,7 @@
                 </div>
 
                 <!-- Multi-Device Switcher if multiple devices detected -->
-                @if (connectedDevices().length > 1) {
+                @if (1 < connectedDevices().length) {
                   <div class="multi-device-switcher" style="margin-top: 12px;">
                     <span class="switcher-label">Select Active Device:</span>
                     <div class="switcher-chips">
@@ -1661,7 +1933,7 @@
                       }
                     </div>
                     <div class="code-box small-box">
-                      <span class="terminal-prefix">></span>
+                      <span class="terminal-prefix">&gt;</span>
                       <code class="code-text">winget install Google.PlatformTools</code>
                       <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'win_adb'"
                         (click)="copyToClipboard('winget install Google.PlatformTools', 'win_adb')">

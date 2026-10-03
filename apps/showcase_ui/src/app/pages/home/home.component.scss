@@ -5166,3 +5166,319 @@ $text-light: #94a3b8;
     transform: translateY(0) scale(1);
   }
 }
+
+/* ------------------------------------------------------------------
+   LLM model picker (Custom LLM Providers card)
+
+   A native <datalist> popup is rendered by the browser as an overlay and
+   gets clipped by .inspector-card { overflow: hidden } — the list ran off
+   the card and could not be scrolled. This panel lives in the document
+   flow instead and scrolls inside its own .model-picker-list.
+   ------------------------------------------------------------------ */
+.model-picker-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  animation: fadeIn 0.15s ease-out;
+
+  .model-picker-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #334155;
+
+    .material-symbols-outlined {
+      font-size: 16px;
+      color: #64748b;
+    }
+
+    .model-picker-count {
+      margin-left: auto;
+      font-size: 11px;
+      font-weight: 500;
+      color: #94a3b8;
+      font-family: $font-mono;
+    }
+  }
+
+  .model-picker-search {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 7px 10px;
+    font-family: inherit;
+    font-size: 12px;
+    color: #1e293b;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+
+    &:focus {
+      border-color: #93c5fd;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+    }
+  }
+
+  /* The scrolling region: bounded height + its own scrollbar. */
+  .model-picker-list {
+    display: flex;
+    flex-direction: column;
+    max-height: 190px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid #f1f5f9;
+    border-radius: 8px;
+    scrollbar-width: thin;
+
+    &::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 8px;
+    }
+  }
+
+  .model-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 12px;
+    color: #1e293b;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #f8fafc;
+    cursor: pointer;
+    transition: background 0.12s ease;
+
+    &:last-child {
+      border-bottom: none;
+    }
+
+    &:hover {
+      background: #f1f5f9;
+    }
+
+    &.is-active {
+      background: #eff6ff;
+      color: #1d4ed8;
+    }
+
+    code {
+      font-family: $font-mono;
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .model-picker-name {
+      margin-left: auto;
+      font-size: 11px;
+      color: #94a3b8;
+      white-space: nowrap;
+    }
+  }
+
+  .model-picker-empty {
+    padding: 14px 10px;
+    font-size: 12px;
+    color: #94a3b8;
+    text-align: center;
+  }
+}
+
+/* Empty state of the provider list: a quiet hint, not a selectable badge. */
+.provider-empty-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+
+  .material-symbols-outlined {
+    font-size: 15px;
+    color: #cbd5e1;
+  }
+}
+
+/* "Set as the default provider" row: a real checkbox row (the previous
+   badge styling squeezed the box over the label text). */
+.provider-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 9px 11px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+
+  input[type='checkbox'] {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    flex: none;
+    accent-color: #2563eb;
+    cursor: pointer;
+  }
+
+  .provider-check-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #334155;
+    white-space: nowrap;
+  }
+
+  .provider-check-hint {
+    font-size: 11px;
+    color: #94a3b8;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+
+/* ---- Active Model Configuration: effective-resolution hint ---- */
+.config-effective-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px 12px;
+  font-size: 11px;
+  color: #64748b;
+
+  .material-symbols-outlined {
+    font-size: 14px;
+    color: #94a3b8;
+    flex: none;
+  }
+
+  code {
+    font-family: $font-mono;
+    font-size: 10.5px;
+    background: #f1f5f9;
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+}
+
+/* ---- Registered provider entry ------------------------------------------
+   Replaces the old one-line env-key-row: name + actions on top, endpoint
+   below, then DEFAULT / FALLBACK / KEY chips. */
+.provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.provider-item {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+
+  &.is-default {
+    background: #f5f9ff;
+    border-color: #bfdbfe;
+  }
+
+  .provider-item-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+
+    .provider-item-name {
+      font-family: $font-mono;
+      font-size: 13px;
+      font-weight: 600;
+      color: #1e293b;
+    }
+
+    .provider-item-default {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 2px 8px;
+      font-size: 10.5px;
+      font-weight: 700;
+      color: #1d4ed8;
+      background: #dbeafe;
+      border-radius: 999px;
+
+      .material-symbols-outlined {
+        font-size: 12px;
+      }
+    }
+
+    .provider-item-actions {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+    }
+  }
+
+  .provider-item-url {
+    font-family: $font-mono;
+    font-size: 11px;
+    color: #64748b;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .provider-item-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+
+    .provider-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+
+      .provider-chip-label {
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        color: #94a3b8;
+      }
+
+      .provider-chip-value {
+        font-family: $font-mono;
+        font-size: 11.5px;
+        color: #334155;
+      }
+    }
+  }
+}
+
+.provider-empty {
+  padding: 16px 14px;
+}

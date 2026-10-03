@@ -370,6 +370,214 @@ async def update_credentials(request: UpdateCredentialsRequest):
         raise HTTPException(status_code=500, detail=f"Failed to update credentials: {exc}")
 
 
+# ---------------------------------------------------------------------------
+# User-registered LLM providers (OpenAI-compatible endpoints)
+# ---------------------------------------------------------------------------
+
+
+class LLMProviderRequest(BaseModel):
+    """Payload to register or update a named OpenAI-compatible LLM provider."""
+
+    name: str = Field(description="Unique provider name, e.g. 'my-proxy'")
+    api_key: str = Field(description="API key for the provider endpoint")
+    api_base: str | None = Field(
+        default=None, description="OpenAI-compatible base URL, e.g. https://api.example.com/v1"
+    )
+    model: str | None = Field(default=None, description="Default model name for this provider")
+    fallback_model: str | None = Field(
+        default=None,
+        description="Fallback model name (mirrors artemis.jsonc default.fallback.model)",
+    )
+    kind: str = Field(default="openai", description="Wire format (currently 'openai' compatible)")
+    temperature: float | None = Field(default=None, description="Optional sampling temperature")
+    timeout_seconds: float | None = Field(default=None, description="Optional request timeout")
+    is_multimodal: bool = Field(default=True, description="Whether image inputs are supported")
+    make_default: bool = Field(
+        default=False, description="Set this provider as the default LLM provider"
+    )
+    verify: bool = Field(
+        default=True, description="Verify the key against the endpoint before saving"
+    )
+
+
+class LLMProviderTestRequest(BaseModel):
+    """Payload to validate a provider endpoint + key without saving."""
+
+    api_key: str = Field(description="API key to test")
+    api_base: str | None = Field(default=None, description="OpenAI-compatible base URL")
+
+
+class LLMProviderModelsRequest(BaseModel):
+    """Payload to list the models an OpenAI-compatible endpoint exposes."""
+
+    name: str | None = Field(
+        default=None, description="Registered provider name; its stored credentials are reused"
+    )
+    api_base: str | None = Field(default=None, description="OpenAI-compatible base URL")
+    api_key: str | None = Field(default=None, description="API key for the endpoint")
+    kind: str = Field(default="openai", description="Wire format (openai compatible)")
+
+
+@router.get("/llm-providers")
+async def list_llm_providers():
+    """List user-registered LLM providers. Secrets are masked, never returned."""
+    from artemis.llm.providers import provider_registry
+
+    return {
+        "default_provider": provider_registry.default_provider_name,
+        "registry_path": str(provider_registry.path),
+        "providers": [p.to_public_dict() for p in provider_registry.list()],
+    }
+
+
+@router.post("/llm-providers/test")
+async def test_llm_provider(request: LLMProviderTestRequest):
+    """Verify an OpenAI-compatible endpoint + API key without persisting anything."""
+    from artemis.utils.credentials_validator import validate_api_key
+
+    key = request.api_key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="API key cannot be empty.")
+    is_valid, message = await validate_api_key(
+        provider="openai", api_key=key, base_url=request.api_base
+    )
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=message)
+    return {"valid": True, "message": message}
+
+
+@router.post("/llm-providers/models")
+async def discover_llm_provider_models(request: LLMProviderModelsRequest):
+    """List the models an OpenAI-compatible endpoint exposes (``GET {base}/models``).
+
+    Accepts either the name of a registered provider (credentials are read from
+    the registry, never echoed back) or an inline ``api_base``/``api_key`` pair
+    for a provider that is about to be saved.
+    """
+    from artemis.llm.providers import discover_models, provider_registry
+
+    api_base = (request.api_base or "").strip()
+    api_key = (request.api_key or "").strip()
+    kind = (request.kind or "openai").strip()
+
+    if request.name:
+        entry = provider_registry.get(request.name)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"unknown provider '{request.name}'")
+        api_base = api_base or (entry.api_base or "")
+        api_key = api_key or entry.api_key.get_secret_value()
+        kind = entry.kind
+
+    if not api_base:
+        raise HTTPException(status_code=400, detail="api_base is required to discover models")
+
+    try:
+        models, endpoint = await discover_models(api_base, api_key or None, kind=kind)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {"models": [{"id": m.id, "name": m.name} for m in models], "endpoint": endpoint}
+
+
+@router.post("/llm-providers")
+async def upsert_llm_provider(request: LLMProviderRequest):
+    """Register or update an OpenAI-compatible LLM provider (API key + base URL)."""
+    from artemis.llm.providers import provider_registry
+    from artemis.utils.credentials_validator import validate_api_key
+
+    key = request.api_key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="API key cannot be empty.")
+
+    if request.verify:
+        is_valid, message = await validate_api_key(
+            provider="openai", api_key=key, base_url=request.api_base
+        )
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=f"API key verification failed: {message}")
+
+    try:
+        entry = provider_registry.add(
+            name=request.name,
+            api_key=key,
+            api_base=request.api_base,
+            model=request.model,
+            fallback_model=request.fallback_model,
+            kind=request.kind,
+            temperature=request.temperature,
+            timeout_seconds=request.timeout_seconds,
+            is_multimodal=request.is_multimodal,
+            make_default=request.make_default,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "status": "success",
+        "provider": entry.to_public_dict(),
+        "default_provider": provider_registry.default_provider_name,
+    }
+
+
+@router.post("/llm-providers/{name}/default")
+async def set_default_llm_provider(name: str):
+    """Mark a registered provider as the default LLM provider."""
+    from artemis.llm.providers import provider_registry
+
+    try:
+        entry = provider_registry.set_default(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "status": "success",
+        "default_provider": entry.name,
+        "providers": [p.to_public_dict() for p in provider_registry.list()],
+    }
+
+
+@router.delete("/llm-providers/{name}")
+async def delete_llm_provider(name: str):
+    """Remove a registered provider; the default falls back to the next one."""
+    from artemis.llm.providers import provider_registry
+
+    if not provider_registry.remove(name):
+        raise HTTPException(status_code=404, detail=f"unknown provider '{name}'")
+    return {
+        "status": "success",
+        "removed": name,
+        "default_provider": provider_registry.default_provider_name,
+    }
+
+
+def _effective_model_config(default_block: dict) -> dict:
+    """Resolve the jsonc ``default`` block through the LLM provider registry.
+
+    The console must show what the runtime will actually use: when the file's
+    provider has no credentials (or the block names ``default``), the registered
+    default provider and its model pair take over
+    (see :func:`artemis.llm.providers.resolve_model_config`).
+    """
+    from artemis.llm.providers import resolve_model_config
+
+    provider = default_block.get("provider")
+    model = default_block.get("model")
+    fallback = default_block.get("fallback") or {}
+    primary = resolve_model_config(provider, model, use_fallback=False)
+    backup = resolve_model_config(
+        fallback.get("provider", provider),
+        fallback.get("model", model),
+        use_fallback=True,
+    )
+    return {
+        "provider": primary.display_provider,
+        "model": primary.model,
+        "resolved_via": primary.source,
+        "fallback": {"provider": backup.display_provider, "model": backup.model},
+    }
+
+
 @router.get("/model-config-env")
 async def get_model_config_and_env():
     """Retrieve the current active artemis.jsonc configuration and .env status for custom setup."""
@@ -486,6 +694,7 @@ async def get_model_config_and_env():
         "config_filename": "artemis.jsonc",
         "config_content": config_content,
         "default_model": parsed_config.get("default", {}),
+        "effective_default_model": _effective_model_config(parsed_config.get("default", {}) or {}),
         "presets": parsed_config.get("presets", {}),
         "env_path": str(env_path),
         "env_filename": ".env",

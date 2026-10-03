@@ -18,7 +18,7 @@ import { Component, signal, computed, effect, inject, OnInit, OnDestroy, ChangeD
 import { FormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 import { AgentService } from '../../services/agent.service';
-import { SystemService } from '../../services/system.service';
+import { SystemService, LlmModelInfo } from '../../services/system.service';
 import {
   AdbServerConnectionResult,
   AdbServerDevice,
@@ -126,8 +126,54 @@ export class HomeComponent implements OnInit, OnDestroy {
   public showOcrConfig = signal<boolean>(false);
   public showFullConfigFile = signal<boolean>(false);
 
+  // ---- Custom LLM providers (OpenAI-compatible base_url + api_key) ----
+  public llmProviders = computed(() => this.systemService.llmProviders());
+  public llmDefaultProvider = computed(() => this.systemService.llmDefaultProvider());
+  public llmRegistryPath = computed(() => this.systemService.llmRegistryPath());
+  public newProviderName = signal<string>('');
+  public newProviderBaseUrl = signal<string>('');
+  public newProviderModel = signal<string>('');
+  public newProviderFallbackModel = signal<string>('');
+  public newProviderApiKey = signal<string>('');
+  public newProviderMakeDefault = signal<boolean>(true);
+  public showNewProviderKey = signal<boolean>(false);
+  public isSavingProvider = signal<boolean>(false);
+  public isTestingProvider = signal<boolean>(false);
+  public isDiscoveringModels = signal<boolean>(false);
+  public discoveredModels = signal<LlmModelInfo[]>([]);
+  public discoveryEndpoint = signal<string>('');
+  public modelPickerOpen = signal<'default' | 'fallback' | null>(null);
+  public modelPickerQuery = signal<string>('');
+  public providerSaveMessage = signal<string | null>(null);
+  public providerSaveError = signal<string | null>(null);
+
+  /** Models shown in the picker, narrowed by the filter box (keeps long lists usable). */
+  public pickerModels = computed<LlmModelInfo[]>(() => {
+    const query = this.modelPickerQuery().trim().toLowerCase();
+    const models = this.discoveredModels();
+    if (!query) return models;
+    return models.filter(
+      (m) => m.id.toLowerCase().includes(query) || (m.name ?? '').toLowerCase().includes(query)
+    );
+  });
+
   // Model & Environment configuration from backend
   public modelConfigEnv = computed(() => this.systemService.modelConfigEnv());
+
+  /** Effective (registry-resolved) default model shown in Active Model Configuration. */
+  public effectiveDefaultModel = computed(() => this.modelConfigEnv()?.effective_default_model ?? null);
+
+  /** What config/artemis.jsonc says, for the "resolved via ..." hint. */
+  public configuredDefaultLabel = computed(() => {
+    const d = this.modelConfigEnv()?.default_model;
+    return `${d?.provider || 'google'}/${d?.model || 'gemini-3.8-flash'}`;
+  });
+
+  /** True when a registered provider takes over from the file's provider. */
+  public effectiveOverrideActive = computed(() => {
+    const eff = this.effectiveDefaultModel();
+    return !!eff && (eff.resolved_via === 'fallback' || eff.resolved_via === 'alias');
+  });
 
   // Google Gemini API Key State
   public geminiKeyInput = signal<string>('');
@@ -350,6 +396,9 @@ export class HomeComponent implements OnInit, OnDestroy {
   public isRestartingAdb = computed(() => this.systemService.isRestartingAdb());
   public launchingAvd = computed(() => this.systemService.launchingAvd());
   public emulatorLaunchState = computed(() => this.systemService.emulatorLaunchState());
+
+  /** Boot progress 0-100. Never invent a value: 0 means "not started / failed". */
+  public emulatorProgressPercent = computed(() => this.emulatorLaunchState()?.progress_percent ?? 0);
   public isEmulatorLaunching = computed(() => this.systemService.isEmulatorLaunching());
   public showLaunchLogs = signal<boolean>(false);
   
@@ -541,6 +590,7 @@ export class HomeComponent implements OnInit, OnDestroy {
     // Initial fetch of system readiness & model configuration
     this.systemService.fetchReadiness().subscribe();
     this.systemService.fetchModelConfigEnv().subscribe();
+    this.systemService.fetchLlmProviders().subscribe();
     this.systemService.fetchAdbServerStatus().subscribe({
       next: status => {
         if (status.endpoint.mode === 'remote') {
@@ -619,6 +669,160 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.isOcrKeyEdited.set(true);
     this.ocrSaveError.set(null);
     this.ocrSaveMessage.set(null);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Custom LLM providers (OpenAI-compatible): add / test / default / remove
+  // ---------------------------------------------------------------------------
+
+  public loadLlmProviders(): void {
+    this.systemService.fetchLlmProviders().subscribe();
+  }
+
+  public toggleNewProviderKeyVisibility(): void {
+    this.showNewProviderKey.update((v) => !v);
+  }
+
+  private resetProviderForm(): void {
+    this.newProviderName.set('');
+    this.newProviderBaseUrl.set('');
+    this.newProviderModel.set('');
+    this.newProviderFallbackModel.set('');
+    this.newProviderApiKey.set('');
+    this.showNewProviderKey.set(false);
+    this.discoveredModels.set([]);
+    this.discoveryEndpoint.set('');
+    this.modelPickerOpen.set(null);
+    this.modelPickerQuery.set('');
+  }
+
+  /** Open/close the inline model picker for the default or fallback field. */
+  public toggleModelPicker(which: 'default' | 'fallback'): void {
+    this.modelPickerOpen.update((current) => (current === which ? null : which));
+    this.modelPickerQuery.set('');
+  }
+
+  public pickModel(which: 'default' | 'fallback', id: string): void {
+    if (which === 'default') {
+      this.newProviderModel.set(id);
+    } else {
+      this.newProviderFallbackModel.set(id);
+    }
+    this.modelPickerOpen.set(null);
+    this.modelPickerQuery.set('');
+  }
+
+  /** Fetch the model list the endpoint exposes (OpenAI-compatible GET /models). */
+  public discoverProviderModels(): void {
+    const apiBase = this.newProviderBaseUrl().trim();
+    const apiKey = this.newProviderApiKey().trim();
+    if (!apiBase) {
+      this.providerSaveError.set('Enter the Base URL first to fetch its model list.');
+      return;
+    }
+    this.isDiscoveringModels.set(true);
+    this.providerSaveError.set(null);
+    this.providerSaveMessage.set(null);
+    this.systemService.discoverLlmModels({ api_base: apiBase, api_key: apiKey }).subscribe({
+      next: (res) => {
+        this.isDiscoveringModels.set(false);
+        this.discoveredModels.set(res?.models ?? []);
+        this.discoveryEndpoint.set(res?.endpoint ?? '');
+        if (!this.newProviderModel() && res?.models?.length) {
+          this.newProviderModel.set(res.models[0].id);
+        }
+        this.modelPickerOpen.set('default');
+        this.modelPickerQuery.set('');
+        this.providerSaveMessage.set(`✓ ${res?.models?.length ?? 0} model(s) fetched from ${res?.endpoint ?? apiBase}.`);
+        setTimeout(() => this.providerSaveMessage.set(null), 6000);
+      },
+      error: (err) => {
+        this.isDiscoveringModels.set(false);
+        this.discoveredModels.set([]);
+        this.providerSaveError.set(err?.error?.detail || err?.message || 'Model discovery failed.');
+      }
+    });
+  }
+
+  /** Verify the key against the endpoint without saving anything. */
+  public testLlmProviderKey(): void {
+    const apiKey = this.newProviderApiKey().trim();
+    if (!apiKey) {
+      this.providerSaveError.set('Enter an API key to test.');
+      return;
+    }
+    this.isTestingProvider.set(true);
+    this.providerSaveError.set(null);
+    this.providerSaveMessage.set(null);
+    this.systemService.testLlmProvider(apiKey, this.newProviderBaseUrl().trim() || undefined).subscribe({
+      next: (res) => {
+        this.isTestingProvider.set(false);
+        this.providerSaveMessage.set(`✓ ${res?.message || 'Endpoint reachable and key accepted.'}`);
+        setTimeout(() => this.providerSaveMessage.set(null), 6000);
+      },
+      error: (err) => {
+        this.isTestingProvider.set(false);
+        this.providerSaveError.set(err?.error?.detail || err?.message || 'Endpoint test failed.');
+      }
+    });
+  }
+
+  /** Register (or update) the provider after verifying the key. */
+  public saveLlmProvider(): void {
+    const name = this.newProviderName().trim();
+    const apiKey = this.newProviderApiKey().trim();
+    if (!name || !apiKey) {
+      this.providerSaveError.set('Provider name and API key are required.');
+      return;
+    }
+    this.isSavingProvider.set(true);
+    this.providerSaveError.set(null);
+    this.providerSaveMessage.set(null);
+    this.systemService.saveLlmProvider({
+      name,
+      api_key: apiKey,
+      api_base: this.newProviderBaseUrl().trim() || null,
+      model: this.newProviderModel().trim() || null,
+      fallback_model: this.newProviderFallbackModel().trim() || null,
+      kind: 'openai',
+      make_default: this.newProviderMakeDefault(),
+      verify: true
+    }).subscribe({
+      next: () => {
+        this.isSavingProvider.set(false);
+        this.providerSaveMessage.set(`✓ Provider '${name}' verified & saved.`);
+        this.resetProviderForm();
+        setTimeout(() => this.providerSaveMessage.set(null), 6000);
+      },
+      error: (err) => {
+        this.isSavingProvider.set(false);
+        this.providerSaveError.set(err?.error?.detail || err?.message || 'Failed to save provider.');
+      }
+    });
+  }
+
+  public setDefaultLlmProvider(name: string): void {
+    this.systemService.setLlmProviderDefault(name).subscribe({
+      next: () => {
+        this.providerSaveMessage.set(`✓ '${name}' is now the default LLM provider.`);
+        setTimeout(() => this.providerSaveMessage.set(null), 6000);
+      },
+      error: (err) => {
+        this.providerSaveError.set(err?.error?.detail || err?.message || 'Failed to set default provider.');
+      }
+    });
+  }
+
+  public removeLlmProvider(name: string): void {
+    this.systemService.deleteLlmProvider(name).subscribe({
+      next: () => {
+        this.providerSaveMessage.set(`✓ Provider '${name}' removed.`);
+        setTimeout(() => this.providerSaveMessage.set(null), 6000);
+      },
+      error: (err) => {
+        this.providerSaveError.set(err?.error?.detail || err?.message || 'Failed to remove provider.');
+      }
+    });
   }
 
   public saveGeminiKey(): void {

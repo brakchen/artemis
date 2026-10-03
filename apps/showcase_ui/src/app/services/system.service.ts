@@ -16,7 +16,7 @@
 
 import { Injectable, signal, computed, inject, DestroyRef, NgZone } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable, finalize, shareReplay, tap } from 'rxjs';
+import { Observable, catchError, finalize, of, shareReplay, tap } from 'rxjs';
 import {
   AdbServerConnectionResponse,
   AdbServerStatus,
@@ -576,6 +576,78 @@ export class SystemService {
       })
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Custom LLM providers (OpenAI-compatible base_url + api_key)
+  // ---------------------------------------------------------------------------
+
+  public llmProviders = signal<LlmProviderInfo[]>([]);
+  public llmDefaultProvider = signal<string | null>(null);
+  public llmRegistryPath = signal<string>('');
+
+  /** Fetch the registered OpenAI-compatible LLM providers (keys are masked). */
+  public fetchLlmProviders(): Observable<LlmProvidersResponse> {
+    return this.http.get<LlmProvidersResponse>('/api/system/llm-providers').pipe(
+      tap((data) => {
+        this.llmProviders.set(data.providers ?? []);
+        this.llmDefaultProvider.set(data.default_provider ?? null);
+        this.llmRegistryPath.set(data.registry_path ?? '');
+      }),
+      catchError((err) => {
+        console.error('Failed to fetch LLM providers:', err);
+        return of({ default_provider: null, registry_path: '', providers: [] });
+      })
+    );
+  }
+
+  /** Register or update a provider. Verifies the key first unless told otherwise. */
+  public saveLlmProvider(payload: LlmProviderPayload): Observable<any> {
+    return this.http.post('/api/system/llm-providers', payload).pipe(
+      tap(() => this.refreshProviderState())
+    );
+  }
+
+  /** Validate an endpoint + key without saving. */
+  public testLlmProvider(apiKey: string, apiBase?: string): Observable<{ valid: boolean; message: string }> {
+    return this.http.post<{ valid: boolean; message: string }>('/api/system/llm-providers/test', {
+      api_key: apiKey,
+      api_base: apiBase || null
+    });
+  }
+
+  /** List the models an OpenAI-compatible endpoint exposes (GET {base}/models). */
+  public discoverLlmModels(payload: {
+    name?: string | null;
+    api_base?: string | null;
+    api_key?: string | null;
+    kind?: string;
+  }): Observable<LlmModelsResponse> {
+    return this.http.post<LlmModelsResponse>('/api/system/llm-providers/models', payload);
+  }
+
+  /** Mark one provider as the default LLM provider. */
+  public setLlmProviderDefault(name: string): Observable<any> {
+    return this.http.post(`/api/system/llm-providers/${encodeURIComponent(name)}/default`, {}).pipe(
+      tap(() => this.refreshProviderState())
+    );
+  }
+
+  /** Remove a registered provider. */
+  public deleteLlmProvider(name: string): Observable<any> {
+    return this.http.delete(`/api/system/llm-providers/${encodeURIComponent(name)}`).pipe(
+      tap(() => this.refreshProviderState())
+    );
+  }
+
+  /**
+   * Re-read the provider list AND the model configuration: the "Active Model
+   * Configuration" card shows the *effective* default model, which changes
+   * whenever a provider is saved or made default.
+   */
+  private refreshProviderState(): void {
+    this.fetchLlmProviders().subscribe();
+    this.fetchModelConfigEnv().subscribe();
+  }
 }
 
 export interface ModelConfigEnvResponse {
@@ -592,6 +664,13 @@ export interface ModelConfigEnvResponse {
       thinking_level?: string;
     };
   };
+  /** Provider/model the runtime will actually use (registry-aware). */
+  effective_default_model?: {
+    provider: string;
+    model: string;
+    resolved_via: string;
+    fallback: { provider: string; model: string };
+  };
   presets: Record<string, {
     provider: string;
     model: string;
@@ -606,5 +685,46 @@ export interface ModelConfigEnvResponse {
     preview: string | null;
     description: string;
   }>;
+}
+
+export interface LlmProviderInfo {
+  name: string;
+  kind: string;
+  api_base: string | null;
+  model: string | null;
+  fallback_model: string | null;
+  temperature: number | null;
+  timeout_seconds: number | null;
+  is_multimodal: boolean;
+  enabled: boolean;
+  key_configured: boolean;
+  key_masked: string;
+}
+
+export interface LlmModelInfo {
+  id: string;
+  name?: string | null;
+}
+
+export interface LlmModelsResponse {
+  models: LlmModelInfo[];
+  endpoint: string;
+}
+
+export interface LlmProvidersResponse {
+  default_provider: string | null;
+  registry_path: string;
+  providers: LlmProviderInfo[];
+}
+
+export interface LlmProviderPayload {
+  name: string;
+  api_key: string;
+  api_base?: string | null;
+  model?: string | null;
+  fallback_model?: string | null;
+  kind?: string;
+  make_default?: boolean;
+  verify?: boolean;
 }
 
