@@ -43,6 +43,7 @@ from artemis.agents.operator.prompts import (
 from artemis.agents.validator.tool_declarations import ToolExecutionResult
 from artemis.context import ArtemisContext
 from artemis.graph.state import State
+from artemis.llm.reliability import Failure, FailureCategory, LLMExhaustedError
 from artemis.memory.transcript import (
     EPHEMERAL_BLOCKS_KEY,
     EXECUTION_RESULT_MARKER,
@@ -684,3 +685,38 @@ def test_turn_record_reports_the_first_failure_of_a_multi_action_turn():
         ]
     )
     assert record.result()["error"] == "click rejected: coordinates out of bounds"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_error",
+    [
+        TimeoutError("LLM call timed out after 180 seconds."),
+        LLMExhaustedError(
+            "LLM call exhausted retries.",
+            failure=Failure(FailureCategory.TIMEOUT, retryable=False, should_fallback=True),
+        ),
+    ],
+    ids=["hard-timeout", "exhausted-retries"],
+)
+async def test_run_reports_failure_when_the_model_call_gives_up(mock_context, model_error):
+    """A dead model call is a failed task, not a process crash.
+
+    The exception used to unwind through ``asyncio.run`` and take the whole run
+    down with a traceback, which also skipped the SDK's finalize / end-session
+    step and left the session without a terminal status.
+    """
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch(
+            "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+            AsyncMock(return_value=_INITIAL_OBSERVATION),
+        ),
+    ):
+        runner = _make_runner(mock_context, [], max_turns=0)
+        runner._invoke_model = AsyncMock(side_effect=model_error)
+        result = await runner.run(State(initial_goal="Open Settings"))
+
+    assert result["status"] == "failed"
+    assert "model call failed" in result["explanation"].lower()
+    assert runner._invoke_model.await_count == 1

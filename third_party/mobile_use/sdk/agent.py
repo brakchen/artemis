@@ -688,6 +688,35 @@ class AgentBase:
                                 context.data_engine.end_session("completed")
 
                             return output
+                    except Exception as exc:
+                        # A crash here (model timeout, provider error, bug) must not
+                        # leave the session without a terminal status: the queue
+                        # worker can only reconcile rows that were marked. Finalize
+                        # first, then re-raise so the failure still surfaces the way
+                        # it did before.
+                        reason = str(exc) or repr(exc)
+                        err = f"[{task_name}] Task crashed: {reason}"
+                        logger.error(err, exc_info=True)
+                        try:
+                            await task.finalize(
+                                content=output,
+                                state=last_state_snapshot or state.model_dump(),
+                                error=err,
+                            )
+                        except Exception as finalize_error:
+                            logger.error(
+                                f"[{task_name}] Failed to finalize after crash:"
+                                f" {finalize_error}"
+                            )
+                        try:
+                            if context.data_engine:
+                                context.data_engine.end_session("failed")
+                        except Exception as session_error:
+                            logger.error(
+                                f"[{task_name}] Failed to end DataEngine session after"
+                                f" crash: {session_error}"
+                            )
+                        raise
                     finally:
                         if recording_started:
 

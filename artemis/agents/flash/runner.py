@@ -76,6 +76,7 @@ from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.data_engine.trace import trace
 from artemis.graph.perception import _check_injected_instruction_file
 from artemis.graph.state import State
+from artemis.llm.reliability import LLMCallError
 from artemis.llm.structured import ParseFailure, parse_structured
 from artemis.mcp.action_executor import McpActionExecutor
 from artemis.mcp.observation import observe
@@ -1095,7 +1096,24 @@ class FlashRunner:
             turn_base = len(messages) - 1
             current_tools = report_only_tools if is_final else tools_declaration
 
-            response = await self._invoke_model(llm, current_tools, messages)
+            try:
+                response = await self._invoke_model(llm, current_tools, messages)
+            except (LLMCallError, TimeoutError) as model_error:
+                # The LLM gateway already classified and retried; giving up here
+                # is a task outcome, not a process fault. Turning it into the
+                # normal failed report keeps the SDK finalizing the session
+                # instead of the exception unwinding through asyncio.run and
+                # leaving the run without a terminal status.
+                reason = str(model_error) or type(model_error).__name__
+                logger.error(f"FlashRunner aborted on model call failure: {reason}")
+                final_report = {
+                    "status": "failed",
+                    "explanation": (
+                        "The model call failed after retries and the reactive loop"
+                        f" stopped early. Reason: {reason}"
+                    ),
+                }
+                break
 
             if response is None:
                 break
