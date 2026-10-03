@@ -63,6 +63,8 @@ export class FloatingVideoPlayerComponent implements OnDestroy {
   public videoLoadError = signal<boolean>(false);
   public liveStreamUrl = signal<string>('/api/stream/device-live');
   public liveStreamError = signal<boolean>(false);
+  /** Why the live stream failed, read back from /api/stream/device-state. */
+  public liveStreamMessage = signal<string | null>(null);
   public activeSegmentIndex = signal<number>(0);
   public currentVideoUrl = computed(() => {
     const segments = this.agentService.activeVideoSegments();
@@ -122,6 +124,25 @@ export class FloatingVideoPlayerComponent implements OnDestroy {
   private initialPosY = 0;
 
   constructor() {
+    // The live screen follows the watched task: rebuild the stream URL when the
+    // watched session changes (or live playback starts) so the player switches
+    // device together with the task — several tasks may run on different devices.
+    let lastLiveSessionKey: string | null = null;
+    effect(
+      () => {
+        const sessionId = this.watchedSessionId();
+        const isLive = this.agentService.recordingPlaybackStatus() === 'live';
+        const key = isLive ? sessionId ?? '' : null;
+        if (key === lastLiveSessionKey) return;
+        lastLiveSessionKey = key;
+        if (!isLive) return;
+        this.liveStreamUrl.set(this.buildLiveStreamUrl());
+        this.liveStreamError.set(false);
+        this.liveStreamMessage.set(null);
+      },
+      { allowSignalWrites: true }
+    );
+
     // Reset video load error whenever active video URL changes
     effect(
       () => {
@@ -192,13 +213,37 @@ export class FloatingVideoPlayerComponent implements OnDestroy {
     });
   }
 
+  private watchedSessionId(): string | null {
+    return this.agentService.currentSessionId() || this.agentService.runningSessionId();
+  }
+
+  private buildLiveStreamUrl(): string {
+    const params = new URLSearchParams();
+    const sessionId = this.watchedSessionId();
+    if (sessionId) params.set('session_id', sessionId);
+    params.set('t', String(Date.now()));
+    return `/api/stream/device-live?${params.toString()}`;
+  }
+
   public onLiveStreamError(): void {
     this.liveStreamError.set(true);
+    this.explainLiveStreamError();
+  }
+
+  /** Ask the backend why the watched task's stream died and surface it. */
+  private explainLiveStreamError(): void {
+    const sessionId = this.watchedSessionId();
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    fetch(`/api/stream/device-state${query}`)
+      .then((res) => res.json())
+      .then((data) => this.liveStreamMessage.set(data?.error || null))
+      .catch(() => this.liveStreamMessage.set(null));
   }
 
   public retryLiveStream(): void {
     this.liveStreamError.set(false);
-    this.liveStreamUrl.set(`/api/stream/device-live?t=${Date.now()}`);
+    this.liveStreamMessage.set(null);
+    this.liveStreamUrl.set(this.buildLiveStreamUrl());
   }
 
   /**

@@ -125,7 +125,7 @@ limitations under the License.
                   <span class="material-symbols-outlined fallback-icon">phonelink_off</span>
                 </div>
                 <h4 class="fallback-title">{{ 'Device Stream Connecting' | t }}</h4>
-                <p class="fallback-desc">{{ 'Waiting for ADB device screen stream...' | t }}</p>
+                <p class="fallback-desc">{{ liveStreamMessage() || ('Waiting for ADB device screen stream...' | t) }}</p>
                 <button class="retry-btn" (click)="retryLiveStream()">
                   <span class="material-symbols-outlined">refresh</span>{{ 'Reconnect' | t }}</button>
               </div>
