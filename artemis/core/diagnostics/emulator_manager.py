@@ -63,6 +63,46 @@ class EmulatorLaunchState(BaseModel):
     can_retry: bool = True
 
 
+def _describe_crash(avd_name: str, poll_res: int | None, logs_str: str) -> str:
+    """Turn a raw emulator crash into an actionable message.
+
+    The Android emulator prints a FATAL line that is much more informative than
+    "exit code 1", so surface the known cases verbatim-ish.
+    """
+    low = logs_str.lower()
+    if "same avd" in low or "read-only flag" in low:
+        return (
+            f"AVD '{avd_name}' is already running - Android allows only one emulator "
+            "instance per AVD. Create a second AVD (Installed Virtual Devices -> Add) "
+            "to launch another virtual device, or stop the existing instance first."
+        )
+    if "already running" in low or "lock" in low:
+        return (
+            f"AVD '{avd_name}' is locked by another running emulator instance. "
+            "Stop the existing instance or restart ADB."
+        )
+    if "panic" in low:
+        return f"Emulator panic: {logs_str}"
+    if "broken avd system path" in low:
+        return "Emulator cannot resolve the SDK root - make sure <SDK>/platform-tools exists."
+    return f"Emulator process exited with code {poll_res}."
+
+
+def _current_emulator_serials(adb_path: str) -> set[str]:
+    """Serials of emulator instances already attached to adb."""
+    try:
+        out = subprocess.run(
+            [adb_path, "devices"], capture_output=True, text=True, timeout=5
+        ).stdout
+    except Exception:  # pylint: disable=broad-exception-caught
+        return set()
+    return {
+        line.split()[0]
+        for line in out.splitlines()
+        if line.strip().startswith("emulator-") and line.split()
+    }
+
+
 class EmulatorManager:
     """Manages background emulator execution, stdout/stderr stream capture, and boot completion polling."""
 
@@ -73,6 +113,7 @@ class EmulatorManager:
         self._track_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._reader_thread: threading.Thread | None = None
+        self._preexisting_serials: set[str] = set()
 
     @staticmethod
     def _subprocess_creation_kwargs() -> dict[str, Any]:
@@ -200,6 +241,11 @@ class EmulatorManager:
                 if self._track_task and not self._track_task.done():
                     self._track_task.cancel()
 
+                # Emulator serials already attached before this launch: the boot
+                # tracker must not adopt an already-running instance (with two VMs
+                # up, `adb devices` lists both and the first line may be the other).
+                self._preexisting_serials = _current_emulator_serials(self._locate_adb())
+
                 # Spawn emulator process capturing stdout & stderr
                 proc = subprocess.Popen(
                     [emu_path, "-avd", clean_avd],
@@ -261,11 +307,7 @@ class EmulatorManager:
                 poll_res = proc.poll()
                 if poll_res is not None:
                     logs_str = "\n".join(list(self._log_buffer)[-10:])
-                    error_msg = f"Emulator process exited immediately with code {poll_res}."
-                    if "already running" in logs_str.lower() or "lock" in logs_str.lower():
-                        error_msg = f"AVD '{avd_name}' is locked by another running emulator instance. Try stopping existing instances or restart ADB."
-                    elif "panic" in logs_str.lower():
-                        error_msg = f"Emulator panic: {logs_str}"
+                    error_msg = _describe_crash(avd_name, poll_res, logs_str)
 
                     logger.error(f"[EmulatorManager] Early crash: {error_msg}")
                     self._current_state = EmulatorLaunchState(
@@ -298,7 +340,7 @@ class EmulatorManager:
                         avd_name=avd_name,
                         status=EmulatorLaunchStage.FAILED,
                         pid=proc.pid,
-                        error=f"Emulator process terminated unexpectedly (exit code {poll_res}): {logs_str}",
+                        error=_describe_crash(avd_name, poll_res, logs_str),
                         stage_message="Process terminated unexpectedly",
                         started_at=started_at,
                         elapsed_seconds=int(time.time() - started_at),
@@ -323,7 +365,7 @@ class EmulatorManager:
                         line = line.strip()
                         if line.startswith("emulator-"):
                             parts = line.split()
-                            if parts:
+                            if parts and parts[0] not in self._preexisting_serials:
                                 detected_serial = parts[0]
                                 break
                 except Exception as e:
