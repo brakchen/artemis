@@ -25,6 +25,10 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+# Startup port for the unified Showcase UI / Admin Console.
+# Override per launch with ARTEMIS_UI_PORT=<port> or a trailing `--port <port>`.
+ARTEMIS_UI_PORT="${ARTEMIS_UI_PORT:-8001}"
+
 echo -e "${BOLD}${CYAN}======================================================${NC}"
 echo -e "${BOLD}${CYAN}      ✨ Artemis Autonomous Mobile Agent UI          ${NC}"
 echo -e "${BOLD}${CYAN}======================================================${NC}"
@@ -404,8 +408,8 @@ if [ "${IS_REMOTE}" = true ]; then
     HOSTNAME_STR="$(hostname 2>/dev/null || echo 'cloud-host')"
     USER_STR="$(whoami 2>/dev/null || echo 'user')"
     echo -e "   ${CYAN}☁️  Cloud / Remote environment detected:${NC}"
-    echo -e "      • Access locally via SSH tunnel: ${BOLD}ssh -L 8000:localhost:8000 ${USER_STR}@${HOSTNAME_STR}${NC}"
-    echo -e "      • Or access via Cloudtop / VS Code / Cursor Port Forwarding (Port 8000)"
+    echo -e "      • Access locally via SSH tunnel: ${BOLD}ssh -L ${ARTEMIS_UI_PORT}:localhost:${ARTEMIS_UI_PORT} ${USER_STR}@${HOSTNAME_STR}${NC}"
+    echo -e "      • Or access via Cloudtop / VS Code / Cursor Port Forwarding (Port ${ARTEMIS_UI_PORT})"
     if [ -z "${DISPLAY:-}" ]; then
         echo -e "      • Headless session detected (browser auto-open disabled)."
         OPEN_FLAG="--no-open"
@@ -420,4 +424,4 @@ fi
 
 # Launch via `python -m artemis` (not the `artemis` console-script shim) so the
 # long-running server never pins .venv/Scripts/artemis[.exe] against reinstalls.
-exec uv run python -m artemis ui "${OPEN_FLAG}" "$@"
+exec uv run python -m artemis ui "${OPEN_FLAG}" --port "${ARTEMIS_UI_PORT}" "$@"
