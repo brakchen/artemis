@@ -21,6 +21,7 @@ Recording session types and the session registry live in
 import asyncio
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -43,6 +44,9 @@ SCRCPY_STARTUP_FALLBACK_SECONDS = 0.75
 SCRCPY_STARTUP_TIMEOUT_SECONDS = 6.0
 # Ignore small timing differences at segment boundaries.
 TIMELINE_GAP_EPSILON_SECONDS = 0.05
+# Recording holes shorter than this are plain VFR frame spacing; longer holes
+# (scrcpy never encodes an unchanged screen) must be frozen into the clip.
+HOLE_TOLERANCE_SECONDS = 0.5
 
 
 def build_scrcpy_record_command(
@@ -131,9 +135,125 @@ def get_ffmpeg_path() -> str:
         return "ffmpeg"
 
 
+def _ffprobe_candidates() -> list[Path]:
+    """Well-known user-space install locations for a portable ffprobe.
+
+    Artemis never assumes root: ``start.sh`` installs portable tooling into the
+    user profile when the package manager is unavailable, and imageio-ffmpeg
+    (the bundled ffmpeg) ships no ffprobe at all, so PATH alone is not enough.
+    """
+    executable = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    candidates = [
+        Path.home() / ".local" / "bin" / executable,
+        Path.home() / ".local" / "share" / "ffmpeg-static" / executable,
+        Path(__file__).resolve().parents[1] / "bin" / executable,
+    ]
+    try:
+        import imageio_ffmpeg
+
+        bundled = Path(imageio_ffmpeg.get_ffmpeg_exe()).parent / executable
+        candidates.append(bundled)
+    except Exception:
+        pass
+    return candidates
+
+
 def get_ffprobe_path() -> str:
-    """Get ffprobe for lightweight segment metadata inspection."""
-    return shutil.which("ffprobe") or "ffprobe"
+    """Get ffprobe for lightweight segment metadata inspection.
+
+    Resolution order: PATH, then the well-known user-space install locations.
+    The bare ``"ffprobe"`` fallback is kept so a missing binary surfaces as a
+    clean ``FileNotFoundError`` at the call site rather than at import time.
+    """
+    on_path = shutil.which("ffprobe")
+    if on_path:
+        return on_path
+    for candidate in _ffprobe_candidates():
+        if candidate.is_file():
+            return str(candidate)
+    return "ffprobe"
+
+
+def is_ffprobe_installed() -> bool:
+    """True when ffprobe can actually be launched."""
+
+    return shutil.which("ffprobe") is not None or any(
+        candidate.is_file() for candidate in _ffprobe_candidates()
+    )
+
+
+def probe_frame_times(video_path: Path | str) -> list[float] | None:
+    """Packet timestamps (seconds) of the video stream, in order.
+
+    Returns ``None`` when ffprobe cannot be run (or the file cannot be read),
+    which callers must treat as "probing unavailable, keep legacy behaviour".
+    An empty list means the file really carries no video frames.
+
+    Only packet headers are read, so this stays cheap on long recordings and is
+    what lets the timeline renderer tell VFR holes (scrcpy skips unchanged
+    frames) apart from a broken clip.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                get_ffprobe_path(),
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "packet=pts_time",
+                "-of",
+                "csv=p=0",
+                str(video_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    times: list[float] = []
+    for line in proc.stdout.splitlines():
+        value = line.strip().rstrip(",")
+        if not value:
+            continue
+        try:
+            timestamp = float(value)
+        except ValueError:
+            continue
+        if timestamp >= 0:
+            times.append(timestamp)
+    return times
+
+
+def clip_has_frames(video_path: Path | str) -> bool:
+    """True when ``video_path`` decodes to at least one video frame.
+
+    ffmpeg exits 0 while writing a header-only file when the filter graph
+    produced no frames ("Output file is empty, nothing was encoded"), so a
+    success exit code alone never proves a usable clip.
+    """
+    path = Path(video_path)
+    if not path.is_file() or path.stat().st_size <= 0:
+        return False
+    times = probe_frame_times(path)
+    if times is not None:
+        return len(times) > 0
+    try:
+        capture = cv2.VideoCapture(str(path))
+    except Exception:
+        # No way to verify; keep the historical "non-empty file" assumption.
+        return True
+    try:
+        if not capture.isOpened():
+            return False
+        ok, _frame = capture.read()
+        return bool(ok)
+    finally:
+        capture.release()
 
 
 async def normalize_recording_to_mp4(
@@ -289,23 +409,50 @@ async def remux_recording_to_mp4(source_path: Path, output_path: Path) -> bool:
     return False
 
 
-async def probe_video_segment(video_path: Path) -> dict[str, float | int]:
-    """Read duration and coded dimensions for a finalized segment."""
-    process = await asyncio.create_subprocess_exec(
-        get_ffprobe_path(),
-        "-v",
-        "error",
-        "-show_entries",
-        "stream=width,height,duration,codec_type:format=duration",
-        "-of",
-        "json",
-        str(video_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, _stderr = await process.communicate()
-    if process.returncode != 0:
+def _probe_video_segment_with_cv2(video_path: Path) -> dict[str, float | int]:
+    """OpenCV fallback for :func:`probe_video_segment` when ffprobe is missing."""
+    try:
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            capture.release()
+            return {}
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        frame_count = float(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0)
+        capture.release()
+    except Exception:
         return {}
+    if width <= 0 or height <= 0:
+        return {}
+    duration = frame_count / fps if fps > 0 else 0.0
+    return {"duration": duration, "width": width, "height": height}
+
+
+async def probe_video_segment(video_path: Path) -> dict[str, float | int]:
+    """Read duration and coded dimensions for a finalized segment.
+
+    Falls back to OpenCV metadata when ffprobe is unavailable so recording
+    finalization never aborts on a missing binary.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            get_ffprobe_path(),
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=width,height,duration,codec_type:format=duration",
+            "-of",
+            "json",
+            str(video_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _stderr = await process.communicate()
+    except (OSError, FileNotFoundError):
+        return _probe_video_segment_with_cv2(video_path)
+    if process.returncode != 0:
+        return _probe_video_segment_with_cv2(video_path)
     try:
         payload = json.loads(stdout)
         streams = payload.get("streams") or []
@@ -325,7 +472,7 @@ async def probe_video_segment(video_path: Path) -> dict[str, float | int]:
             "height": int(video_stream.get("height") or 0),
         }
     except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
+        return _probe_video_segment_with_cv2(video_path)
 
 
 async def get_android_display_state(device_id: str) -> tuple[int, int, int] | None:
@@ -464,6 +611,163 @@ def plan_timeline_pieces(
     return pieces
 
 
+def _nearest_frame_time(frame_times: list[float], target: float) -> float | None:
+    """Latest frame timestamp at or before ``target`` (else the earliest frame)."""
+    if not frame_times:
+        return None
+    preceding = [timestamp for timestamp in frame_times if timestamp <= target]
+    if preceding:
+        return preceding[-1]
+    return frame_times[0]
+
+
+def _extract_freeze_frame(path: Path, anchor: float, png_path: Path) -> bool:
+    """Grab the frame nearest ``anchor`` so a static window can be frozen."""
+    try:
+        process = subprocess.run(
+            [
+                get_ffmpeg_path(),
+                "-y",
+                "-ss",
+                f"{anchor:.3f}",
+                "-i",
+                str(path),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(png_path),
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return process.returncode == 0 and png_path.is_file() and png_path.stat().st_size > 0
+
+
+def _file_piece_units(
+    index: int,
+    path: Path,
+    local_start: float,
+    local_end: float,
+    canvas_width: int,
+    canvas_height: int,
+    fps: int,
+    scratch_dir: Path,
+) -> tuple[list[tuple[list[str], str]], list[Path]]:
+    """Build ``(inputs, filter_chain)`` units for one file piece.
+
+    Returns a list whose entries consume input indices ``index, index+1, ...``
+    plus any scratch files the caller must delete after encoding.
+
+    scrcpy recordings are VFR: frames are only encoded when the screen changes,
+    so a window can contain no frames at all (a long static screen) or only a
+    burst in the middle. A plain ``trim`` of such a window yields a header-only
+    or short clip; ffmpeg still exits 0, and the next ffmpeg in the pipeline
+    then fails with ``Output file does not contain any stream``.
+
+    Holes are therefore filled with the nearest real frame (the screen did not
+    change, so the frozen frame *is* the correct content), which keeps every
+    piece exactly ``local_end - local_start`` seconds long and stops the analyzer
+    timeline from drifting.
+    """
+    total = max(0.0, local_end - local_start)
+    geometry = (
+        f"scale={canvas_width}:{canvas_height}:force_original_aspect_ratio=decrease:"
+        "force_divisible_by=2,"
+        f"pad={canvas_width}:{canvas_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+    )
+    label = f"v{index}"
+    frame_times = probe_frame_times(path)
+
+    def legacy() -> tuple[list[tuple[list[str], str]], list[Path]]:
+        return [
+            (
+                ["-i", str(path)],
+                f"[{index}:v:0]trim=start={local_start:.6f}:end={local_end:.6f},"
+                "setpts=PTS-STARTPTS,"
+                f"{geometry}setsar=1,fps={fps},format=yuv420p[{label}]",
+            )
+        ], []
+
+    if frame_times is None:
+        # Probing unavailable: keep the historical best-effort trim.
+        return legacy()
+
+    in_window = [t for t in frame_times if local_start <= t <= local_end]
+    if not in_window:
+        anchor = _nearest_frame_time(frame_times, local_start)
+        if anchor is None:
+            # The source carries no video frames: black is the honest fallback.
+            return [
+                (
+                    [
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        f"color=c=black:s={canvas_width}x{canvas_height}:r={fps}:d={total:.3f}",
+                    ],
+                    f"[{index}:v:0]trim=duration={total:.6f},setpts=PTS-STARTPTS,"
+                    f"setsar=1,format=yuv420p[{label}]",
+                )
+            ], []
+        # Hold the nearest frame for the whole window. An image input gives an
+        # exact, frame-rate-stable clip (tpad/loop are unreliable on VFR input).
+        png_path = scratch_dir / f"freeze_{index}_{anchor:.3f}.png"
+        if _extract_freeze_frame(path, anchor, png_path):
+            return [
+                (
+                    [
+                        "-framerate",
+                        str(fps),
+                        "-loop",
+                        "1",
+                        "-t",
+                        f"{total:.3f}",
+                        "-i",
+                        str(png_path),
+                    ],
+                    f"[{index}:v]{geometry}setsar=1,format=yuv420p[{label}]",
+                )
+            ], [png_path]
+        return [
+            (
+                [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"color=c=black:s={canvas_width}x{canvas_height}:r={fps}:d={total:.3f}",
+                ],
+                f"[{index}:v:0]trim=duration={total:.6f},setpts=PTS-STARTPTS,"
+                f"setsar=1,format=yuv420p[{label}]",
+            )
+        ], []
+
+    front_hole = (in_window[0] - local_start) > HOLE_TOLERANCE_SECONDS
+    back_hole = (local_end - in_window[-1]) > HOLE_TOLERANCE_SECONDS
+    if not front_hole and not back_hole:
+        return legacy()
+
+    # Re-base onto the recording timeline, convert to CFR (so tpad has a frame
+    # duration to work with), clone frames across the holes, then clamp to the
+    # exact window length.
+    chain = [
+        f"[{index}:v:0]trim=start={local_start:.6f}:end={local_end:.6f}",
+        f"setpts=PTS-{local_start:.6f}/TB",
+        f"{geometry}setsar=1",
+        f"fps={fps}",
+    ]
+    if front_hole:
+        chain.append(
+            f"tpad=start_mode=clone:start_duration={in_window[0] - local_start:.6f}"
+        )
+    if back_hole:
+        chain.append(f"tpad=stop_mode=clone:stop_duration={total + 1.0:.3f}")
+    chain.append(f"trim=duration={total:.6f},setpts=PTS-STARTPTS,format=yuv420p[{label}]")
+    return [(["-i", str(path)], ",".join(chain))], []
+
+
 async def render_timeline_clip(
     segments: list[dict[str, Any]],
     start_time: float,
@@ -485,8 +789,10 @@ async def render_timeline_clip(
     command = [get_ffmpeg_path(), "-y", "-fflags", "+genpts"]
     filter_parts = []
     labels = []
-    for index, piece in enumerate(pieces):
-        label = f"v{index}"
+    scratch_files: list[Path] = []
+    next_index = 0
+    for piece in pieces:
+        label = f"v{next_index}"
         if piece[0] == "gap":
             duration = float(piece[1])
             command.extend(
@@ -498,21 +804,30 @@ async def render_timeline_clip(
                 ]
             )
             filter_parts.append(
-                f"[{index}:v:0]trim=duration={duration:.6f},setpts=PTS-STARTPTS,"
+                f"[{next_index}:v:0]trim=duration={duration:.6f},setpts=PTS-STARTPTS,"
                 f"setsar=1,format=yuv420p[{label}]"
             )
-        else:
-            _kind, path, local_start, local_end = piece
-            command.extend(["-i", str(path)])
-            filter_parts.append(
-                f"[{index}:v:0]trim=start={local_start:.6f}:end={local_end:.6f},"
-                "setpts=PTS-STARTPTS,"
-                f"scale={canvas_width}:{canvas_height}:force_original_aspect_ratio=decrease:"
-                "force_divisible_by=2,"
-                f"pad={canvas_width}:{canvas_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                f"setsar=1,fps={fps},format=yuv420p[{label}]"
-            )
-        labels.append(f"[{label}]")
+            labels.append(f"[{label}]")
+            next_index += 1
+            continue
+        _kind, path, local_start, local_end = piece
+        units, scratch = _file_piece_units(
+            next_index,
+            path,
+            local_start,
+            local_end,
+            canvas_width,
+            canvas_height,
+            fps,
+            output_path.parent,
+        )
+        scratch_files.extend(scratch)
+        for offset, (inputs, piece_filter) in enumerate(units):
+            unit_label = f"v{next_index + offset}"
+            command.extend(inputs)
+            filter_parts.append(piece_filter)
+            labels.append(f"[{unit_label}]")
+        next_index += len(units)
     # ``concat`` does not advertise a frame rate on its output link, so without an
     # explicit rate ffmpeg falls back to 25 fps CFR and duplicates frames, breaking
     # the ``start_time + frame_index / fps`` mapping the analyzer relies on.
@@ -546,13 +861,27 @@ async def render_timeline_clip(
         )
         _stdout, stderr = await process.communicate()
         if process.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
-            return True
-        logger.error(
-            f"Failed to render analyzer timeline clip (code {process.returncode}): "
-            f"{stderr.decode(errors='replace')[-3000:]}"
-        )
+            if clip_has_frames(output_path):
+                return True
+            # ffmpeg exits 0 for "Output file is empty, nothing was encoded";
+            # never hand a stream-less file to the next ffmpeg in the pipeline.
+            logger.error(
+                f"Rendered analyzer clip contains no frames; treating as a failed"
+                f" render: {output_path}"
+            )
+        else:
+            logger.error(
+                f"Failed to render analyzer timeline clip (code {process.returncode}): "
+                f"{stderr.decode(errors='replace')[-3000:]}"
+            )
     except Exception as e:
         logger.error(f"Failed to render analyzer timeline clip: {e}")
+    finally:
+        for scratch in scratch_files:
+            try:
+                scratch.unlink(missing_ok=True)
+            except OSError:
+                pass
     if output_path.exists():
         output_path.unlink()
     return False

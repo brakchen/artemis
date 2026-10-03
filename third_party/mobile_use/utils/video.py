@@ -30,6 +30,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from artemis.utils.video import (
+    clip_has_frames,
     get_ffmpeg_path,
     get_ffprobe_path,
     is_ffmpeg_drawtext_supported,
@@ -236,6 +237,14 @@ async def compress_video_for_api(
 
     current_size = input_path.stat().st_size
     logger.info(f"Video size: {current_size / 1024 / 1024:.2f} MB")
+
+    if not clip_has_frames(input_path):
+        # Fail fast with a classifiable error: ffmpeg would only come back with
+        # code 234 ("Output file does not contain any stream") and waste a full
+        # compress/slowdown attempt on a header-only file.
+        raise RuntimeError(
+            f"media processing failed: video segment contains no frames: {input_path}"
+        )
 
     if current_size <= target_size_bytes and not force_compress and slowdown_factor == 1.0:
         logger.info(

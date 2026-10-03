@@ -97,7 +97,13 @@ async def _detect_single_label(
                 )
 
         except Exception as e:
-            logger.warning(f"Detection attempt {i + 1} failed for '{label}': {e}")
+            # ``str(TimeoutError())`` is empty, so log the repr as well;
+            # otherwise the reason column reads as a blank failure.
+            logger.warning(
+                f"Detection attempt {i + 1} failed for '{label}': {e!r}"
+                if not str(e)
+                else f"Detection attempt {i + 1} failed for '{label}': {e}"
+            )
 
     return []
 

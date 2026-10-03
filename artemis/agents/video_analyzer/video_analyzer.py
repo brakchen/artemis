@@ -232,11 +232,18 @@ class VideoAnalyzer:
         label: str,
         force_fallback: bool = False,
     ):
-        """Invoke primary then fallback model under a context-scoped circuit breaker."""
+        """Invoke primary then fallback model under a context-scoped circuit breaker.
+
+        ``timeout`` budgets the whole attempt rather than each model: once the
+        primary has burned part of it, the fallback runs on what is left
+        (never less than half). A hanging primary therefore cannot double the
+        wall clock of a sub-agent call before the fallback even starts.
+        """
 
         primary_key = f"video_analyzer:{self.model_name}:primary"
         attempts = [True] if force_fallback else [False, True]
         last_error: BaseException | None = None
+        started = time.monotonic()
         for use_fallback in attempts:
             if not use_fallback and not self.circuit_breaker.allow(primary_key):
                 logger.warning(f"{label}: primary video-model circuit is open; using fallback")
@@ -251,7 +258,15 @@ class VideoAnalyzer:
                 raise
             try:
                 bound_llm = llm.bind_tools(tools)
-                response = await asyncio.wait_for(bound_llm.ainvoke(messages), timeout=timeout)
+                attempt_timeout = timeout
+                if use_fallback:
+                    attempt_timeout = max(
+                        timeout * 0.5,
+                        timeout - (time.monotonic() - started),
+                    )
+                response = await asyncio.wait_for(
+                    bound_llm.ainvoke(messages), timeout=attempt_timeout
+                )
                 if not use_fallback:
                     self.circuit_breaker.record_success(primary_key)
                 return response
@@ -263,7 +278,9 @@ class VideoAnalyzer:
                 if use_fallback or not failure.should_fallback:
                     raise
                 logger.warning(
-                    f"{label}: {failure.category.value} from primary; trying configured fallback"
+                    f"{label}: {failure.category.value} from primary; trying configured "
+                    f"fallback with {max(timeout * 0.5, timeout - (time.monotonic() - started)):.0f}s "
+                    f"of the {timeout:.0f}s attempt budget left"
                 )
         if last_error is not None:
             raise last_error

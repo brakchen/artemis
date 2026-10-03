@@ -242,6 +242,39 @@ if [ ${#MISSING_CORE[@]} -gt 0 ]; then
                 fi
             fi
         fi
+
+        # Fallback: ffprobe only ships with a full ffmpeg package, and the
+        # bundled imageio-ffmpeg wheel provides none. Recording finalization and
+        # clip validation call ffprobe, so fetch a portable build into the user
+        # profile (Artemis also probes ~/.local/bin without needing PATH).
+        if ! command -v ffprobe >/dev/null 2>&1 && [ ! -x "${HOME}/.local/share/ffmpeg-static/ffprobe" ]; then
+            FF_ARCH=""
+            case "$(uname -m)" in
+                x86_64|amd64) FF_ARCH="amd64" ;;
+                aarch64|arm64) FF_ARCH="arm64" ;;
+            esac
+            if [ -n "${FF_ARCH}" ]; then
+                echo -e "   ${CYAN}📦 Installing portable ffprobe in user space (~/.local)...${NC}"
+                mkdir -p "${HOME}/.local/share/ffmpeg-static" "${HOME}/.local/bin"
+                FF_TAR="/tmp/ffmpeg-static-$$.tar.xz"
+                FF_TMP="$(mktemp -d)"
+                FF_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${FF_ARCH}-static.tar.xz"
+                if curl -fsSL --connect-timeout 5 --max-time 180 "${FF_URL}" -o "${FF_TAR}"; then
+                    if tar -xJf "${FF_TAR}" -C "${FF_TMP}" --wildcards '*/ffprobe' 2>/dev/null; then
+                        FF_BIN="$(find "${FF_TMP}" -name ffprobe -type f 2>/dev/null | head -n 1)"
+                        if [ -n "${FF_BIN}" ]; then
+                            mv "${FF_BIN}" "${HOME}/.local/share/ffmpeg-static/ffprobe"
+                            chmod 755 "${HOME}/.local/share/ffmpeg-static/ffprobe"
+                            ln -sf "${HOME}/.local/share/ffmpeg-static/ffprobe" "${HOME}/.local/bin/ffprobe"
+                            echo -e "   ${GREEN}✓ ffprobe installed in user space.${NC}"
+                        fi
+                    fi
+                else
+                    echo -e "   ${YELLOW}⚠ Could not download portable ffprobe; video probing degrades gracefully.${NC}"
+                fi
+                rm -rf "${FF_TMP}" "${FF_TAR}"
+            fi
+        fi
     fi
 fi
 

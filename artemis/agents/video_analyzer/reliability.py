@@ -109,7 +109,11 @@ def classify_video_failure(error: BaseException) -> VideoFailure:
         FailureCategory.BAD_REQUEST,
         FailureCategory.UNKNOWN,
     }:
-        return VideoFailure(VideoFailureCategory.MEDIA_PROCESSING, False, True, True)
+        # Media failures are about the extracted clip itself (missing frames,
+        # corrupt container, unsupported codec). Bisecting the interval only
+        # re-runs the same broken extraction on smaller ranges and turns one
+        # failure into a cascade of them, so the chunk fails fast instead.
+        return VideoFailure(VideoFailureCategory.MEDIA_PROCESSING, False, False, True)
 
     category = VideoFailureCategory(generic.category.value)
     should_split = category in {VideoFailureCategory.TIMEOUT, VideoFailureCategory.UNKNOWN} or (

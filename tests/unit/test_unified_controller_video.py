@@ -29,6 +29,7 @@ from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.drivers.mock.mock_driver import MockDeviceDriver
 from artemis.utils.video import (
     build_scrcpy_record_command,
+    clip_has_frames,
     extract_frames_at_timestamps,
     get_ffmpeg_path,
     normalize_recording_to_mp4,
@@ -289,6 +290,58 @@ async def test_analyzer_clip_keeps_timeline_time_across_restart_gap(tmp_path):
     assert 24 <= len(frames2) <= 28
     assert is_black(frames2[3])
     assert is_blue(frames2[20])
+
+
+@pytest.mark.asyncio
+async def test_analyzer_clip_freezes_when_the_window_has_no_frames(tmp_path):
+    """A window without frames must render a freeze-frame, not an empty file.
+
+    scrcpy only encodes frames when the screen changes, so a window inside a
+    long static period carries zero frames. A plain ``trim`` of that window made
+    ffmpeg exit 0 while writing a header-only mp4, which the next ffmpeg call
+    rejected with ``Output file does not contain any stream`` (compression code
+    234) and which then failed the chunk.
+    """
+    ffmpeg = get_ffmpeg_path()
+    source = tmp_path / "recording.mkv"
+    _make_solid_clip(ffmpeg, "red", "108x242", 1.0, source)
+    # The segment claims ten seconds while the file only carries one second, so
+    # the requested window contains no frame at all.
+    segments = [{"path": source, "start": 0.0, "end": 10.0}]
+
+    output = tmp_path / "static_window.mp4"
+    assert await render_timeline_clip(
+        segments, 3.0, 5.0, output, canvas_width=180, canvas_height=320
+    )
+    frames = _read_frames(output)
+    assert 28 <= len(frames) <= 32  # 2s at 15 fps
+    # The held frame is the recording's content, not black filler.
+    assert frames[-1].max() > 150
+    assert clip_has_frames(output)
+
+
+@pytest.mark.asyncio
+async def test_analyzer_clip_pads_a_trailing_hole_to_the_window_length(tmp_path):
+    """Frames that stop early must not shorten the clip (timeline drift)."""
+    ffmpeg = get_ffmpeg_path()
+    source = tmp_path / "recording.mkv"
+    _make_solid_clip(ffmpeg, "red", "108x242", 1.0, source)
+    segments = [{"path": source, "start": 0.0, "end": 10.0}]
+
+    output = tmp_path / "trailing_hole.mp4"
+    assert await render_timeline_clip(
+        segments, 0.0, 3.0, output, canvas_width=180, canvas_height=320
+    )
+    frames = _read_frames(output)
+    assert 44 <= len(frames) <= 46  # 3s at 15 fps, not the 1s of real frames
+    assert frames[-1].max() > 150
+
+
+def test_clip_has_frames_rejects_header_only_and_non_video_files(tmp_path):
+    header_only = tmp_path / "header_only.mp4"
+    header_only.write_bytes(b"\x00\x00\x00\x20ftypisom")
+    assert clip_has_frames(header_only) is False
+    assert clip_has_frames(tmp_path / "missing.mp4") is False
 
 
 @pytest.fixture
