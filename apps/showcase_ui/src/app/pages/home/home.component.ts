@@ -400,6 +400,8 @@ export class HomeComponent implements OnInit, OnDestroy {
   /** Boot progress 0-100. Never invent a value: 0 means "not started / failed". */
   public emulatorProgressPercent = computed(() => this.emulatorLaunchState()?.progress_percent ?? 0);
   public isEmulatorLaunching = computed(() => this.systemService.isEmulatorLaunching());
+  /** Single-VM policy: a launch was refused because another instance is running. */
+  public isEmulatorBusy = computed(() => this.emulatorLaunchState()?.status === 'busy');
   public showLaunchLogs = signal<boolean>(false);
   
   // Probes

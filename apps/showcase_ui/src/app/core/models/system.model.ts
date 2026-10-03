@@ -101,6 +101,7 @@ export type EmulatorLaunchStage =
   | 'booting'
   | 'ready'
   | 'failed'
+  | 'busy'
   | 'stopped';
 
 export interface EmulatorLaunchState {

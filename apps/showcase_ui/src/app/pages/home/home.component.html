@@ -1173,6 +1173,28 @@
             }
 
             <!-- STATE B-2: EMULATOR LAUNCH FAILED DIAGNOSTIC CARD -->
+            <!-- STATE B-2: SINGLE-VM POLICY - another instance is already running -->
+            @if (isEmulatorBusy()) {
+            <div class="emulator-busy-card">
+              <div class="busy-icon-box">
+                <span class="material-symbols-outlined">pause_circle</span>
+              </div>
+              <div class="busy-titles">
+                <h4 class="busy-title">Emulator already running</h4>
+                <p class="busy-desc">{{ emulatorLaunchState()?.error }}</p>
+              </div>
+              <div class="busy-actions">
+                <button type="button" class="btn-stop-vm" (click)="stopEmulator()">
+                  <span class="material-symbols-outlined">stop_circle</span>
+                  <span>Stop Current VM</span>
+                </button>
+                <button type="button" class="btn-dismiss-failed" (click)="dismissEmulatorStatus()" title="Dismiss">
+                  <span class="material-symbols-outlined">close</span>
+                </button>
+              </div>
+            </div>
+            }
+
             @if (!isEmulatorLaunching() && emulatorLaunchState()?.status === 'failed') {
               <div class="emulator-failed-container">
                 <div class="emulator-failed-card">

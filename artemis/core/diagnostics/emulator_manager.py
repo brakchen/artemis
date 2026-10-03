@@ -44,6 +44,7 @@ class EmulatorLaunchStage(str, Enum):
     BOOTING = "booting"  # Visible in ADB, waiting for sys.boot_completed=1
     READY = "ready"  # Boot complete and ready for automation
     FAILED = "failed"  # Process crashed, lock error, or timeout
+    BUSY = "busy"  # Refused: another emulator instance is already running
     STOPPED = "stopped"  # Stopped by user
 
 
@@ -241,6 +242,28 @@ class EmulatorManager:
                 if self._track_task and not self._track_task.done():
                     self._track_task.cancel()
 
+                # Single-VM policy: this host has limited RAM, so refuse to start a
+                # second emulator and report BUSY so the UI can show a notice.
+                running_serials = _current_emulator_serials(self._locate_adb())
+                if self._proc is not None and self._proc.poll() is None:
+                    running_serials.add(f"pid:{self._proc.pid}")
+                if running_serials:
+                    detail = ", ".join(sorted(running_serials))
+                    self._current_state = EmulatorLaunchState(
+                        avd_name=clean_avd,
+                        status=EmulatorLaunchStage.BUSY,
+                        stage_message="An emulator instance is already running.",
+                        error=(
+                            "Only one emulator can run at a time on this host "
+                            f"(memory limit). Already running: {detail}. "
+                            "Stop it first, or keep using the running instance."
+                        ),
+                        can_retry=False,
+                        logs=list(self._log_buffer),
+                    )
+                    logger.info(f"[EmulatorManager] Rejected launch of '{clean_avd}': {detail}")
+                    return self.get_status()
+
                 # Emulator serials already attached before this launch: the boot
                 # tracker must not adopt an already-running instance (with two VMs
                 # up, `adb devices` lists both and the first line may be the other).
@@ -248,7 +271,17 @@ class EmulatorManager:
 
                 # Spawn emulator process capturing stdout & stderr
                 proc = subprocess.Popen(
-                    [emu_path, "-avd", clean_avd],
+                    # Headless: Artemis captures the screen through scrcpy/adb, so no
+                    # window is needed. This also removes the Qt xcb/display dependency
+                    # (a service context has no DISPLAY, and libxcb-cursor may be absent).
+                    [
+                        emu_path,
+                        "-avd",
+                        clean_avd,
+                        "-no-window",
+                        "-no-audio",
+                        "-no-boot-anim",
+                    ],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,

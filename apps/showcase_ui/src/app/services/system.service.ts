@@ -274,7 +274,7 @@ export class SystemService {
             this.launchingAvd.set(null);
             this.stopEmulatorStatusPolling();
             this.fetchReadiness().subscribe();
-          } else if (state.status === 'failed' || state.status === 'stopped' || state.status === 'idle') {
+          } else if (state.status === 'failed' || state.status === 'stopped' || state.status === 'idle' || state.status === 'busy') {
             this.launchingAvd.set(null);
             this.stopEmulatorStatusPolling();
           } else {
