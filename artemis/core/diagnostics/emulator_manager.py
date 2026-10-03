@@ -223,6 +223,32 @@ class EmulatorManager:
             }
         return {"start_new_session": True}
 
+    @staticmethod
+    def _emulator_env() -> dict[str, str]:
+        """Environment handed to the emulator process.
+
+        The AVD renders with ``hw.gpu.mode=host`` (host GPU instead of the
+        SwiftShader software rasterizer), and that path needs a GL/X display —
+        while the UI server itself runs headless in a service with no DISPLAY.
+        Without one the emulator dies with ``Failed to get EGL display`` and
+        never reaches adb, so the logged-in desktop's Xwayland is reused here.
+        The cookie file name carries a per-login random suffix, hence the glob
+        at launch time. If no desktop session exists the emulator gets no
+        display, prints its GPU error and falls back to software rendering.
+        """
+        env = os.environ.copy()
+        if env.get("DISPLAY"):
+            return env
+        try:
+            cookies = sorted(Path(f"/run/user/{os.getuid()}").glob(".mutter-Xwaylandauth.*"))
+        except OSError:
+            cookies = []
+        if not cookies:
+            return env
+        env["DISPLAY"] = ":0"
+        env["XAUTHORITY"] = str(cookies[-1])
+        return env
+
     def _locate_emulator(self) -> str | None:
         """Find the emulator binary path from PATH or standard SDK environments."""
         resolved = toolchain.resolve("emulator")
@@ -378,6 +404,7 @@ class EmulatorManager:
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
+                    env=self._emulator_env(),
                     **self._subprocess_creation_kwargs(),
                 )
                 self._proc = proc
