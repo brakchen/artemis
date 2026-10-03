@@ -114,7 +114,7 @@ limitations under the License.
             </div>
           </div>
           <div class="task-goal" title="{{ session.initial_goal }}">
-            {{ session.initial_goal || 'Unnamed Task' }}
+            {{ session.initial_goal || ('Unnamed Task' | t) }}
           </div>
           <div class="task-card-footer">
             <span class="task-id" [title]="session.session_id">ID: {{ session.session_id }}</span>
@@ -171,7 +171,7 @@ limitations under the License.
                 </div>
               </div>
               <div class="task-goal" title="{{ session.initial_goal }}">
-                {{ session.initial_goal || 'Unnamed Task' }}
+                {{ session.initial_goal || ('Unnamed Task' | t) }}
               </div>
               <div class="task-card-footer">
                 <span class="task-id" [title]="session.session_id">ID: {{ session.session_id }}</span>

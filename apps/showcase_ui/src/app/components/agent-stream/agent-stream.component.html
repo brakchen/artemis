@@ -116,7 +116,7 @@ limitations under the License.
               </div>
             </div>
             <div class="item-goal" title="{{ session.initial_goal }}">
-              {{ session.initial_goal || 'Unnamed Task' }}
+              {{ session.initial_goal || ('Unnamed Task' | t) }}
             </div>
             <div class="item-footer">
               <span class="item-id" [title]="session.session_id">ID: {{ session.session_id }}</span>
@@ -171,7 +171,7 @@ limitations under the License.
                 </div>
               </div>
               <div class="item-goal" title="{{ session.initial_goal }}">
-                {{ session.initial_goal || 'Unnamed Task' }}
+                {{ session.initial_goal || ('Unnamed Task' | t) }}
               </div>
               <div class="item-footer">
                 <span class="item-id" [title]="session.session_id">ID: {{ session.session_id }}</span>
@@ -599,7 +599,7 @@ limitations under the License.
                 class="phase-header"
                 [class.first-phase]="first && startupWorkItems().length === 0"
                 >
-                <span class="phase-worked-time">{{ isCheckerPhase(phase) ? 'Checked' : 'Worked' }} for {{ phase.durationSeconds }}s</span>
+                <span class="phase-worked-time">{{ isCheckerPhase(phase) ? ('Checked' | t) : ('Worked' | t) }} for {{ phase.durationSeconds }}s</span>
                 @if (phase.tokens) {
                   <span class="phase-token-usage" [title]="getTokenTooltip(phase)">
                     <span class="token-dot">·</span>
@@ -657,7 +657,7 @@ limitations under the License.
                                   [class.collapsed]="isCheckerSegmentCollapsed(block, itemIdx)">
                                   <div class="details-summary" (click)="toggleCheckerSegment(block, itemIdx)">
                                     <span class="stream-status-dot" [class.streaming]="isCheckerSegmentRunning(block, itemIdx) && !isCheckerSegmentResetNotice(item)" [class.resetting]="isCheckerSegmentResetNotice(item)"></span>
-                                    <span class="header-label">{{ isCheckerSegmentResetNotice(item) ? getCheckerSegmentResetMessage(item) : 'Thought' }}</span>
+                                    <span class="header-label">{{ isCheckerSegmentResetNotice(item) ? getCheckerSegmentResetMessage(item) : ('Thought' | t) }}</span>
                                   </div>
                                   @if (item.data.text && item.data.text.trim()) {
                                     <div class="details-content-wrapper">
@@ -768,13 +768,13 @@ limitations under the License.
                                       {{ getReportStatusValue(item.data) === 'failed' ? 'cancel' : 'task_alt' }}
                                     </span>
                                     <span class="action-title">
-                                      {{ getReportStatusValue(item.data) === 'failed' ? 'Task Execution Failed' : 'Task Completed' }}
+                                      {{ getReportStatusValue(item.data) === 'failed' ? ('Task Execution Failed' | t) : ('Task Completed' | t) }}
                                     </span>
                                     <span class="action-status-badge" [class.is-failed]="getReportStatusValue(item.data) === 'failed'" [class.is-completed]="getReportStatusValue(item.data) !== 'failed'">
                                       <span class="material-symbols-outlined status-icon">
                                         {{ getReportStatusValue(item.data) === 'failed' ? 'error' : 'check_circle' }}
                                       </span>
-                                      {{ getReportStatusValue(item.data) === 'failed' ? 'Failed' : 'Completed' }}
+                                      {{ getReportStatusValue(item.data) === 'failed' ? ('Failed' | t) : ('Completed' | t) }}
                                     </span>
                                     <span class="action-expand-icon material-symbols-outlined">
                                       {{ isActionExpanded('action-' + block.id + '-' + itemIdx) ? 'expand_less' : 'expand_more' }}
@@ -986,7 +986,7 @@ limitations under the License.
                                           }
                                           @if (!isLLMRetryEntryWaiting(retry)) {
                                             <span class="llm-retry-status-line">
-                                              Retrying LLM request · Waited {{ getLLMRetryEntryWaited(retry) }}
+                                              {{ 'Retrying LLM request · Waited' | t }} {{ getLLMRetryEntryWaited(retry) }}
                                             </span>
                                           }
                                         </div>
@@ -1040,7 +1040,7 @@ limitations under the License.
                                                 <span>Retry {{ retryIndex + 1 }}</span>
                                                 <span>
                                                   Planned {{ getLLMRetryEntryDelay(retry) || '0s' }}
-                                                  · Waited {{ getLLMRetryEntryWaited(retry) }}
+                                                  {{ '· Waited' | t }} {{ getLLMRetryEntryWaited(retry) }}
                                                 </span>
                                               </div>
                                             }

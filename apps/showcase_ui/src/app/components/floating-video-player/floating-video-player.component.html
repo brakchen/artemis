@@ -37,7 +37,7 @@ limitations under the License.
           {{ agentService.recordingPlaybackStatus() === 'live' ? 'sensors' : (agentService.playerMode() === 'steps' ? 'slideshow' : (agentService.recordingPlaybackStatus() === 'processing' ? 'progress_activity' : 'smart_display')) }}
         </span>
         <span class="header-title" [title]="agentService.activeVideoTitle()">
-          {{ agentService.recordingPlaybackStatus() === 'live' ? 'Live Device Screen' : (agentService.playerMode() === 'steps' ? ('Step Replay (' + (totalStepFrames() > 0 ? (activeStepIndex() + 1) + '/' + totalStepFrames() : '0') + ')') : (agentService.recordingPlaybackStatus() === 'processing' ? 'Preparing Recording' : (agentService.activeVideoTitle() || 'Screen Recording'))) }}
+          {{ agentService.recordingPlaybackStatus() === 'live' ? ('Live Device Screen' | t) : (agentService.playerMode() === 'steps' ? ('Step Replay (' + (totalStepFrames() > 0 ? (activeStepIndex() + 1) + '/' + totalStepFrames() : '0') + ')') : (agentService.recordingPlaybackStatus() === 'processing' ? ('Preparing Recording' | t) : (agentService.activeVideoTitle() || ('Screen Recording' | t)))) }}
         </span>
       </div>
       <div class="header-actions" (mousedown)="$event.stopPropagation()">
@@ -137,7 +137,7 @@ limitations under the License.
             @if (agentService.playerMode() === 'video' && (agentService.recordingPlaybackStatus() === 'processing' || agentService.isVideoLoading())) {
               <div class="video-loading-state">
                 <span class="material-symbols-outlined spinning-icon">progress_activity</span>
-                <span>{{ agentService.recordingPlaybackMessage() || 'Preparing screen recording...' }}</span>
+                <span>{{ agentService.recordingPlaybackMessage() || ('Preparing screen recording...' | t) }}</span>
               </div>
             }
             <!-- Option A: STEP REPLAY VIEW (ACTIVE IN STEP MODE) -->
@@ -409,10 +409,10 @@ limitations under the License.
                         <span class="material-symbols-outlined fallback-icon">videocam_off</span>
                       </div>
                       <h4 class="fallback-title">
-                        {{ agentService.recordingPlaybackStatus() === 'failed' || videoLoadError() ? 'Recording Playback Failed' : 'No Video Recording Available' }}
+                        {{ agentService.recordingPlaybackStatus() === 'failed' || videoLoadError() ? ('Recording Playback Failed' | t) : ('No Video Recording Available' | t) }}
                       </h4>
                       <p class="fallback-desc">
-                        {{ videoLoadError() ? 'The finalized recording could not be played.' : (agentService.recordingPlaybackMessage() || 'No screen recording was found for this task.') }}
+                        {{ videoLoadError() ? ('The finalized recording could not be played.' | t) : (agentService.recordingPlaybackMessage() || ('No screen recording was found for this task.' | t)) }}
                       </p>
                       @if (agentService.recordingPlaybackStatus() === 'failed' || videoLoadError()) {
                         <button class="retry-btn" (click)="videoLoadError.set(false); agentService.retryVideoRecording()">

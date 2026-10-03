@@ -101,7 +101,7 @@
       title="{{ 'Re-check all system dependencies' | t }}"
     >
       <span class="material-symbols-outlined" [class.spinning]="isRefreshingDiagnostics()">refresh</span>
-      <span>{{ isRefreshingDiagnostics() ? 'Checking...' : 'Re-check' }}</span>
+      <span>{{ isRefreshingDiagnostics() ? ('Checking...' | t) : ('Re-check' | t) }}</span>
     </button>
   </div>
 
@@ -134,7 +134,7 @@
           (click)="copyToClipboard(oneClickSetupCmd(), 'one_click_deps')">
           <span class="material-symbols-outlined">{{ copiedId() === 'one_click_deps' ? 'check' : 'content_copy'
             }}</span>
-          <span>{{ copiedId() === 'one_click_deps' ? 'Copied!' : 'Copy' }}</span>
+          <span>{{ copiedId() === 'one_click_deps' ? ('Copied!' | t) : ('Copy' | t) }}</span>
         </button>
       </div>
     </div>
@@ -152,7 +152,7 @@
           </div>
           <div class="item-title-group">
             <div class="item-name">{{ 'Python Runtime' | t }}</div>
-            <div class="item-subtitle">{{ pythonProbe()?.summary || 'Checking…' }}</div>
+            <div class="item-subtitle">{{ pythonProbe()?.summary || ('Checking…' | t) }}</div>
           </div>
           <div class="item-status">
             <span class="status-dot" [class.dot-pass]="pythonProbe()?.status === 'pass'" [class.dot-fail]="pythonProbe()?.status === 'fail'"></span>
@@ -168,7 +168,7 @@
                 (click)="copyToClipboard('uv python install 3.12', 'py_install')">
                 <span class="material-symbols-outlined">{{ copiedId() === 'py_install' ? 'check' : 'content_copy'
                   }}</span>
-                <span>{{ copiedId() === 'py_install' ? 'Copied!' : 'Copy' }}</span>
+                <span>{{ copiedId() === 'py_install' ? ('Copied!' | t) : ('Copy' | t) }}</span>
               </button>
             </div>
           </div>
@@ -185,7 +185,7 @@
           </div>
           <div class="item-title-group">
             <div class="item-name">{{ 'Android Platform-Tools' | t }}</div>
-            <div class="item-subtitle">{{ !adbProbe() ? 'Checking…' : (adbProbe()?.metadata?.['installed'] ? 'ADB Installed' : 'ADB Missing') }}</div>
+            <div class="item-subtitle">{{ !adbProbe() ? ('Checking…' | t) : (adbProbe()?.metadata?.['installed'] ? ('ADB Installed' | t) : ('ADB Missing' | t)) }}</div>
           </div>
           <div class="item-status">
             <span class="status-dot" [class.dot-pass]="adbProbe()?.metadata?.['installed']" [class.dot-fail]="adbProbe()?.status === 'fail'"></span>
@@ -201,7 +201,7 @@
                 (click)="copyToClipboard(adbInstallCmd(), 'env_adb_cmd')">
                 <span class="material-symbols-outlined">{{ copiedId() === 'env_adb_cmd' ? 'check' : 'content_copy'
                   }}</span>
-                <span>{{ copiedId() === 'env_adb_cmd' ? 'Copied!' : 'Copy' }}</span>
+                <span>{{ copiedId() === 'env_adb_cmd' ? ('Copied!' | t) : ('Copy' | t) }}</span>
               </button>
             </div>
           </div>
@@ -218,7 +218,7 @@
           </div>
           <div class="item-title-group">
             <div class="item-name">{{ 'System Configuration' | t }}</div>
-            <div class="item-subtitle">{{ configProbe()?.summary || 'Config Valid' }}</div>
+            <div class="item-subtitle">{{ configProbe()?.summary || ('Config Valid' | t) }}</div>
           </div>
           <div class="item-status">
             <span class="status-dot" [class.dot-pass]="configProbe()?.status === 'pass'" [class.dot-fail]="configProbe()?.status === 'fail'"></span>
@@ -234,7 +234,7 @@
                 (click)="copyToClipboard('artemis init', 'cfg_init')">
                 <span class="material-symbols-outlined">{{ copiedId() === 'cfg_init' ? 'check' : 'content_copy'
                   }}</span>
-                <span>{{ copiedId() === 'cfg_init' ? 'Copied!' : 'Copy' }}</span>
+                <span>{{ copiedId() === 'cfg_init' ? ('Copied!' | t) : ('Copy' | t) }}</span>
               </button>
             </div>
           </div>
@@ -251,7 +251,7 @@
           </div>
           <div class="item-title-group">
             <div class="item-name">{{ 'Video Toolchain' | t }}</div>
-            <div class="item-subtitle">{{ toolchainProbe()?.summary || 'FFmpeg & scrcpy' }}</div>
+            <div class="item-subtitle">{{ toolchainProbe()?.summary || ('FFmpeg & scrcpy' | t) }}</div>
           </div>
           <div class="item-status">
             <span class="status-dot" [class.dot-pass]="toolchainProbe()?.status === 'pass'" [class.dot-fail]="toolchainProbe()?.status !== 'pass'"></span>
@@ -267,7 +267,7 @@
                 (click)="copyToClipboard(toolchainInstallCmd(), 'install_toolchain')">
                 <span class="material-symbols-outlined">{{ copiedId() === 'install_toolchain' ? 'check' : 'content_copy'
                   }}</span>
-                <span>{{ copiedId() === 'install_toolchain' ? 'Copied!' : 'Copy' }}</span>
+                <span>{{ copiedId() === 'install_toolchain' ? ('Copied!' | t) : ('Copy' | t) }}</span>
               </button>
             </div>
           </div>
@@ -346,7 +346,7 @@
             <div class="choice-title-row">
               <span class="choice-title">{{ 'Custom Configuration' | t }}</span>
             </div>
-            <p class="choice-desc">{{ 'Define models in' | t }}<code>{{ 'config/artemis.jsonc' | t }}</code> & keys in <code>.env</code>{{ '(OpenAI, Claude, Ollama).' | t }}</p>
+            <p class="choice-desc">{{ 'Define models in' | t }}<code>{{ 'config/artemis.jsonc' | t }}</code>{{ '& keys in' | t }}<code>.env</code>{{ '(OpenAI, Claude, Ollama).' | t }}</p>
           </div>
         </div>
       </div>
@@ -400,10 +400,10 @@
           [disabled]="isSavingGeminiKey() || isTestingGeminiKey() || (!isGeminiModified() && !geminiKeyInput().trim())" (click)="saveGeminiKey()">
           @if (isSavingGeminiKey()) {
           <span class="material-symbols-outlined spin">sync</span>
-          <span>{{ geminiKeyInput().trim() ? 'Verifying & Saving...' : 'Clearing...' }}</span>
+          <span>{{ geminiKeyInput().trim() ? ('Verifying & Saving...' | t) : ('Clearing...' | t) }}</span>
           } @else {
           <span class="material-symbols-outlined">{{ geminiKeyInput().trim() ? 'save' : 'delete_outline' }}</span>
-          <span>{{ !geminiKeyInput().trim() ? 'Clear Key' : (isGeminiModified() ? 'Save & Apply' : 'Save Key') }}</span>
+          <span>{{ !geminiKeyInput().trim() ? ('Clear Key' | t) : (isGeminiModified() ? ('Save & Apply' | t) : ('Save Key' | t)) }}</span>
           }
         </button>
 
@@ -498,10 +498,10 @@
               [disabled]="isSavingOcrKey() || isTestingOcrKey() || (!isOcrModified() && !ocrKeyInput().trim())" (click)="saveOcrKey()">
               @if (isSavingOcrKey()) {
               <span class="material-symbols-outlined spin">sync</span>
-              <span>{{ ocrKeyInput().trim() ? 'Verifying & Saving...' : 'Clearing...' }}</span>
+              <span>{{ ocrKeyInput().trim() ? ('Verifying & Saving...' | t) : ('Clearing...' | t) }}</span>
               } @else {
               <span class="material-symbols-outlined">{{ ocrKeyInput().trim() ? 'save' : 'delete_outline' }}</span>
-              <span>{{ !ocrKeyInput().trim() ? 'Clear Key' : (isOcrModified() ? 'Save & Apply' : 'Save Key') }}</span>
+              <span>{{ !ocrKeyInput().trim() ? ('Clear Key' | t) : (isOcrModified() ? ('Save & Apply' | t) : ('Save Key' | t)) }}</span>
               }
             </button>
 
@@ -545,7 +545,7 @@
             <span class="material-symbols-outlined header-icon">tune</span>
             <div class="inspector-header-titles">
               <span class="inspector-title">{{ 'Active Model Configuration' | t }}</span>
-              <span class="inspector-subtitle">{{ 'Defined in' | t }}<code>{{ modelConfigEnv()?.config_path || 'config/artemis.jsonc' }}</code></span>
+              <span class="inspector-subtitle">{{ 'Defined in' | t }}<code>{{ modelConfigEnv()?.config_path || ('config/artemis.jsonc' | t) }}</code></span>
             </div>
           </div>
           <div class="inspector-header-actions">
@@ -561,7 +561,7 @@
                 <span class="material-symbols-outlined">
                   {{ showFullConfigFile() ? 'unfold_less' : 'code' }}
                 </span>
-                <span>{{ showFullConfigFile() ? 'Hide JSONC' : 'View JSONC' }}</span>
+                <span>{{ showFullConfigFile() ? ('Hide JSONC' | t) : ('View JSONC' | t) }}</span>
             </button>
           </div>
           </div>
@@ -592,7 +592,7 @@
           @if (effectiveOverrideActive()) {
           <div class="config-effective-hint">
             <span class="material-symbols-outlined">info</span>
-            <span>{{ 'Using default LLM provider' | t }}<code>{{ effectiveDefaultModel()?.provider }}</code>{{ '— the configured' | t }}<code>{{ configuredDefaultLabel() }}</code>{{ (effectiveDefaultModel()?.resolved_via === 'default' ? 'is overridden by the default provider.' : 'has no API key registered.') | t }}</span>
+            <span>{{ 'Using default LLM provider' | t }}<code>{{ effectiveDefaultModel()?.provider }}</code>{{ '— the configured' | t }}<code>{{ configuredDefaultLabel() }}</code>{{ (effectiveDefaultModel()?.resolved_via === 'default' ? ('is overridden by the default provider.' | t) : ('has no API key registered.' | t)) | t }}</span>
           </div>
           }
 
@@ -806,8 +806,8 @@
           <div class="model-picker-menu">
             <div class="model-picker-head">
               <span class="material-symbols-outlined">list</span>
-              <span>Picking: {{ which === 'default' ? 'Default Model' : 'Fallback Model' }}</span>
-              <span class="model-picker-count">{{ pickerModels().length }} / {{ discoveredModels().length }} model(s)</span>
+              <span>Picking: {{ which === 'default' ? ('Default Model' | t) : ('Fallback Model' | t) }}</span>
+              <span class="model-picker-count">{{ pickerModels().length }} / {{ discoveredModels().length }} {{ 'model(s)' | t }}</span>
               <button type="button" class="btn-icon-action" title="{{ 'Close list' | t }}" (click)="toggleModelPicker(which)">
                 <span class="material-symbols-outlined">close</span>
               </button>
@@ -947,7 +947,7 @@
               (click)="toggleConnectionMethods()"
             >
               <span class="material-symbols-outlined">swap_horiz</span>
-              <span>{{ showConnectionMethods() ? 'Hide Options' : 'Change Connection' }}</span>
+              <span>{{ showConnectionMethods() ? ('Hide Options' | t) : ('Change Connection' | t) }}</span>
             </button>
 
             <button
@@ -965,7 +965,7 @@
               <span class="feedback-text">{{ adbRestartFeedback() }}</span>
               } @else {
               <span class="material-symbols-outlined">sync</span>
-              <span>{{ isRemoteAdbServer() ? 'Refresh Devices' : 'Restart ADB' }}</span>
+              <span>{{ isRemoteAdbServer() ? ('Refresh Devices' | t) : ('Restart ADB' | t) }}</span>
               }
             </button>
           </div>
@@ -1052,22 +1052,22 @@
                       <div class="tracker-titles">
                         <div class="tracker-main-heading">
                           @if (emulatorLaunchState(); as st) {
-                          <h4 class="tracker-title">{{ 'Launching Android Emulator:' | t }}<span class="avd-highlight">{{ st.avd_name || 'Virtual Device' }}</span>
+                          <h4 class="tracker-title">{{ 'Launching Android Emulator:' | t }}<span class="avd-highlight">{{ st.avd_name || ('Virtual Device' | t) }}</span>
                           </h4>
-                          <span class="stage-tag-badge">{{ st.status === 'booting' ? 'OS Booting' : 'Starting' }}</span>
+                          <span class="stage-tag-badge">{{ st.status === 'booting' ? ('OS Booting' | t) : ('Starting' | t) }}</span>
                           } @else {
-                          <h4 class="tracker-title">{{ 'Device Booting:' | t }}<span class="avd-highlight">{{ activeDevice()?.serial || 'Android Device' }}</span>
+                          <h4 class="tracker-title">{{ 'Device Booting:' | t }}<span class="avd-highlight">{{ activeDevice()?.serial || ('Android Device' | t) }}</span>
                           </h4>
                           <span class="stage-tag-badge">{{ 'Device Booting' | t }}</span>
                           }
                         </div>
-                        <p class="tracker-subtitle">{{ emulatorLaunchState()?.stage_message || (emulatorLaunchState() ? 'Initializing Android Virtual Device...' : 'Waiting for the connected device to finish booting...') }}</p>
+                        <p class="tracker-subtitle">{{ emulatorLaunchState()?.stage_message || (emulatorLaunchState() ? ('Initializing Android Virtual Device...' | t) : ('Waiting for the connected device to finish booting...' | t)) }}</p>
                       </div>
                     </div>
                     <div class="tracker-actions">
                       <button type="button" class="btn-toggle-logs" [class.active]="showLaunchLogs()" (click)="toggleLaunchLogs()">
                         <span class="material-symbols-outlined">terminal</span>
-                        <span>{{ showLaunchLogs() ? 'Hide Logs' : 'View Boot Logs' }}</span>
+                        <span>{{ showLaunchLogs() ? ('Hide Logs' | t) : ('View Boot Logs' | t) }}</span>
                       </button>
                       <button type="button" class="btn-stop-emu" (click)="stopEmulator()" title="{{ 'Terminate emulator process' | t }}">
                         <span class="material-symbols-outlined">cancel</span>
@@ -1135,7 +1135,7 @@
                       <div class="progress-bar-fill" [style.width.%]="emulatorProgressPercent()"></div>
                     </div>
                     <div class="progress-bar-meta">
-                      <span class="progress-percent">{{ emulatorProgressPercent() }}% Complete</span>
+                      <span class="progress-percent">{{ emulatorProgressPercent() }}{{ '% Complete' | t }}</span>
                       <span class="progress-timer">
                         <span class="material-symbols-outlined timer-icon">timer</span>
                         Elapsed: {{ emulatorLaunchState()?.elapsed_seconds || 0 }}s
@@ -1159,7 +1159,7 @@
                         </div>
                         <button type="button" class="btn-copy-logs" (click)="copyToClipboard(emulatorLaunchState()?.logs?.join('\n') || '', 'boot_logs')">
                           <span class="material-symbols-outlined">{{ copiedId() === 'boot_logs' ? 'check' : 'content_copy' }}</span>
-                          <span>{{ copiedId() === 'boot_logs' ? 'Copied' : 'Copy Logs' }}</span>
+                          <span>{{ copiedId() === 'boot_logs' ? ('Copied' | t) : ('Copy Logs' | t) }}</span>
                         </button>
                       </div>
                       <pre class="logs-body">@if (emulatorLaunchState()?.logs?.length) {@for (log of emulatorLaunchState()?.logs; track log) {<div class="log-line">{{ log }}</div>}} @else {<div class="log-empty">{{ 'Waiting for process output...' | t }}</div>}</pre>
@@ -1202,7 +1202,7 @@
                       </div>
                       <div class="failed-titles">
                         <h4 class="failed-title">{{ 'Emulator Launch Failed' | t }}</h4>
-                        <p class="failed-desc">{{ emulatorLaunchState()?.error || 'The Android emulator process failed to start or crashed during initialization.' }}</p>
+                        <p class="failed-desc">{{ emulatorLaunchState()?.error || ('The Android emulator process failed to start or crashed during initialization.' | t) }}</p>
                       </div>
                     </div>
                     <button type="button" class="btn-dismiss-failed" (click)="dismissEmulatorStatus()" title="{{ 'Dismiss error' | t }}">
@@ -1216,7 +1216,7 @@
                         <span>{{ 'Process Output / Failure Logs:' | t }}</span>
                         <button type="button" class="btn-copy-logs" (click)="copyToClipboard(emulatorLaunchState()?.logs?.join('\n') || '', 'fail_logs')">
                           <span class="material-symbols-outlined">{{ copiedId() === 'fail_logs' ? 'check' : 'content_copy' }}</span>
-                          <span>{{ copiedId() === 'fail_logs' ? 'Copied' : 'Copy Logs' }}</span>
+                          <span>{{ copiedId() === 'fail_logs' ? ('Copied' | t) : ('Copy Logs' | t) }}</span>
                         </button>
                       </div>
                       <pre class="failed-logs-pre">@for (log of emulatorLaunchState()?.logs; track log) {<div class="log-line">{{ log }}</div>}</pre>
@@ -1263,7 +1263,7 @@
                         </div>
                         <span class="method-desc">
                           @if (0 < installedAvds().length) {
-                            {{ installedAvds().length }} local virtual device{{ 1 < installedAvds().length ? 's' : '' }} available
+                            {{ installedAvds().length }} {{ 'local virtual devices available' | t }}
                           } @else {
                             Launch a local Android Virtual Device
                           }
@@ -1355,7 +1355,7 @@
                       (click)="switchToLocalAdbServer()"
                     >
                       <span class="material-symbols-outlined" [class.spinning]="isSwitchingToLocalAdb()">sync</span>
-                      <span>{{ isSwitchingToLocalAdb() ? 'Switching...' : 'Use Local ADB' }}</span>
+                      <span>{{ isSwitchingToLocalAdb() ? ('Switching...' | t) : ('Use Local ADB' | t) }}</span>
                     </button>
                   </div>
                 }
@@ -1400,7 +1400,7 @@
                                 >
                                   @if (launchingAvd() === avd || (isEmulatorLaunching() && emulatorLaunchState()?.avd_name === avd)) {
                                     <span class="spinner-icon"></span>
-                                    <span>{{ emulatorLaunchState()?.status === 'booting' ? 'Booting OS' : 'Starting' }} ({{ emulatorLaunchState()?.elapsed_seconds || 0 }}s)</span>
+                                    <span>{{ emulatorLaunchState()?.status === 'booting' ? ('Booting OS' | t) : ('Starting' | t) }} ({{ emulatorLaunchState()?.elapsed_seconds || 0 }}s)</span>
                                   } @else {
                                     <span class="material-symbols-outlined action-icon">play_arrow</span>
                                     <span>{{ 'Launch' | t }}</span>
@@ -1466,7 +1466,7 @@
                               </div>
                               <div class="step-card-title">{{ 'Install Android Studio' | t }}</div>
                               <div class="step-card-desc">
-                                Download for {{ effectiveOs() === 'darwin' ? 'macOS' : (effectiveOs() === 'windows' ? 'Windows' : 'Linux') }} from <a href="https://developer.android.com/studio" target="_blank" rel="noopener" class="guide-link">{{ 'developer.android.com/studio' | t }}</a>{{ 'and install.' | t }}</div>
+                                {{ 'Download for' | t }} {{ effectiveOs() === 'darwin' ? 'macOS' : (effectiveOs() === 'windows' ? 'Windows' : 'Linux') }} {{ 'from' | t }} <a href="https://developer.android.com/studio" target="_blank" rel="noopener" class="guide-link">{{ 'developer.android.com/studio' | t }}</a>{{ 'and install.' | t }}</div>
                             </div>
 
                             <div class="flow-step-card">
@@ -1514,7 +1514,7 @@
                                   <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'emu_kvm'"
                                     (click)="copyToClipboard(emuHypervisorCmd(), 'emu_kvm')">
                                     <span class="material-symbols-outlined">{{ copiedId() === 'emu_kvm' ? 'check' : 'content_copy' }}</span>
-                                    <span>{{ copiedId() === 'emu_kvm' ? 'Copied!' : 'Copy' }}</span>
+                                    <span>{{ copiedId() === 'emu_kvm' ? ('Copied!' | t) : ('Copy' | t) }}</span>
                                   </button>
                                 </div>
                               </div>
@@ -1531,7 +1531,7 @@
                                   <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'emu_sdk'"
                                     (click)="copyToClipboard(emuSdkInstallCmd(), 'emu_sdk')">
                                     <span class="material-symbols-outlined">{{ copiedId() === 'emu_sdk' ? 'check' : 'content_copy' }}</span>
-                                    <span>{{ copiedId() === 'emu_sdk' ? 'Copied!' : 'Copy' }}</span>
+                                    <span>{{ copiedId() === 'emu_sdk' ? ('Copied!' | t) : ('Copy' | t) }}</span>
                                   </button>
                                 </div>
                               </div>
@@ -1548,7 +1548,7 @@
                                   <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'emu_create'"
                                     (click)="copyToClipboard(emuCreateAvdCmd(), 'emu_create')">
                                     <span class="material-symbols-outlined">{{ copiedId() === 'emu_create' ? 'check' : 'content_copy' }}</span>
-                                    <span>{{ copiedId() === 'emu_create' ? 'Copied!' : 'Copy' }}</span>
+                                    <span>{{ copiedId() === 'emu_create' ? ('Copied!' | t) : ('Copy' | t) }}</span>
                                   </button>
                                 </div>
                               </div>
@@ -1565,7 +1565,7 @@
                                   <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'emu_run'"
                                     (click)="copyToClipboard('emulator -avd Pixel_8_API_34 -no-boot-anim', 'emu_run')">
                                     <span class="material-symbols-outlined">{{ copiedId() === 'emu_run' ? 'check' : 'content_copy' }}</span>
-                                    <span>{{ copiedId() === 'emu_run' ? 'Copied!' : 'Copy' }}</span>
+                                    <span>{{ copiedId() === 'emu_run' ? ('Copied!' | t) : ('Copy' | t) }}</span>
                                   </button>
                                 </div>
                               </div>
@@ -1785,7 +1785,7 @@
                                 <span>{{ device.serial }}</span>
                               </div>
                               <span class="remote-device-state" [class.ready]="device.state === 'device'">
-                                {{ device.state === 'device' ? 'Ready' : device.state }}
+                                {{ device.state === 'device' ? ('Ready' | t) : device.state }}
                               </span>
                             </div>
                           }
@@ -1804,7 +1804,7 @@
                             <span>{{ 'Connecting...' | t }}</span>
                           } @else {
                             <span class="material-symbols-outlined">check</span>
-                            <span>{{ remoteAdbHasReadyDevice() ? 'Use Connection' : 'Use Anyway' }}</span>
+                            <span>{{ remoteAdbHasReadyDevice() ? ('Use Connection' | t) : ('Use Anyway' | t) }}</span>
                           }
                         </button>
                       }
@@ -1824,7 +1824,7 @@
                   <span class="material-symbols-outlined alert-icon">lock</span>
                   <div class="locked-details">
                     <div class="locked-title">
-                      {{ adbProbe()?.summary === 'Device Locked' ? 'Device Is Locked' : 'Unable to Verify Lock State' }}
+                      {{ adbProbe()?.summary === ('Device Locked' | t) ? ('Device Is Locked' | t) : ('Unable to Verify Lock State' | t) }}
                     </div>
                     <div class="locked-desc">
                       {{ adbProbe()?.description }}
@@ -1832,7 +1832,7 @@
                   </div>
                   <button type="button" class="btn-check-unlock" [disabled]="isRefreshingDiagnostics()" (click)="refreshReadiness()">
                     <span class="material-symbols-outlined" [class.spinning]="isRefreshingDiagnostics()">refresh</span>
-                    <span>{{ isRefreshingDiagnostics() ? 'Checking...' : 'Check Again' }}</span>
+                    <span>{{ isRefreshingDiagnostics() ? ('Checking...' | t) : ('Check Again' | t) }}</span>
                   </button>
                 </div>
 
@@ -1875,7 +1875,7 @@
                   </div>
                   <button type="button" class="btn-retry-auth" (click)="restartAdbServer()">
                     <span class="material-symbols-outlined">refresh</span>
-                    <span>{{ isRemoteAdbServer() ? 'Refresh Devices' : 'Restart ADB & Check' }}</span>
+                    <span>{{ isRemoteAdbServer() ? ('Refresh Devices' | t) : ('Restart ADB & Check' | t) }}</span>
                   </button>
                 </div>
               </div>
@@ -1904,7 +1904,7 @@
                       <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'linux_adb'"
                         (click)="copyToClipboard('sudo apt-get install -y adb', 'linux_adb')">
                         <span class="material-symbols-outlined">{{ copiedId() === 'linux_adb' ? 'check' : 'content_copy' }}</span>
-                        <span>{{ copiedId() === 'linux_adb' ? 'Copied!' : 'Copy' }}</span>
+                        <span>{{ copiedId() === 'linux_adb' ? ('Copied!' | t) : ('Copy' | t) }}</span>
                       </button>
                     </div>
                   </div>
@@ -1922,7 +1922,7 @@
                       <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'mac_adb'"
                         (click)="copyToClipboard('brew install android-platform-tools', 'mac_adb')">
                         <span class="material-symbols-outlined">{{ copiedId() === 'mac_adb' ? 'check' : 'content_copy' }}</span>
-                        <span>{{ copiedId() === 'mac_adb' ? 'Copied!' : 'Copy' }}</span>
+                        <span>{{ copiedId() === 'mac_adb' ? ('Copied!' | t) : ('Copy' | t) }}</span>
                       </button>
                     </div>
                   </div>
@@ -1940,7 +1940,7 @@
                       <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'win_adb'"
                         (click)="copyToClipboard('winget install Google.PlatformTools', 'win_adb')">
                         <span class="material-symbols-outlined">{{ copiedId() === 'win_adb' ? 'check' : 'content_copy' }}</span>
-                        <span>{{ copiedId() === 'win_adb' ? 'Copied!' : 'Copy' }}</span>
+                        <span>{{ copiedId() === 'win_adb' ? ('Copied!' | t) : ('Copy' | t) }}</span>
                       </button>
                     </div>
                   </div>
@@ -1984,9 +1984,9 @@
           <div class="launcher-warning-bar" (click)="setTab('diagnostics')">
             <span class="material-symbols-outlined warn-icon">{{ adbProbe()?.summary === 'Device Locked' ? 'lock' : 'warning' }}</span>
             <span>
-              {{ adbProbe()?.summary === 'Device Locked'
+              {{ adbProbe()?.summary === ('Device Locked' | t)
                 ? 'Android device is locked. Unlock it and enter the home screen before running a task.'
-                : 'Prerequisites incomplete: runtime, credentials, or Android device is not ready. Click here to open Setup Guide.' }}
+                : ('Prerequisites incomplete: runtime, credentials, or Android device is not ready. Click here to open Setup Guide.' | t) }}
             </span>
             <span class="material-symbols-outlined arrow">arrow_forward</span>
           </div>
@@ -2085,7 +2085,7 @@
 
             <div class="bar-right">
               @if (taskGoal().length > 0) {
-                <span class="char-count">{{ taskGoal().length }} chars</span>
+                <span class="char-count">{{ taskGoal().length }} {{ 'chars' | t }}</span>
               }
 
               <!-- Run Button -->

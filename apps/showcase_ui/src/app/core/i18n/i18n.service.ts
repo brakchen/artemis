@@ -48,6 +48,11 @@ export class I18nService {
     this.setLang(this.lang() === 'zh' ? 'en' : 'zh');
   }
 
+  constructor() {
+    // 初始语言也要同步到 <html lang>：否则刷新后内容是中文、lang 属性却还是 en
+    this.applyDocumentLang(this.lang());
+  }
+
   public setLang(lang: Lang): void {
     this.lang.set(lang);
     try {
@@ -55,6 +60,10 @@ export class I18nService {
     } catch {
       // localStorage 可能被禁用，忽略即可（只是不记住选择）
     }
+    this.applyDocumentLang(lang);
+  }
+
+  private applyDocumentLang(lang: Lang): void {
     document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
   }
 
