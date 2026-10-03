@@ -505,7 +505,12 @@ class VisualStepSummarizer(StepMemoryService):
                 return True
 
         except Exception as e:
+            # ``str(asyncio.TimeoutError())`` is empty; repr keeps the reason
+            # column from reading as a blank failure.
             logger.warning(
-                f"VisualStepSummarizer: Error generating summary for step {step_number}: {e}"
+                f"VisualStepSummarizer: Error generating summary for step"
+                f" {step_number}: {e!r}" if not str(e) else
+                f"VisualStepSummarizer: Error generating summary for step"
+                f" {step_number}: {e}"
             )
         return False

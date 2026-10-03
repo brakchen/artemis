@@ -226,6 +226,9 @@ def probe_frame_times(video_path: Path | str) -> list[float] | None:
             continue
         if timestamp >= 0:
             times.append(timestamp)
+    # Packet order is decode order; with B-frames that is not PTS order, and
+    # every caller here needs time-ordered frames.
+    times.sort()
     return times
 
 
@@ -641,7 +644,7 @@ def _extract_freeze_frame(path: Path, anchor: float, png_path: Path) -> bool:
             capture_output=True,
             timeout=60,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except Exception:
         return False
     return process.returncode == 0 and png_path.is_file() and png_path.stat().st_size > 0
 
@@ -762,8 +765,11 @@ def _file_piece_units(
         chain.append(
             f"tpad=start_mode=clone:start_duration={in_window[0] - local_start:.6f}"
         )
-    if back_hole:
-        chain.append(f"tpad=stop_mode=clone:stop_duration={total + 1.0:.3f}")
+    # Always clone past the window end as well: ``trim=duration`` only cuts, so
+    # without the trailing pad a frame dropped at the piece's end (or a short
+    # last burst) leaves the piece up to HOLE_TOLERANCE short and the analyzer's
+    # timeline drifts.
+    chain.append(f"tpad=stop_mode=clone:stop_duration={total + 1.0:.3f}")
     chain.append(f"trim=duration={total:.6f},setpts=PTS-STARTPTS,format=yuv420p[{label}]")
     return [(["-i", str(path)], ",".join(chain))], []
 

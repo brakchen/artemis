@@ -407,16 +407,27 @@ def _build_chunk_prompt(
     if slowdown_factor != 1.0:
         slowdown_note = "WARNING: This video is slowed down to capture fast micro-actions.\n\n"
 
+    if _va.is_ffmpeg_drawtext_supported():
+        timing_note = (
+            "A timestamp showing the exact test relative time (formatted as"
+            " '<seconds> s') is burned in the top-right corner of the video."
+            " Please watch this burned-in timestamp and use its value to report"
+            " all timestamps (e.g., if the burned timestamp shows '90 s', report"
+            " 90.0s)."
+        )
+    else:
+        # This host's ffmpeg cannot render the overlay, so the clip carries no
+        # visible clock: claiming one would make the sub-agent invent values.
+        timing_note = (
+            "No timestamp overlay is burned into this video. Report timestamps"
+            " as the segment start time plus the video playback position; when"
+            " keyframes are provided they are captioned with their absolute test"
+            " time (e.g. '--- Video Keyframe at 90.0s ---')."
+        )
     prompt_with_context = (
-        "IMPORTANT CONTEXT: This video segment corresponds to"
-        " the test's relative time from"
-        f" {actual_start:.1f}s{end_str}{truncation_note}. A"
-        " timestamp showing the exact test relative time"
-        " (formatted as '<seconds> s') is burned in the"
-        " top-right corner of the video. Please watch this"
-        " burned-in timestamp and use its value to report all"
-        " timestamps (e.g., if the burned timestamp shows '90"
-        f" s', report 90.0s).\n\n{slowdown_note}"
+        "IMPORTANT CONTEXT: This video segment corresponds to the test's"
+        f" relative time from {actual_start:.1f}s{end_str}{truncation_note}. "
+        f"{timing_note}\n\n{slowdown_note}"
     )
     if analyzer.enable_ledger:
         prompt_with_context += (
