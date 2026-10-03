@@ -217,11 +217,15 @@ export class FloatingVideoPlayerComponent implements OnDestroy {
     return this.agentService.currentSessionId() || this.agentService.runningSessionId();
   }
 
-  private buildLiveStreamUrl(): string {
+  private buildLiveStreamUrl(bustCache = false): string {
     const params = new URLSearchParams();
     const sessionId = this.watchedSessionId();
     if (sessionId) params.set('session_id', sessionId);
-    params.set('t', String(Date.now()));
+    // The URL must stay byte-stable while the watched task is unchanged:
+    // rewriting `src` aborts the in-flight MJPEG connection, and with ~1 frame
+    // per second any mid-flight abort leaves the panel blank. The cache buster
+    // is therefore reserved for an explicit user refresh.
+    if (bustCache) params.set('t', String(Date.now()));
     return `/api/stream/device-live?${params.toString()}`;
   }
 
@@ -243,7 +247,7 @@ export class FloatingVideoPlayerComponent implements OnDestroy {
   public retryLiveStream(): void {
     this.liveStreamError.set(false);
     this.liveStreamMessage.set(null);
-    this.liveStreamUrl.set(this.buildLiveStreamUrl());
+    this.liveStreamUrl.set(this.buildLiveStreamUrl(true));
   }
 
   /**
@@ -507,11 +511,27 @@ export class FloatingVideoPlayerComponent implements OnDestroy {
     this.agentService.isVideoMinimized.set(!this.agentService.isVideoMinimized());
   }
 
-  public openInNewTab(): void {
-    const url = this.agentService.activeVideoUrl();
-    if (url) {
-      window.open(url, '_blank');
+  /**
+   * Open a recording/step URL in a new tab, restricted to this origin.
+   *
+   * The backend hands us relative paths (`/videos/...`, `/images/...`), but
+   * whatever arrives here is still validated before `window.open`: a
+   * cross-origin or `javascript:` target must never be opened as a tab.
+   */
+  private openLocalInNewTab(url: string | null | undefined): void {
+    if (!url) return;
+    let target: URL;
+    try {
+      target = new URL(url, window.location.origin);
+    } catch {
+      return;
     }
+    if (target.origin !== window.location.origin) return;
+    window.open(target.toString(), '_blank', 'noopener,noreferrer');
+  }
+
+  public openInNewTab(): void {
+    this.openLocalInNewTab(this.agentService.activeVideoUrl());
   }
 
   /**
@@ -656,10 +676,7 @@ export class FloatingVideoPlayerComponent implements OnDestroy {
   }
 
   public openImageInNewTab(): void {
-    const url = this.currentStepImageUrl() || this.currentStepFrame()?.imageUrl;
-    if (url) {
-      window.open(url, '_blank');
-    }
+    this.openLocalInNewTab(this.currentStepImageUrl() || this.currentStepFrame()?.imageUrl);
   }
 
   public trackStepFrame(index: number, frame: StepReplayFrame): string {
