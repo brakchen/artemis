@@ -34,6 +34,98 @@ from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+#: Connectivity-probe endpoints the guest uses to decide "this network reaches
+#: the internet". The AOSP defaults probe `www.google.com`, which is unreachable
+#: from a network that cannot route there: both probes wait out the 10s connect
+#: timeout, Android marks the network PARTIAL_CONNECTIVITY instead of VALIDATED,
+#: and every app that checks that capability reports "no network".
+#: `connectivitycheck.gstatic.com` answers 204 wherever the guest has IPv4
+#: egress, so validation passes.
+_CAPTIVE_PORTAL_HTTPS_URL = "https://connectivitycheck.gstatic.com/generate_204"
+_CAPTIVE_PORTAL_HTTP_URL = "http://connectivitycheck.gstatic.com/generate_204"
+
+#: Interfaces whose IPv6 is switched off after boot. The slirp link carries no
+#: IPv6 route while DNS still answers with bogus AAAA records (poisoned
+#: `www.google.com -> 2001::1`), so every dual-stack connect stalls on the
+#: blackhole address before IPv4 can be tried.
+_IPV6_DISABLE_INTERFACES = ("all", "default", "eth0")
+
+#: Pause between bouncing the emulated radio to re-run network validation.
+_REVALIDATE_PAUSE_SECONDS = 2.0
+
+
+async def _run_adb(adb_path: str, serial: str, *args: str, timeout: float = 8.0) -> bool:
+    """Run one adb command; ``True`` only when it exited 0. Never raises."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            adb_path,
+            "-s",
+            serial,
+            *args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return proc.returncode == 0
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.debug(f"[EmulatorManager] adb {' '.join(args)} on {serial} failed: {exc}")
+        return False
+
+
+async def configure_emulator_network(adb_path: str, serial: str) -> list[str]:
+    """Make a freshly booted emulator's network actually validate.
+
+    Applies two guest-side fixes and re-runs validation:
+
+    1. repoint the captive-portal probes at a host that answers (see
+       ``_CAPTIVE_PORTAL_*``) — without this the guest stays
+       PARTIAL_CONNECTIVITY and apps report "network unavailable";
+    2. best-effort IPv6 shutdown on the slirp link so poisoned AAAA answers
+       fail fast instead of hanging connects.
+
+    Emulators only — a physical phone keeps its own validated network and must
+    never have its global settings rewritten. Every step logs and continues, so
+    a locked-down image can only lose a nicety, never reachability or READY.
+
+    Returns the actions applied (used for boot logs and tests).
+    """
+    if not serial.startswith("emulator-"):
+        return []
+
+    applied: list[str] = []
+    for key, value in (
+        ("captive_portal_https_url", _CAPTIVE_PORTAL_HTTPS_URL),
+        ("captive_portal_http_url", _CAPTIVE_PORTAL_HTTP_URL),
+    ):
+        if await _run_adb(adb_path, serial, "shell", "settings", "put", "global", key, value):
+            applied.append(key)
+
+    # `adb root` restarts adbd on google_apis images (and is refused elsewhere);
+    # wait for it to come back before using the root-only sysctl.
+    if await _run_adb(adb_path, serial, "root", timeout=15.0):
+        for _ in range(10):
+            await asyncio.sleep(1.0)
+            if await _run_adb(adb_path, serial, "shell", "echo", "ok", timeout=4.0):
+                break
+        for iface in _IPV6_DISABLE_INTERFACES:
+            key = f"net.ipv6.conf.{iface}.disable_ipv6"
+            if await _run_adb(adb_path, serial, "shell", "sysctl", "-w", f"{key}=1"):
+                applied.append(key)
+
+    # The first validation already ran before these settings existed and
+    # Android does not re-read them on its own: bounce the emulated radio so a
+    # fresh network agent probes with the new URLs.
+    if await _run_adb(adb_path, serial, "shell", "svc", "data", "disable"):
+        await asyncio.sleep(_REVALIDATE_PAUSE_SECONDS)
+        await _run_adb(adb_path, serial, "shell", "svc", "data", "enable")
+        applied.append("revalidated")
+
+    logger.info(
+        f"[EmulatorManager] Network validation configured on {serial}: "
+        f"{', '.join(applied) if applied else 'nothing applied'}"
+    )
+    return applied
+
 
 class EmulatorLaunchStage(str, Enum):
     """Lifecycle stages of launching an Android Virtual Device."""
@@ -464,6 +556,24 @@ class EmulatorManager:
                         logger.info(
                             f"[EmulatorManager] Android system boot completed for {detected_serial} ({avd_name})"
                         )
+                        # Fix guest-side network validation *before* announcing
+                        # READY: tasks must never start against a network Android
+                        # still counts as PARTIAL_CONNECTIVITY (apps then report
+                        # "no network" even though IPv4 egress is fine).
+                        try:
+                            applied = await asyncio.wait_for(
+                                configure_emulator_network(adb_path, detected_serial),
+                                timeout=45.0,
+                            )
+                            if applied:
+                                self._log_buffer.append(
+                                    f"Network validation configured: {', '.join(applied)}"
+                                )
+                        except Exception as e:
+                            logger.debug(
+                                f"[EmulatorManager] Network configuration skipped on "
+                                f"{detected_serial}: {e}"
+                            )
                         self._current_state = EmulatorLaunchState(
                             avd_name=avd_name,
                             status=EmulatorLaunchStage.READY,
