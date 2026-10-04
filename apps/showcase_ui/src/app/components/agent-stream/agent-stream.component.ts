@@ -216,6 +216,7 @@ import {
 
 import { drawActionCoordinatesOnOverlay } from '../../utils/image-overlay.util';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { I18nService } from '../../core/i18n/i18n.service';
 
 import {
   consolidateLogsToBlocks,
@@ -244,6 +245,7 @@ export class AgentStreamComponent implements AfterViewInit {
   private http = inject(HttpClient);
   private destroyRef = inject(DestroyRef);
   private zone = inject(NgZone);
+  private readonly i18n = inject(I18nService);
 
   // Auto-scroll state tracking
   public isUserAtBottom = true;
@@ -1644,7 +1646,8 @@ export class AgentStreamComponent implements AfterViewInit {
       case 'outcome':
         return 'Result';
       default:
-        return 'Check';
+        // 'Check' 已被 USB 授权指引（勾选…）占用，这里用 'Checks' 避免同一源串两种译文。
+        return 'Checks';
     }
   }
 
@@ -1661,8 +1664,10 @@ export class AgentStreamComponent implements AfterViewInit {
 
   /** How the item is judged, in plain words (verify = must pass, assert = recorded test result). */
   public getCheckMethodLabel(item: any, block: any): string {
-    const parts: string[] = [item?.kind === 'assert' ? 'Test assertion' : 'Must pass'];
-    if (item?.when === 'at_end' && block?.data?.phase !== 'final') parts.push('at the end');
+    const parts: string[] = [
+      item?.kind === 'assert' ? this.i18n.t('Test assertion') : this.i18n.t('Must pass')
+    ];
+    if (item?.when === 'at_end' && block?.data?.phase !== 'final') parts.push(this.i18n.t('at the end'));
     return parts.join(' · ');
   }
 
@@ -1759,34 +1764,36 @@ export class AgentStreamComponent implements AfterViewInit {
 
   public getCheckerStatusLabel(block: any): string {
     const d = block?.data || {};
+    // 组合串在 TS 里逐段翻译：整句查表查不到拼接后的文本。
+    const t = this.i18n.t.bind(this.i18n);
     if (d.phase === 'outcome') {
-      const t = d.tests || {};
-      const label = d.task_status === 'completed' ? 'Goal completed'
-        : (d.task_status === 'blocked' ? 'Blocked' : 'Partially completed');
+      const tests = d.tests || {};
+      const label = tests && d.task_status === 'completed' ? t('Goal completed')
+        : (d.task_status === 'blocked' ? t('Blocked') : t('Partially completed'));
       const counts = [
-        [t.passed, 'passed'],
-        [t.failed, 'failed'],
-        [t.inconclusive, 'inconclusive'],
-        [t.unchecked, 'not checked']
+        [tests.passed, 'passed'],
+        [tests.failed, 'failed'],
+        [tests.inconclusive, 'inconclusive'],
+        [tests.unchecked, 'not checked']
       ]
         .filter(([n]) => Number(n) > 0)
-        .map(([n, word]) => `${n} ${word}`);
+        .map(([n, word]) => `${n} ${t(word)}`);
       return counts.length > 0 ? `${label} · ${counts.join(' · ')}` : label;
     }
-    if (d.isCompleted === false) return 'Checking…';
+    if (d.isCompleted === false) return t('Checking…');
     switch (d.status) {
       case 'superseded':
-        return 'Superseded';
+        return t('Superseded');
       case 'unchecked':
-        return 'Not checked';
+        return t('Not checked');
       case 'error':
-        return 'No verdict';
+        return t('No verdict');
     }
     const verdicts = this.getCheckerVerdicts(block);
     const failed = verdicts.filter((v) => v.status === 'failed').length;
-    if (failed > 0) return `${failed} failed`;
-    if (verdicts.some((v) => v.status === 'inconclusive')) return 'Inconclusive';
-    return verdicts.length > 0 ? 'Passed' : 'Done';
+    if (failed > 0) return `${failed} ${t('failed')}`;
+    if (verdicts.some((v) => v.status === 'inconclusive')) return t('Inconclusive');
+    return verdicts.length > 0 ? t('Passed') : t('Done');
   }
 
   public getVerdictIcon(status: string): string {
@@ -2163,16 +2170,19 @@ export class AgentStreamComponent implements AfterViewInit {
   }
 
   public getArchitectureTooltip(model?: ModelInfo | null): string {
-    if (!model) return 'Agent Architecture: ARTEMIS Flash (Reactive Fast Loop)';
+    // 拼接串逐段翻译，整句查表查不到。
+    const t = this.i18n.t.bind(this.i18n);
+    const defaultArch = t('ARTEMIS Flash (Reactive Fast Loop)');
+    if (!model) return `${t('Agent Architecture:')} ${defaultArch}`;
     const name = this.getModelDisplayName(model.name);
     const isPro = name.toLowerCase().includes('pro');
     const archDesc = isPro
-      ? 'ARTEMIS Pro (Multi-Agent Cognitive State Graph)'
-      : 'ARTEMIS Flash (Reactive Fast Loop)';
+      ? t('ARTEMIS Pro (Multi-Agent Cognitive State Graph)')
+      : defaultArch;
     if (model.id) {
-      return `Agent Architecture: ${archDesc} · LLM: ${model.id} (${model.provider || 'google'})`;
+      return `${t('Agent Architecture:')} ${archDesc} · LLM: ${model.id} (${model.provider || 'google'})`;
     }
-    return `Agent Architecture: ${archDesc}`;
+    return `${t('Agent Architecture:')} ${archDesc}`;
   }
 
   public formatTokenCount(tokens?: number): string {

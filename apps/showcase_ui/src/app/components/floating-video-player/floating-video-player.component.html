@@ -37,7 +37,7 @@ limitations under the License.
           {{ agentService.recordingPlaybackStatus() === 'live' ? 'sensors' : (agentService.playerMode() === 'steps' ? 'slideshow' : (agentService.recordingPlaybackStatus() === 'processing' ? 'progress_activity' : 'smart_display')) }}
         </span>
         <span class="header-title" [title]="agentService.activeVideoTitle()">
-          {{ agentService.recordingPlaybackStatus() === 'live' ? ('Live Device Screen' | t) : (agentService.playerMode() === 'steps' ? ('Step Replay (' + (totalStepFrames() > 0 ? (activeStepIndex() + 1) + '/' + totalStepFrames() : '0') + ')') : (agentService.recordingPlaybackStatus() === 'processing' ? ('Preparing Recording' | t) : (agentService.activeVideoTitle() || ('Screen Recording' | t)))) }}
+          {{ agentService.recordingPlaybackStatus() === 'live' ? ('Live Device Screen' | t) : (agentService.playerMode() === 'steps' ? ('Step Replay' | t) + ' (' + (totalStepFrames() > 0 ? (activeStepIndex() + 1) + '/' + totalStepFrames() : '0') + ')' : (agentService.recordingPlaybackStatus() === 'processing' ? ('Preparing Recording' | t) : (agentService.activeVideoTitle() || ('Screen Recording' | t)))) }}
         </span>
       </div>
       <div class="header-actions" (mousedown)="$event.stopPropagation()">
@@ -68,8 +68,8 @@ limitations under the License.
         <button
           class="header-btn"
           (click)="toggleMinimize()"
-          [title]="agentService.isVideoMinimized() ? 'Restore' : 'Minimize'"
-          aria-label="Minimize"
+          [title]="agentService.isVideoMinimized() ? ('Restore' | t) : ('Minimize' | t)"
+          aria-label="{{ 'Minimize' | t }}"
           >
           <span class="material-symbols-outlined">{{ agentService.isVideoMinimized() ? 'expand_less' : 'remove' }}</span>
         </button>
@@ -78,8 +78,8 @@ limitations under the License.
           <button
             class="header-btn"
             (click)="toggleTheater()"
-            [title]="isTheaterMode() ? 'Exit Theater' : 'Theater Mode'"
-            aria-label="Theater"
+            [title]="isTheaterMode() ? ('Exit Theater' | t) : ('Theater Mode' | t)"
+            aria-label="{{ 'Theater' | t }}"
             >
             <span class="material-symbols-outlined">{{ isTheaterMode() ? 'close_fullscreen' : 'open_in_full' }}</span>
           </button>
@@ -89,7 +89,7 @@ limitations under the License.
           class="header-btn close-btn"
           (click)="agentService.closeVideoPlayer()"
           title="{{ 'Close' | t }}"
-          aria-label="Close"
+          aria-label="{{ 'Close' | t }}"
           >
           <span class="material-symbols-outlined">close</span>
         </button>
@@ -199,7 +199,7 @@ limitations under the License.
                         (click)="$event.stopPropagation()"
                         >
                         <div class="badge-content-left">
-                          <span class="badge-step-no">Step {{ frame.stepNumber }}</span>
+                          <span class="badge-step-no">{{ 'Step' | t }} {{ frame.stepNumber }}</span>
                           <span class="badge-action-desc" [title]="frame.actionText || frame.title">
                             @if (frame.action) {
                               <span class="material-symbols-outlined action-type-icon">
@@ -232,7 +232,7 @@ limitations under the License.
                             class="pin-card-btn"
                             [class.pinned]="isCardPinned()"
                             (click)="toggleCardPin($event)"
-                            [title]="isCardPinned() ? 'Unpin details card (auto-hide on mouse leave)' : 'Pin details card (keep always visible)'"
+                            [title]="isCardPinned() ? ('Unpin details card (auto-hide on mouse leave)' | t) : ('Pin details card (keep always visible)' | t)"
                             >
                             <span class="material-symbols-outlined">{{ isCardPinned() ? 'push_pin' : 'keep' }}</span>
                           </button>
@@ -264,7 +264,7 @@ limitations under the License.
                                 [class.passed]="i < activeStepIndex()"
                                 [style.left.%]="(i / (totalStepFrames() - 1)) * 100"
                                 (click)="seekStepFrame(i); $event.stopPropagation()"
-                                [title]="'Step ' + (i + 1) + ': ' + (f.actionText || f.title)"
+                                [title]="('Step' | t) + ' ' + (i + 1) + ': ' + (f.actionText || f.title)"
                               ></span>
                             }
                           </div>
@@ -274,7 +274,7 @@ limitations under the License.
                       <div class="controls-row">
                         <div class="controls-left">
                           <!-- Play / Pause Button -->
-                          <button class="ctrl-btn play-btn" (click)="toggleStepPlay()" [title]="isStepPlaying() ? 'Pause' : 'Play Slideshow'">
+                          <button class="ctrl-btn play-btn" (click)="toggleStepPlay()" [title]="isStepPlaying() ? ('Pause' | t) : ('Play Slideshow' | t)">
                             <span class="material-symbols-outlined">{{ isStepPlaying() ? 'pause' : 'play_arrow' }}</span>
                           </button>
                           <!-- Previous Frame Button -->
@@ -291,7 +291,7 @@ limitations under the License.
                           </button>
                           <!-- Step Counter Display -->
                           <span class="time-display">
-                            Step {{ activeStepIndex() + 1 }} / {{ totalStepFrames() }}
+                            {{ 'Step' | t }} {{ activeStepIndex() + 1 }} / {{ totalStepFrames() }}
                           </span>
                         </div>
                         <div class="controls-right">
@@ -299,7 +299,7 @@ limitations under the License.
                           <button
                             class="ctrl-btn speed-pill-btn"
                             (click)="cycleSpeed()"
-                            [title]="'Speed: ' + playbackRate() + 'x (Click to cycle)'"
+                            [title]="('Speed:' | t) + ' ' + playbackRate() + 'x' + (' (Click to cycle)' | t)"
                             >
                             <span class="speed-label">{{ playbackRate() }}x</span>
                           </button>
@@ -308,7 +308,7 @@ limitations under the License.
                             class="ctrl-btn"
                             [class.active]="isLooping()"
                             (click)="toggleLoop()"
-                            [title]="isLooping() ? 'Loop enabled' : 'Enable loop'"
+                            [title]="isLooping() ? ('Loop enabled' | t) : ('Enable loop' | t)"
                             >
                             <span class="material-symbols-outlined">repeat</span>
                           </button>
@@ -359,7 +359,7 @@ limitations under the License.
                         <div class="controls-row">
                           <div class="controls-left">
                             <!-- Play / Pause Button -->
-                            <button class="ctrl-btn play-btn" (click)="togglePlay()" [title]="isPlaying() ? 'Pause' : 'Play'">
+                            <button class="ctrl-btn play-btn" (click)="togglePlay()" [title]="isPlaying() ? ('Pause' | t) : ('Play video' | t)">
                               <span class="material-symbols-outlined">{{ isPlaying() ? 'pause' : 'play_arrow' }}</span>
                             </button>
                             <!-- Replay / Reset -->
@@ -376,7 +376,7 @@ limitations under the License.
                             <button
                               class="ctrl-btn speed-pill-btn"
                               (click)="cycleSpeed()"
-                              [title]="'Speed: ' + playbackRate() + 'x (Click to cycle)'"
+                              [title]="('Speed:' | t) + ' ' + playbackRate() + 'x' + (' (Click to cycle)' | t)"
                               >
                               <span class="speed-label">{{ playbackRate() }}x</span>
                             </button>
@@ -385,12 +385,12 @@ limitations under the License.
                               class="ctrl-btn"
                               [class.active]="isLooping()"
                               (click)="toggleLoop()"
-                              [title]="isLooping() ? 'Loop enabled' : 'Enable loop'"
+                              [title]="isLooping() ? ('Loop enabled' | t) : ('Enable loop' | t)"
                               >
                               <span class="material-symbols-outlined">repeat</span>
                             </button>
                             <!-- Mute / Unmute Toggle -->
-                            <button class="ctrl-btn" (click)="toggleMute()" [title]="isMuted() ? 'Unmute' : 'Mute'">
+                            <button class="ctrl-btn" (click)="toggleMute()" [title]="isMuted() ? ('Unmute' | t) : ('Mute' | t)">
                               <span class="material-symbols-outlined">{{ isMuted() ? 'volume_off' : 'volume_up' }}</span>
                             </button>
                             <!-- Open in new tab -->

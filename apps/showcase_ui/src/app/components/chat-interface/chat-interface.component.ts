@@ -22,6 +22,7 @@ import { Session } from '../../core/models/session.model';
 import { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote } from '../../core/models/markdown.model';
 import { parseNote, parseNoteLines } from '../../utils/markdown-parser.util';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { I18nService } from '../../core/i18n/i18n.service';
 
 export type { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote };
 
@@ -39,6 +40,8 @@ export class ChatInterfaceComponent {
   public taskInput: string = '';
   // Signals so async completion handlers refresh this OnPush view.
   public isSubmitting = signal<boolean>(false);
+  private readonly i18n = inject(I18nService);
+
   public errorMessage = signal<string | null>(null);
 
   // Device-serial resolution can require a JSON.parse of device_info; memoize
@@ -134,7 +137,7 @@ export class ChatInterfaceComponent {
    * Clear all database data/history to start fresh
    */
   public clearHistory(): void {
-    if (!confirm('Are you sure you want to clear all tasks and history? This cannot be undone.')) {
+    if (!confirm(this.i18n.t('Are you sure you want to clear all tasks and history? This cannot be undone.'))) {
       return;
     }
     this.isSubmitting.set(true);
@@ -156,7 +159,7 @@ export class ChatInterfaceComponent {
    */
   public deleteTask(sessionId: string, event: MouseEvent): void {
     event.stopPropagation();
-    if (!confirm(`Are you sure you want to delete this task? This cannot be undone.`)) {
+    if (!confirm(this.i18n.t('Are you sure you want to delete this task? This cannot be undone.'))) {
       return;
     }
     this.isSubmitting.set(true);

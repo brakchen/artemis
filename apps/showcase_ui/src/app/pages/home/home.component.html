@@ -152,7 +152,7 @@
           </div>
           <div class="item-title-group">
             <div class="item-name">{{ 'Python Runtime' | t }}</div>
-            <div class="item-subtitle">{{ pythonProbe()?.summary || ('Checking…' | t) }}</div>
+            <div class="item-subtitle">{{ (pythonProbe()?.summary || 'Checking…') | t }}</div>
           </div>
           <div class="item-status">
             <span class="status-dot" [class.dot-pass]="pythonProbe()?.status === 'pass'" [class.dot-fail]="pythonProbe()?.status === 'fail'"></span>
@@ -218,7 +218,7 @@
           </div>
           <div class="item-title-group">
             <div class="item-name">{{ 'System Configuration' | t }}</div>
-            <div class="item-subtitle">{{ configProbe()?.summary || ('Config Valid' | t) }}</div>
+            <div class="item-subtitle">{{ (configProbe()?.summary || 'Config Valid') | t }}</div>
           </div>
           <div class="item-status">
             <span class="status-dot" [class.dot-pass]="configProbe()?.status === 'pass'" [class.dot-fail]="configProbe()?.status === 'fail'"></span>
@@ -251,7 +251,7 @@
           </div>
           <div class="item-title-group">
             <div class="item-name">{{ 'Video Toolchain' | t }}</div>
-            <div class="item-subtitle">{{ toolchainProbe()?.summary || ('FFmpeg & scrcpy' | t) }}</div>
+            <div class="item-subtitle">{{ (toolchainProbe()?.summary || 'FFmpeg & scrcpy') | t }}</div>
           </div>
           <div class="item-status">
             <span class="status-dot" [class.dot-pass]="toolchainProbe()?.status === 'pass'" [class.dot-fail]="toolchainProbe()?.status !== 'pass'"></span>
@@ -423,13 +423,13 @@
       @if (geminiSaveMessage()) {
       <div class="feedback-msg success">
         <span class="material-symbols-outlined">check_circle</span>
-        <span>{{ geminiSaveMessage() }}</span>
+        <span>{{ geminiSaveMessage() | t }}</span>
       </div>
       }
       @if (geminiSaveError()) {
       <div class="feedback-msg error">
         <span class="material-symbols-outlined">error</span>
-        <span>{{ geminiSaveError() }}</span>
+        <span>{{ geminiSaveError() | t }}</span>
       </div>
       }
     </div>
@@ -521,13 +521,13 @@
           @if (ocrSaveMessage()) {
           <div class="feedback-msg success">
             <span class="material-symbols-outlined">check_circle</span>
-            <span>{{ ocrSaveMessage() }}</span>
+            <span>{{ ocrSaveMessage() | t }}</span>
           </div>
           }
           @if (ocrSaveError()) {
           <div class="feedback-msg error">
             <span class="material-symbols-outlined">error</span>
-            <span>{{ ocrSaveError() }}</span>
+            <span>{{ ocrSaveError() | t }}</span>
           </div>
           }
         </div>
@@ -904,13 +904,13 @@
           @if (providerSaveMessage()) {
           <div class="feedback-msg success">
             <span class="material-symbols-outlined">check_circle</span>
-            <span>{{ providerSaveMessage() }}</span>
+            <span>{{ providerSaveMessage() | t }}</span>
           </div>
           }
           @if (providerSaveError()) {
           <div class="feedback-msg error">
             <span class="material-symbols-outlined">error</span>
-            <span>{{ providerSaveError() }}</span>
+            <span>{{ providerSaveError() | t }}</span>
           </div>
           }
         </div>
@@ -955,14 +955,14 @@
               class="btn-restart-adb"
               [disabled]="isRestartingAdb()"
               (click)="restartAdbServer()"
-              [title]="isRemoteAdbServer() ? 'Refresh devices without stopping the remote ADB server' : 'Restart local ADB daemon'"
+              [title]="isRemoteAdbServer() ? ('Refresh devices without stopping the remote ADB server' | t) : ('Restart local ADB daemon' | t)"
             >
               @if (isRestartingAdb()) {
               <span class="material-symbols-outlined spinning">sync</span>
               <span>{{ 'Restarting...' | t }}</span>
               } @else if (adbRestartFeedback()) {
               <span class="material-symbols-outlined feedback-done">check</span>
-              <span class="feedback-text">{{ adbRestartFeedback() }}</span>
+              <span class="feedback-text">{{ adbRestartFeedback() | t }}</span>
               } @else {
               <span class="material-symbols-outlined">sync</span>
               <span>{{ isRemoteAdbServer() ? ('Refresh Devices' | t) : ('Restart ADB' | t) }}</span>
@@ -1002,7 +1002,7 @@
                       @if (isRemoteAdbServer()) {
                         <span class="meta-dot">·</span>
                         <span class="remote-endpoint-label">
-                          Remote via {{ adbServerStatus()?.endpoint?.host }}:{{ adbServerStatus()?.endpoint?.port }}
+                          {{ 'Remote via' | t }} {{ adbServerStatus()?.endpoint?.host }}:{{ adbServerStatus()?.endpoint?.port }}
                         </span>
                       }
                     </div>
@@ -1138,7 +1138,7 @@
                       <span class="progress-percent">{{ emulatorProgressPercent() }}{{ '% Complete' | t }}</span>
                       <span class="progress-timer">
                         <span class="material-symbols-outlined timer-icon">timer</span>
-                        Elapsed: {{ emulatorLaunchState()?.elapsed_seconds || 0 }}s
+                        {{ 'Elapsed:' | t }} {{ emulatorLaunchState()?.elapsed_seconds || 0 }}s
                       </span>
                     </div>
                   </div>
@@ -1178,7 +1178,7 @@
               </div>
               <div class="busy-titles">
                 <h4 class="busy-title">{{ 'Emulator already running' | t }}</h4>
-                <p class="busy-desc">{{ emulatorLaunchState()?.error }}</p>
+                <p class="busy-desc">{{ emulatorLaunchState()?.error | t }}</p>
               </div>
               <div class="busy-actions">
                 <button type="button" class="btn-stop-vm" (click)="stopEmulator()">
@@ -1227,7 +1227,7 @@
                     @if (emulatorLaunchState()?.avd_name) {
                       <button type="button" class="btn-retry-launch" [disabled]="isRemoteAdbServer()" (click)="launchAvdEmulator(emulatorLaunchState()!.avd_name!)">
                         <span class="material-symbols-outlined">refresh</span>
-                        <span>Retry Launch ({{ emulatorLaunchState()?.avd_name }})</span>
+                        <span>{{ 'Retry Launch' | t }} ({{ emulatorLaunchState()?.avd_name }})</span>
                       </button>
                     }
                     <button type="button" class="btn-restart-adb-sub" (click)="restartAdbServer()">
@@ -1396,7 +1396,7 @@
                                   [class.launching]="launchingAvd() === avd || (isEmulatorLaunching() && emulatorLaunchState()?.avd_name === avd)"
                                   [disabled]="isEmulatorLaunching() || isRemoteAdbServer()"
                                   (click)="launchAvdEmulator(avd)"
-                                  [title]="isEmulatorLaunching() ? 'An emulator is currently launching...' : 'Launch ' + avd"
+                                  [title]="isEmulatorLaunching() ? ('An emulator is currently launching...' | t) : ('Launch' | t) + ' ' + avd"
                                 >
                                   @if (launchingAvd() === avd || (isEmulatorLaunching() && emulatorLaunchState()?.avd_name === avd)) {
                                     <span class="spinner-icon"></span>
@@ -1506,8 +1506,8 @@
                             <div class="cli-step-item">
                               <div class="step-badge-num">1</div>
                               <div class="step-content">
-                                <div class="step-title">{{ emuHypervisorTitle() }}</div>
-                                <p class="step-text">{{ emuHypervisorDesc() }}</p>
+                                <div class="step-title">{{ emuHypervisorTitle() | t }}</div>
+                                <p class="step-text">{{ emuHypervisorDesc() | t }}</p>
                                 <div class="code-box small-box">
                                   <span class="terminal-prefix">{{ effectiveOs() === 'windows' ? 'PS\u003E' : '$' }}</span>
                                   <code class="code-text">{{ emuHypervisorCmd() }}</code>
@@ -1672,13 +1672,13 @@
                         @if (wifiConnectMessage()) {
                         <div class="wifi-status-alert success">
                           <span class="material-symbols-outlined">check_circle</span>
-                          <span>{{ wifiConnectMessage() }}</span>
+                          <span>{{ wifiConnectMessage() | t }}</span>
                         </div>
                         }
                         @if (wifiConnectError()) {
                         <div class="wifi-status-alert error">
                           <span class="material-symbols-outlined">error</span>
-                          <span>{{ wifiConnectError() }}</span>
+                          <span>{{ wifiConnectError() | t }}</span>
                         </div>
                         }
                     </div>
@@ -1765,13 +1765,13 @@
                       @if (remoteAdbMessage()) {
                         <div class="remote-adb-status-alert success">
                           <span class="material-symbols-outlined">check_circle</span>
-                          <span>{{ remoteAdbMessage() }}</span>
+                          <span>{{ remoteAdbMessage() | t }}</span>
                         </div>
                       }
                       @if (remoteAdbError()) {
                         <div class="remote-adb-status-alert error" role="alert">
                           <span class="material-symbols-outlined">error</span>
-                          <span>{{ remoteAdbError() }}</span>
+                          <span>{{ remoteAdbError() | t }}</span>
                         </div>
                       }
 
@@ -1824,10 +1824,10 @@
                   <span class="material-symbols-outlined alert-icon">lock</span>
                   <div class="locked-details">
                     <div class="locked-title">
-                      {{ adbProbe()?.summary === ('Device Locked' | t) ? ('Device Is Locked' | t) : ('Unable to Verify Lock State' | t) }}
+                      {{ adbProbe()?.summary === 'Device Locked' ? ('Device Is Locked' | t) : ('Unable to Verify Lock State' | t) }}
                     </div>
                     <div class="locked-desc">
-                      {{ adbProbe()?.description }}
+                      {{ adbProbe()?.description | t }}
                     </div>
                   </div>
                   <button type="button" class="btn-check-unlock" [disabled]="isRefreshingDiagnostics()" (click)="refreshReadiness()">
@@ -1984,8 +1984,8 @@
           <div class="launcher-warning-bar" (click)="setTab('diagnostics')">
             <span class="material-symbols-outlined warn-icon">{{ adbProbe()?.summary === 'Device Locked' ? 'lock' : 'warning' }}</span>
             <span>
-              {{ adbProbe()?.summary === ('Device Locked' | t)
-                ? 'Android device is locked. Unlock it and enter the home screen before running a task.'
+              {{ adbProbe()?.summary === 'Device Locked'
+                ? ('Android device is locked. Unlock it and enter the home screen before running a task.' | t)
                 : ('Prerequisites incomplete: runtime, credentials, or Android device is not ready. Click here to open Setup Guide.' | t) }}
             </span>
             <span class="material-symbols-outlined arrow">arrow_forward</span>
@@ -2051,7 +2051,7 @@
           @if (errorMessage()) {
             <div class="error-banner">
               <span class="material-symbols-outlined error-icon">error</span>
-              <span>{{ errorMessage() }}</span>
+              <span>{{ errorMessage() | t }}</span>
             </div>
           }
 
@@ -2094,7 +2094,7 @@
                 class="btn-run-composer"
                 [class.btn-run-pro]="selectedProfile() === 'pro'"
                 [disabled]="!taskGoal().trim() || isSubmitting() || !isReady()"
-                [title]="!isReady() ? (adbProbe()?.summary === 'Device Locked' ? 'Unlock the Android device before running' : 'Complete System Setup before running') : 'Run task'"
+                [title]="!isReady() ? (adbProbe()?.summary === 'Device Locked' ? ('Unlock the Android device before running' | t) : ('Complete System Setup before running' | t)) : ('Run task' | t)"
                 (click)="runTask()"
               >
                 @if (isSubmitting()) {
@@ -2156,12 +2156,12 @@
                   [style.--pct]="slider.fraction"
                 >
                   <div class="slider-head">
-                    <span class="slider-name">{{ slider.name }}</span>
-                    <span class="slider-value">{{ slider.level.label }}</span>
+                    <span class="slider-name">{{ slider.name | t }}</span>
+                    <span class="slider-value">{{ slider.level.label | t }}</span>
                   </div>
                   <div class="slider-ends" aria-hidden="true">
-                    <span>{{ slider.ends[0] }}</span>
-                    <span>{{ slider.ends[1] }}</span>
+                    <span>{{ slider.ends[0] | t }}</span>
+                    <span>{{ slider.ends[1] | t }}</span>
                   </div>
 
                   <div
@@ -2209,23 +2209,23 @@
                       (input)="setTuningIndex(slider.kind, $any($event.target).value)"
                       (focus)="showTuningTip(slider.kind)"
                       (blur)="hideTuningTip(slider.kind)"
-                      [attr.aria-label]="slider.name"
-                      [attr.aria-valuetext]="slider.level.label + ': ' + slider.level.tagline"
+                      [attr.aria-label]="slider.name | t"
+                      [attr.aria-valuetext]="(slider.level.label | t) + ': ' + (slider.level.tagline | t)"
                     />
 
                     @if (activeTuningTip() === slider.kind) {
                       <div class="tuning-tip-arrow" aria-hidden="true"></div>
                       <div class="tuning-tip" role="tooltip">
                         <div class="tip-heading">
-                          <span class="tip-title">{{ slider.level.label }}</span>
-                          <span class="tip-latency">{{ slider.level.latency }}</span>
+                          <span class="tip-title">{{ slider.level.label | t }}</span>
+                          <span class="tip-latency">{{ slider.level.latency | t }}</span>
                         </div>
-                        <p class="tip-tagline">{{ slider.level.tagline }}</p>
+                        <p class="tip-tagline">{{ slider.level.tagline | t }}</p>
                         <div class="tip-section">
                           <span class="tip-section-title">{{ 'What happens' | t }}</span>
                           <ul>
                             @for (line of slider.level.runs; track $index) {
-                              <li>{{ line }}</li>
+                              <li>{{ line | t }}</li>
                             }
                           </ul>
                         </div>
@@ -2234,14 +2234,14 @@
                             <span class="tip-section-title">{{ 'Not included' | t }}</span>
                             <ul>
                               @for (line of slider.level.skips; track $index) {
-                                <li>{{ line }}</li>
+                                <li>{{ line | t }}</li>
                               }
                             </ul>
                           </div>
                         }
                         <div class="tip-best">
                           <span class="tip-section-title">{{ 'Use it for' | t }}</span>
-                          <span>{{ slider.level.bestFor }}</span>
+                          <span>{{ slider.level.bestFor | t }}</span>
                         </div>
                       </div>
                     }
@@ -2344,20 +2344,20 @@
                   </div>
 
                   <span class="mode-badge" [class.mode-pro]="item.profile === 'pro'" [class.mode-flash]="item.profile === 'flash'"
-                    [title]="item.profile === 'pro' ? 'Uses ARTEMIS Pro (Multi-Agent Cognitive State Graph)' : 'Uses ARTEMIS Flash (Reactive Fast Loop)'">
+                    [title]="item.profile === 'pro' ? ('Uses ARTEMIS Pro (Multi-Agent Cognitive State Graph)' | t) : ('Uses ARTEMIS Flash (Reactive Fast Loop)' | t)">
                     {{ item.profile === 'pro' ? 'Pro' : 'Flash' }}
                   </span>
                 </div>
 
                 <!-- Middle Content: Title + Description -->
                 <div class="card-body">
-                  <h4 class="card-title">{{ item.title }}</h4>
-                  <p class="card-desc">{{ item.description }}</p>
+                  <h4 class="card-title">{{ item.title | t }}</h4>
+                  <p class="card-desc">{{ item.description | t }}</p>
                 </div>
 
                 <!-- Bottom Footer Row: Tag & Action -->
                 <div class="card-footer-row">
-                  <span class="tag-pill">{{ item.tag }}</span>
+                  <span class="tag-pill">{{ item.tag | t }}</span>
                   <div class="use-prompt-action">
                     <span>{{ 'Use' | t }}</span>
                     <span class="material-symbols-outlined action-arrow">arrow_forward</span>
