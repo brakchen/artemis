@@ -32,7 +32,7 @@ import { I18nService } from './i18n.service';
 export class TranslatePipe implements PipeTransform {
   private readonly i18n = inject(I18nService);
 
-  public transform(value: string): string {
+  public transform(value: string | null | undefined): string {
     return this.i18n.t(value ?? '');
   }
 }

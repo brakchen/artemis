@@ -43,7 +43,7 @@ limitations under the License.
           class="btn-clear-history"
           (click)="clearHistory()"
           title="{{ 'Clear all tasks and history' | t }}"
-          aria-label="Clear all tasks and history"
+          aria-label="{{ 'Clear all tasks and history' | t }}"
           [disabled]="isSubmitting()"
           >
           <span class="material-symbols-outlined">delete</span>
@@ -58,7 +58,7 @@ limitations under the License.
     @if (agentService.activeTab() === 'tasks') {
       <!-- Active Queue Section -->
       <div class="queue-section-header">
-        <span class="material-symbols-outlined section-icon">bolt</span> Active Queue ({{ activeQueue().length }})
+        <span class="material-symbols-outlined section-icon">bolt</span> {{ 'Active Queue' | t }} ({{ activeQueue().length }})
       </div>
       @if (activeQueue().length === 0) {
         <div class="empty-section-placeholder">{{ 'No active or queued tasks.' | t }}</div>
@@ -75,11 +75,11 @@ limitations under the License.
               @if (getTaskStatus(session) === 'running') {
                 <span class="status-dot"></span>
               }
-              {{ getTaskStatus(session) | uppercase }}
+              {{ getTaskStatus(session) | uppercase | t }}
             </span>
             <div class="task-card-header-actions">
               @if (getDeviceSerial(session)) {
-                <span class="task-device" [title]="'Device: ' + getDeviceSerial(session)">
+                <span class="task-device" [title]="('Device:' | t) + ' ' + getDeviceSerial(session)">
                   <span class="material-symbols-outlined device-icon">phone_android</span>
                   <span class="device-name">{{ getDeviceSerial(session) }}</span>
                 </span>
@@ -94,7 +94,7 @@ limitations under the License.
                   class="btn-stop-card"
                   (click)="stopTask(session.session_id, $event)"
                   title="{{ 'Stop this task' | t }}"
-                  aria-label="Stop this task"
+                  aria-label="{{ 'Stop this task' | t }}"
                   >
                   <span class="material-symbols-outlined">stop_circle</span>
                 </button>
@@ -105,7 +105,7 @@ limitations under the License.
                   class="btn-delete-card"
                   (click)="deleteTask(session.session_id, $event)"
                   title="{{ 'Delete this task' | t }}"
-                  aria-label="Delete this task"
+                  aria-label="{{ 'Delete this task' | t }}"
                   [disabled]="isSubmitting()"
                   >
                   <span class="material-symbols-outlined">delete</span>
@@ -117,7 +117,7 @@ limitations under the License.
             {{ session.initial_goal || ('Unnamed Task' | t) }}
           </div>
           <div class="task-card-footer">
-            <span class="task-id" [title]="session.session_id">ID: {{ session.session_id }}</span>
+            <span class="task-id" [title]="session.session_id">{{ 'ID:' | t }} {{ session.session_id }}</span>
             <span class="task-date">{{ session.start_time * 1000 | date:'MM/dd/yy' }}</span>
           </div>
         </div>
@@ -125,7 +125,7 @@ limitations under the License.
       <!-- Collapsible History Section -->
       <details class="history-section" open>
         <summary class="history-summary">
-          <span class="material-symbols-outlined section-icon">history</span> Past Runs & History ({{ historyTasks().length }})
+          <span class="material-symbols-outlined section-icon">history</span> {{ 'Past Runs & History' | t }} ({{ historyTasks().length }})
         </summary>
         <div class="history-list-wrapper">
           @if (historyTasks().length === 0) {
@@ -143,11 +143,11 @@ limitations under the License.
                   @if (getTaskStatus(session) === 'running') {
                     <span class="status-dot"></span>
                   }
-                  {{ getTaskStatus(session) | uppercase }}
+                  {{ getTaskStatus(session) | uppercase | t }}
                 </span>
                 <div class="task-card-header-actions">
                   @if (getDeviceSerial(session)) {
-                    <span class="task-device" [title]="'Device: ' + getDeviceSerial(session)">
+                    <span class="task-device" [title]="('Device:' | t) + ' ' + getDeviceSerial(session)">
                       <span class="material-symbols-outlined device-icon">phone_android</span>
                       <span class="device-name">{{ getDeviceSerial(session) }}</span>
                     </span>
@@ -162,7 +162,7 @@ limitations under the License.
                       class="btn-delete-card"
                       (click)="deleteTask(session.session_id, $event)"
                       title="{{ 'Delete this task' | t }}"
-                      aria-label="Delete this task"
+                      aria-label="{{ 'Delete this task' | t }}"
                       [disabled]="isSubmitting()"
                       >
                       <span class="material-symbols-outlined">delete</span>
@@ -174,7 +174,7 @@ limitations under the License.
                 {{ session.initial_goal || ('Unnamed Task' | t) }}
               </div>
               <div class="task-card-footer">
-                <span class="task-id" [title]="session.session_id">ID: {{ session.session_id }}</span>
+                <span class="task-id" [title]="session.session_id">{{ 'ID:' | t }} {{ session.session_id }}</span>
                 <span class="task-date">{{ session.start_time * 1000 | date:'MM/dd/yy' }}</span>
               </div>
             </div>
