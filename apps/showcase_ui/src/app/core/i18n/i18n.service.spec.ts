@@ -76,8 +76,12 @@ describe('I18nService', () => {
     expect(document.documentElement.lang).toBe('zh-CN');
   });
 
-  it('remembers the choice across service instances', () => {
+  it('persists the choice so a freshly constructed service picks it up', () => {
     i18n.setLang('en');
-    expect(TestBed.inject(I18nService).lang()).toBe('en');
+    // A brand-new instance (as after a page reload) must read localStorage,
+    // not the injected singleton.
+    const afterReload = new I18nService();
+    expect(afterReload.lang()).toBe('en');
+    expect(afterReload.t('Quick glance')).toBe('Quick glance');
   });
 });
