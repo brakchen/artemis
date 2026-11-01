@@ -47,15 +47,7 @@ DIAGNOSIS_TIMEOUT_SECONDS = 40.0
 #: Per-provider budget for a live API key verification request.
 CREDENTIAL_CHECK_TIMEOUT_SECONDS = 12.0
 
-#: Providers the credentials probe lists by their *endpoint URL* rather than a
-#: key (``OPENAI_BASE_URL`` / ``OLLAMA_BASE_URL`` / ``VLLM_BASE_URL``). Their
-#: "raw_key" is that URL: verification must call the endpoint, not treat the
-#: URL as an API key.
-_ENDPOINT_PROVIDERS = frozenset({"custom", "ollama", "vllm"})
-
-#: Metadata keys that carry credential material. The console UI needs them to
-#: prefill its settings form; an MCP caller is an LLM context and must never
-#: see them.
+#: Defense in depth for legacy/custom probes. Canonical probes contain no secrets.
 _SECRET_METADATA_KEYS = frozenset(
     {"raw_key", "key", "api_keys", "current_key", "current_gemini_key"}
 )
@@ -221,12 +213,12 @@ def _credential_steps(env_file: str | None) -> list[str]:
         "  Ask the user to add a provider key (for example GEMINI_API_KEY=...) to "
         f"{location}, or to the MCP server's env block in the IDE's MCP config. "
         "Never ask them to paste the key into the chat.",
-        "  Alternative without any built-in key: register a custom OpenAI-compatible "
+        "  For MiniMax use `artemis init --provider minimax` to migrate all roles; or register an OpenAI-compatible / Anthropic Messages "
         "provider and make it the default — `artemis providers add --name <name> "
         "--base-url <url> --model <model>` (run it in a terminal; the registry file is "
         "re-read on every request, so no MCP restart is needed). Every node then uses "
         "that provider.",
-        "  `artemis init` is interactive and cannot run from a tool call; edit the env file instead.",
+        "  Run credential setup in a private terminal, never through chat. MiniMax roles must share a compatible provider configuration.",
         "  Keys are read when the server starts: restart the MCP server (reload MCP servers in "
         "the IDE) after adding one.",
     ]
@@ -378,59 +370,80 @@ async def _handle_launch_avd(
 
 
 async def _verify_credentials(cred_result: ProbeResult | None) -> list[dict[str, Any]]:
-    """Check every configured key against its provider; the keys never leave this function."""
+    """Verify actual canonical wire targets; public probe metadata is never an input.
 
+    Only catalog/authentication requests are made. In particular this does not
+    send a paid OCR or inference request to claim capability verification.
+    """
     from artemis.utils.credentials_validator import validate_api_key
+    from mcp_server.utils.task_config import prepare_task_config
 
-    if cred_result is None:
-        return []
-    metadata = cred_result.metadata
-    api_keys = metadata.get("api_keys") or {}
-    targets: list[tuple[str, str, str]] = []
-    for entry in metadata.get("providers") or []:
-        provider = str(entry.get("provider") or "").strip()
-        raw_key = entry.get("raw_key") or api_keys.get(provider) or ""
-        if not provider or not raw_key:
-            continue
-        targets.append((provider, str(entry.get("label") or provider), str(raw_key)))
-    if api_keys.get("ocr"):
-        targets.append(("ocr", "Vision OCR", str(api_keys["ocr"])))
-    if not targets:
-        return []
-
-    outcomes = await asyncio.gather(
-        *(
-            validate_api_key(
-                provider,
-                "EMPTY",
-                base_url=key,
-                timeout=CREDENTIAL_CHECK_TIMEOUT_SECONDS,
-            )
-            if provider in _ENDPOINT_PROVIDERS
-            else validate_api_key(provider, key, timeout=CREDENTIAL_CHECK_TIMEOUT_SECONDS)
-            for provider, _label, key in targets
-        ),
-        return_exceptions=True,
-    )
-    verified: list[dict[str, Any]] = []
-    for (provider, label, key), outcome in zip(targets, outcomes):
-        if isinstance(outcome, BaseException):
-            valid, message = False, f"verification raised {outcome.__class__.__name__}: {outcome}"
-        else:
-            valid, message = bool(outcome[0]), str(outcome[1])
-        verified.append(
+    try:
+        prepared = prepare_task_config()
+    except (ValueError, OSError):
+        return [
             {
-                "provider": provider,
-                "label": label,
-                "valid": valid,
-                "message": message.replace(key, "***"),
+                "provider": "configuration",
+                "label": "Selected model configuration",
+                "valid": False,
+                "message": "Cannot verify an invalid or missing selected model configuration.",
             }
-        )
-    return verified
+        ]
+    targets = []
+    seen = set()
+    endpoints = prepared._llm_endpoint_snapshot
+    default_endpoint = endpoints.get(("default", False, False))
+    ordered = ([default_endpoint] if default_endpoint is not None else []) + list(
+        endpoints.values()
+    )
+    for endpoint in ordered:
+        # The key remains private, including during deduplication. Never publish
+        # a key hash or endpoint internals as public verification metadata.
+        identity = (endpoint.provider.value, endpoint.vendor, endpoint.api_base, endpoint.api_key)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        targets.append(endpoint)
+    if not targets:
+        return [
+            {
+                "provider": "configuration",
+                "label": "Selected model configuration",
+                "valid": False,
+                "message": "No configured authentication target is available.",
+            }
+        ]
+    secrets = [endpoint.api_key for endpoint in targets if endpoint.api_key]
+
+    async def verify(endpoint):
+        provider = endpoint.provider.value
+        label = endpoint.registry_name or endpoint.vendor or provider
+        if not endpoint.api_key or endpoint.api_key == "EMPTY":
+            valid, message = (
+                False,
+                "No credential is available for catalog authentication verification.",
+            )
+        else:
+            try:
+                valid, message = await validate_api_key(
+                    provider,
+                    endpoint.api_key,
+                    base_url=endpoint.api_base,
+                    vendor=endpoint.vendor,
+                    timeout=CREDENTIAL_CHECK_TIMEOUT_SECONDS,
+                )
+            except Exception as error:
+                valid, message = False, f"Verification raised {type(error).__name__}."
+        message = str(message)
+        for secret in secrets:
+            message = message.replace(secret, "***")
+        return {"provider": provider, "label": label, "valid": bool(valid), "message": message}
+
+    return await asyncio.gather(*(verify(endpoint) for endpoint in targets))
 
 
 def _primary_credential(credentials: list[dict[str, Any]] | None) -> dict[str, Any] | None:
-    """The provider the task runner will use: first configured LLM provider (OCR is auxiliary)."""
+    """The selected default authentication target is ordered first by the verifier."""
     for entry in credentials or []:
         if entry.get("provider") != "ocr":
             return entry
@@ -1177,7 +1190,7 @@ async def mobile_diagnose(
         started_at/created_at). Stop a stuck one with
         mobile_manage_task(action="stop", trace_id=<session_id>).
       - `credentials`: null unless verify_credentials; else
-        [{provider, label, valid, message}] per configured key.
+        [{provider, label, valid, message}] per selected authentication target.
       - `device_probe`: null unless probe_device; else {ok, serial,
         elapsed_seconds, screenshot_bytes, element_count, error, fix}.
       - `fixes_applied`: what `attempt_fix` did ({fix, success, skipped, message}).
@@ -1204,8 +1217,8 @@ async def mobile_diagnose(
           Never pass it while the status is starting/waiting_for_adb/booting.
           Use it when no device is attached and an AVD exists instead of
           asking the user to start an emulator.
-        verify_credentials: When true, checks every configured API key
-          against its provider over the network (about 12 seconds worst
+        verify_credentials: When true, checks selected catalog authentication
+          targets against their providers over the network (about 12 seconds worst
           case, keys stay on the server). Use it when tasks fail with
           authentication, quota or model errors although the key check
           passes. An invalid primary key makes the verdict "blocked".

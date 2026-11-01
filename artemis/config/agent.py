@@ -932,7 +932,9 @@ class AgentGlobalConfig(BaseModel):
         description="Unified step-memory runtime and transcript scrub options.",
     )
 
-    model_config = {"extra": "allow"}
+    # Validation errors cross diagnostics, CLI, MCP and task admission. Keep
+    # nested field locations/types useful without reflecting arbitrary input.
+    model_config = {"extra": "allow", "hide_input_in_errors": True}
 
     @model_validator(mode="before")
     @classmethod

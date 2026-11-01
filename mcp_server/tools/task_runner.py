@@ -295,6 +295,12 @@ def mobile_run_task(
     # plain tool error rather than a failed trace on disk.
     verification_level, explorer_mode = _normalize_pro_tuning(verification_level, explorer_mode)
 
+    from mcp_server.utils.task_config import prepare_task_config
+
+    prepare_task_config(
+        canonical_model, verification_level=verification_level, explorer_mode=explorer_mode
+    )
+
     # 1. Generate a unique trace_id
     trace_id = str(uuid.uuid4())
 

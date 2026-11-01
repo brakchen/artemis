@@ -310,6 +310,10 @@ class LLMProviderRegistry:
     def _locked(self):
         # filelock 3.32.3 (MIT), https://py-filelock.readthedocs.io/:
         # use its maintained Windows/POSIX process lock for the whole transaction.
+        if os.getenv("ARTEMIS_CONFIG_READ_ONLY") == "1":
+            raise PermissionError(
+                "Injected model configuration is read-only; update it on the host"
+            )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(self.path) + ".lock", mode=0o600):
             yield

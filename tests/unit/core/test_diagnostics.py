@@ -525,10 +525,12 @@ async def test_credentials_probe_and_dynamic_update(no_default_llm_provider):
     probe = LLMCredentialsProbe()
     result = await probe.probe()
     assert result.status == ProbeStatus.PASS
-    assert "current_key" in result.metadata
-    assert result.metadata["current_key"] == "test_gemini_key_1234567890"
-    assert "api_keys" in result.metadata
-    assert result.metadata["api_keys"]["google"] == "test_gemini_key_1234567890"
+    assert result.metadata["configured"] is True
+    assert result.metadata["verified"] is False
+    assert result.metadata["selected_provider"]["provider"] == "google"
+    assert "current_key" not in result.metadata
+    assert "api_keys" not in result.metadata
+    assert "test_gemini_key_1234567890" not in repr(result.model_dump())
 
 
 @pytest.mark.asyncio

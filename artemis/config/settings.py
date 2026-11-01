@@ -221,6 +221,10 @@ class Settings(BaseSettings):
             key: Secret API key string.
             persist_to_env: Whether to save the key to the app directory's .env file.
         """
+        if os.getenv("ARTEMIS_CONFIG_READ_ONLY") == "1":
+            raise PermissionError(
+                "Injected model configuration is read-only; update it on the host"
+            )
         secret = SecretStr(key)
         from artemis.llm.google.provider import is_google_family_provider
 

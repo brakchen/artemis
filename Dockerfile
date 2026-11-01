@@ -48,6 +48,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     adb \
     curl \
     git \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=wheel-builder /wheels/ /wheels/

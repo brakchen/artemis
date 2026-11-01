@@ -12,48 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM python:3.12-slim
+# Build the root Dockerfile first: its runtime contains the bundled UI,
+# Artemis core/client wheels and third_party code from one packaging pipeline.
+ARG ARTEMIS_BASE_IMAGE=artemis-runtime:latest
+FROM ${ARTEMIS_BASE_IMAGE}
 
 WORKDIR /app
-
-# Install system dependencies, Android toolchain (adb), OpenCV runtime, FFmpeg, and curl
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    git \
-    adb \
-    ffmpeg \
-    libgl1 \
-    libglib2.0-0 \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy core Artemis package structure and configuration from repository root
-COPY artemis/ /app/artemis/
-COPY apps/ /app/apps/
-COPY mcp_server/ /app/mcp_server/
-COPY config/ /app/config/
-COPY pyproject.toml setup.py README.md LICENSE /app/
-
-# Install dependencies and artemis in editable mode
-RUN pip install --no-cache-dir -e /app
-
-# Copy custom container entrypoint script
 COPY playground/artemis_container/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
-
-# Environment Configuration
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
-ENV ARTEMIS_APP_DIR=/app
+ENV ARTEMIS_APP_DIR=/var/lib/artemis
 ENV PORT=8080
-
-# Expose internal Artemis Admin Console and Stream port
 EXPOSE 8080
-
-# Health check to ensure Artemis Admin Console is alive
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8080/api/system/health || curl -f http://localhost:8080/ || exit 1
-
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["uvicorn", "apps.admin_console.server:app", "--host", "0.0.0.0", "--port", "8080"]

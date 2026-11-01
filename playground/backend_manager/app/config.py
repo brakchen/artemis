@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     ARTEMIS_IMAGE: str = "artemis:latest"
     DOCKER_NETWORK: str = "artemis-net"
     ARTEMIS_CONTAINER_PREFIX: str = "artemis-session"
+    # Manager-visible export directory and its explicit Docker-daemon-host mapping.
+    ARTEMIS_EXPORT_ROOT: Path = Path("/var/lib/artemis-session-configs")
+    ARTEMIS_EXPORT_HOST_ROOT: str = ""
     ARTEMIS_CPU_LIMIT: float = 2.0
     ARTEMIS_MEMORY_LIMIT: str = "2g"
 

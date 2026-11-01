@@ -332,9 +332,21 @@ async def test_credentials(request: ValidateCredentialsRequest):
     }
 
 
+def _require_writable_model_config() -> None:
+    import os
+
+    if os.getenv("ARTEMIS_CONFIG_READ_ONLY") == "1":
+        raise HTTPException(
+            status_code=403,
+            detail="Injected model configuration is read-only; update it on the host",
+        )
+
+
 @router.post("/credentials")
 async def update_credentials(request: UpdateCredentialsRequest):
     """Dynamically configure and persist LLM or Vision API key, returning updated readiness report."""
+    _require_writable_model_config()
+
     from artemis.utils.credentials_validator import validate_api_key
 
     provider = request.provider.strip().lower()
@@ -374,6 +386,8 @@ async def update_credentials(request: UpdateCredentialsRequest):
         }
     except HTTPException:
         raise
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Model credentials are read-only") from None
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to update credentials") from None
 
@@ -489,6 +503,8 @@ async def discover_llm_provider_models(request: LLMProviderModelsRequest):
 
 @router.post("/llm-providers")
 async def upsert_llm_provider(request: LLMProviderRequest):
+    _require_writable_model_config()
+
     from artemis.llm.providers import provider_registry
 
     entry = _provider_candidate(request)
@@ -518,6 +534,8 @@ async def upsert_llm_provider(request: LLMProviderRequest):
 @router.post("/llm-providers/{name}/default")
 async def set_default_llm_provider(name: str):
     """Mark a registered provider as the default LLM provider."""
+    _require_writable_model_config()
+
     from artemis.llm.providers import provider_registry
 
     try:
@@ -534,6 +552,8 @@ async def set_default_llm_provider(name: str):
 @router.delete("/llm-providers/{name}")
 async def delete_llm_provider(name: str):
     """Remove a registered provider; the default falls back to the next one."""
+    _require_writable_model_config()
+
     from artemis.llm.providers import provider_registry
 
     if not provider_registry.remove(name):

@@ -83,6 +83,8 @@
 
 ## E 整体证据
 
+- Root发行准备已核对实际安装metadata：anthropic0.122.0、langchain-anthropic1.5.6、langchain-core1.5.6、filelock3.32.3均MIT；LC-Anthropic1.5.6要求anthropic>=0.120.0,<1和core>=1.5.4,<2。private payload hook只能声称已验证的版本；E前root计划将既有LC-Anthropic约束到1.5.6并显式约束实际使用的Anthropic0.122.0，沿现lock不升级。清洁wheel解释器从非repo cwd执行scratch/release-wheel-smoke.py（尚未运行），实际CLI env导入初始化/模板不变/Unicode appdir/env指针/各角色私有端点/实际SDK MockTransport及10MiB媒体限额前置拒绝；不是手工重建假配置代替实际安装路径。
+
 - D1 rootfull1最终3220passed8skipped89warnings373.52s/exit0；新增threadwarning源于旧test_video_analyzer_preserves_thought_signature全局Path.stat模拟普通文件，与logger线程temp_dir mkdir时序冲突。该文件隔离并将threadwarning设error后7pass3旧warn2.75s，不证明整套race消失。E须收窄仅假video路径的stat/exists和prompt模拟、无关路径委托真实方法，保留thought_signature/confidence/借入媒体全部原断言；不改Windows mkdir/logger、不吞warning、不删用户temp。C44此文件成为授权E后继，最终defaultpytest检查无未处理线程异常。
 
 - 完整 C01–C32 映射；Google client/HTTP 全拒绝 spy 下 MiniMax 六模块与辅助入口的 offline 调用，残留 Google Key/raw Gemini/shared Client 仍不转厂商。新 schema/动作门禁测试不以语法正确证明目标语义正确。

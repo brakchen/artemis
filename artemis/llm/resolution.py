@@ -184,6 +184,7 @@ def _snapshot(ctx: Any, role: str, is_utils: bool) -> dict[tuple[str, bool, bool
                 if parent is not None:
                     result[(name, False, fallback)] = derive_auxiliary_endpoint(parent, auxiliary)
     # Publish only after all endpoints pass, so failed preflight cannot pin half a task.
+    ctx._llm_provider_registry = registry
     ctx._llm_endpoint_snapshot = result
     return result
 

@@ -282,6 +282,7 @@ def _run(
     queued=None,
     cleanup=0,
     validate=None,
+    credential_endpoints=None,
     smoke=None,
     helper_status=None,
     helper_provision=None,
@@ -290,6 +291,31 @@ def _run(
 ):
     """Run the tool with every side-effecting collaborator stubbed."""
     with ExitStack() as stack:
+        # Bind the internal canonical owner; public probe metadata is deliberately
+        # legacy-shaped below to retain defense-in-depth scrubbing coverage.
+        from artemis.llm.router import ModelEndpoint, ModelProvider
+        from mcp_server.utils import task_config
+        from types import SimpleNamespace
+
+        endpoints = (
+            credential_endpoints
+            if credential_endpoints is not None
+            else [
+                ModelEndpoint(provider=ModelProvider.GOOGLE, api_key="SECRET-GOOGLE"),
+                ModelEndpoint(provider=ModelProvider.OPENAI, api_key="SECRET-OPENAI"),
+            ]
+        )
+        stack.enter_context(
+            patch.object(
+                task_config,
+                "prepare_task_config",
+                return_value=SimpleNamespace(
+                    _llm_endpoint_snapshot={
+                        str(i): endpoint for i, endpoint in enumerate(endpoints)
+                    }
+                ),
+            )
+        )
         fake_helper = MagicMock()
         fake_helper.status = MagicMock(
             side_effect=lambda serial: dict(helper_status or _helper_healthy(serial))
@@ -654,7 +680,7 @@ def test_missing_credentials_point_to_env_file_not_chat(temp_trace_env):
     assert result["verdict"] == "blocked"
     assert not any(s.strip() == "Run: artemis init" for s in steps)
     assert any("/home/u/artemis/.env" in s and "Never ask them to paste" in s for s in steps)
-    assert any("interactive" in s for s in steps)
+    assert any("private terminal" in s for s in steps)
     assert steps[-1].startswith("After changing the env file")
 
 
@@ -817,56 +843,41 @@ def test_launch_avd_failure_is_required_step(temp_trace_env):
 def test_verify_credentials_reports_every_provider_without_leaking_keys(temp_trace_env):
     validate = AsyncMock(return_value=(True, "verified"))
     result = _run(_healthy_probes(), validate=validate, verify_credentials=True)
-
     assert result["verdict"] == "ready"
     assert result["credentials"] == [
-        {"provider": "google", "label": "Gemini", "valid": True, "message": "verified"},
-        {"provider": "openai", "label": "ChatGPT", "valid": True, "message": "verified"},
-        {"provider": "ocr", "label": "Vision OCR", "valid": True, "message": "verified"},
+        {"provider": "google", "label": "google", "valid": True, "message": "verified"},
+        {"provider": "openai", "label": "openai", "valid": True, "message": "verified"},
     ]
     called = {call.args[0]: call.args[1] for call in validate.await_args_list}
-    assert called == {"google": "SECRET-GOOGLE", "openai": "SECRET-OPENAI", "ocr": "SECRET-OCR"}
+    assert called == {"google": "SECRET-GOOGLE", "openai": "SECRET-OPENAI"}
     assert all(call.kwargs["timeout"] == 12.0 for call in validate.await_args_list)
     assert "SECRET" not in repr(result)
 
 
-def test_verify_credentials_calls_endpoint_providers_by_url(temp_trace_env):
-    """A custom / Ollama / vLLM entry carries its base URL as the "key": the
-    check must hit that endpoint (no auth header) instead of validating the
-    URL as if it were an API key."""
-    validate = AsyncMock(return_value=(True, "verified"))
-    cred = _probe(
-        "gemini_api_key",
-        ProbeStatus.PASS,
-        category=ProbeCategory.CREDENTIALS,
-        metadata={
-            "providers": [
-                {
-                    "provider": "ollama",
-                    "label": "Local Ollama",
-                    "raw_key": "http://localhost:11434/v1",
-                },
-                {"provider": "google", "label": "Gemini", "raw_key": "SECRET-GOOGLE"},
-            ],
-            "api_keys": {},
-        },
-    )
-    probes = [p for p in _healthy_probes() if p.id != "gemini_api_key"] + [cred]
-    _run(probes, validate=validate, verify_credentials=True)
+def test_verify_credentials_does_not_claim_local_empty_key_is_verified(temp_trace_env):
+    from artemis.llm.router import ModelEndpoint, ModelProvider
 
-    calls = {call.args[0]: call for call in validate.await_args_list}
-    assert calls["ollama"].args[1] == "EMPTY"
-    assert calls["ollama"].kwargs["base_url"] == "http://localhost:11434/v1"
-    assert calls["google"].args[1] == "SECRET-GOOGLE"
-    assert "base_url" not in calls["google"].kwargs
+    validate = AsyncMock(return_value=(True, "verified"))
+    endpoints = [
+        ModelEndpoint(
+            provider=ModelProvider.OLLAMA, api_key="EMPTY", api_base="http://localhost:11434/v1"
+        )
+    ]
+    result = _run(
+        _healthy_probes(),
+        validate=validate,
+        verify_credentials=True,
+        credential_endpoints=endpoints,
+    )
+    validate.assert_not_awaited()
+    assert result["credentials"][0]["valid"] is False
+    assert "No credential" in result["credentials"][0]["message"]
 
 
 def test_invalid_primary_credential_blocks_and_redacts_message(temp_trace_env):
-    async def _validate(provider, api_key, timeout=12.0):
+    async def _validate(provider, api_key, **kwargs):
         if provider == "google":
             return False, f"Gemini API verification failed (400): key {api_key} invalid"
-        if provider == "ocr":
-            raise RuntimeError("boom SECRET-OCR")
         return True, "ok"
 
     result = _run(
@@ -875,32 +886,29 @@ def test_invalid_primary_credential_blocks_and_redacts_message(temp_trace_env):
         validate=AsyncMock(side_effect=_validate),
         verify_credentials=True,
     )
-
     assert result["verdict"] == "blocked"
     assert "SECRET" not in repr(result)
-    google, openai, ocr = result["credentials"]
+    google, openai = result["credentials"]
     assert google["valid"] is False and "***" in google["message"]
     assert openai["valid"] is True
-    assert ocr["valid"] is False and ocr["message"].startswith("verification raised RuntimeError")
     steps = result["next_steps"]
-    required = next(s for s in steps if s.startswith("[REQUIRED] Gemini API key (google)"))
+    required = next(s for s in steps if s.startswith("[REQUIRED] google API key (google)"))
     assert "failed live verification" in required
     assert steps[steps.index(required) + 1].startswith("  Ask the user to add a provider key")
     assert any("/home/u/.env" in s for s in steps)
-    assert any(s.startswith("[OPTIONAL] Vision OCR API key (ocr)") for s in steps)
     assert steps[-1].startswith("After changing the env file")
-    assert "Gemini key verification" in result["summary"]
+    assert "google key verification" in result["summary"]
 
 
 def test_invalid_secondary_credential_only_degrades(temp_trace_env):
-    async def _validate(provider, api_key, timeout=12.0):
+    async def _validate(provider, api_key, **kwargs):
         return (provider != "openai", "ok" if provider != "openai" else "401 unauthorized")
 
     result = _run(
         _healthy_probes(), validate=AsyncMock(side_effect=_validate), verify_credentials=True
     )
     assert result["verdict"] == "degraded"
-    assert any(s.startswith("[OPTIONAL] ChatGPT API key (openai)") for s in result["next_steps"])
+    assert any(s.startswith("[OPTIONAL] openai API key (openai)") for s in result["next_steps"])
 
 
 # --------------------------------------------------------------------------- #

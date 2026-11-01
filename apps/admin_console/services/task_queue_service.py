@@ -1063,8 +1063,6 @@ class TaskQueueService:
             str(verification_level).strip().lower() or None if verification_level else None
         )
         explorer_mode = str(explorer_mode).strip().lower() or None if explorer_mode else None
-        cls.ensure_worker_running()
-
         enqueued_tasks = []
         now = time.time()
         endpoint = current_adb_endpoint()
@@ -1074,6 +1072,13 @@ class TaskQueueService:
         )
         if duplicate_response is not None:
             return duplicate_response
+
+        from artemis.config.task import prepare_task_submission
+
+        prepare_task_submission(
+            profile, verification_level=verification_level, explorer_mode=explorer_mode
+        )
+        cls.ensure_worker_running()
 
         rejection_response = await cls._reject_unavailable_device(device_serial)
         if rejection_response is not None:

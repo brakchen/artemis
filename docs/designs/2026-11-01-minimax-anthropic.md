@@ -1,14 +1,14 @@
 # Artemis 全 MiniMax 技术方案
 
 - 日期：2026-11-01（Asia/Shanghai）。
-- 版本：1.2，用户已批准实施；基础配置、协议、搜索、定位/OCR来源及动作门禁已完成，其余阶段实施中，本文不表示完整功能或精度已经验证。
+- 版本：1.2，用户已批准实施；A–D3已完成离线验证，E仍待，本文不表示完整功能或精度已经验证。
 - 代码基线：`e7cbe5950fba16b7d31c852aa1e92309d7d6405c`，分支 `feat/model-config`。
 - 适用范围：主 Agent 推理、视频分析、Explorer 屏幕探索、联网检索、OCR、目标坐标定位。
 - 依据：本次会话已确认的需求、基线代码、MiniMax 官方文档及官方文档 MCP。
 
 ## 1. 目标、决策与范围
 
-所有 AI 推理和识别由 MiniMax 提供，模型请求统一采用官方推荐的 Anthropic Messages 协议。本地保留 Artemis 的任务编排、设备驱动、ADB、截图、UI 树读取、图像裁剪、视频处理、坐标换算和执行结果检查。这些确定性程序不是另一套 AI 模型。
+所有 AI 推理和识别由 MiniMax 提供。文本与视觉推理采用官方推荐的 Anthropic Messages 协议；可选音轨转写使用同一任务凭据调用 MiniMax 原生 ASR 接口，见第 6.2 节。本地保留 Artemis 的任务编排、设备驱动、ADB、截图、UI 树读取、图像裁剪、视频处理、坐标换算和执行结果检查。这些确定性程序不是另一套 AI 模型。
 
 已由用户确定的方向：
 
@@ -25,7 +25,7 @@
 
 ## 2. 当前代码与差距
 
-以下均为基线现状，不是目标实现。
+本节记录实施前基线的问题和调研依据，保留作修改范围索引；当前实现及验证状态见第 14 节 Changelog 与实施验收表。
 
 | 位置 | 已观察到的行为 | 目标改动 |
 | --- | --- | --- |
@@ -39,11 +39,11 @@
 | [SDK 预热](../../artemis/sdk/agent.py)、[记忆压缩](../../artemis/memory/chunking.py)、[轻量检查默认值](../../artemis/config/llm.py) | 仍存在 Google 专用初始化或硬编码模型 | 纳入同一 Provider 配置链，覆盖六模块之外的辅助推理入口 |
 | [基础 LLM 配置](../../third_party/mobile_use/config/llm.py) | `reasoning_effort` 仅有 none/low/medium/high，fallback 必填 | 支持 MiniMax 所需档位并按厂商校验；迁移期处理必填 fallback，避免重复请求 |
 
-锁文件基线已包含 `anthropic==0.122.0`、`langchain-anthropic==1.5.6`、`langchain-core==1.5.6`；这是代码锁定版本，不表示本地已安装或兼容性已验证。优先验证并复用这些依赖，避免另写通用 Agent 框架或复制 SDK。
+锁文件基线包含 `anthropic==0.122.0`、`langchain-anthropic==1.5.6`、`langchain-core==1.5.6`；实施阶段已在隔离源码环境复用同版本做真实 SDK/模拟 HTTP 验证。发行安装及实际账号权限分别记录，不由锁文件或离线请求通过推导。
 
 ### 2.1 调用链复核发现的范围遗漏
 
-以下是对 1.0 方案的补充，均为静态阅读确认的现有分支或契约；表中改动尚未实施。
+以下是方案 1.1 对 1.0 范围的补充，记录当时静态阅读确认的分支或契约；修复进展以 Changelog 为准。
 
 | 编号 | 代码证据与遗漏 | 必须覆盖的改动 |
 | --- | --- | --- |
@@ -80,7 +80,7 @@
 | R22 / P1 | [MCP 鉴权验证](../../mcp_server/tools/diagnose.py) 读取 probe 中的原始 Key；注册默认 Provider 元数据没有这些验证目标，删除秘密字段后也会直接返回空列表 | 脱敏与内部验证同时修改：验证从统一 resolver/注册表取得受控凭据，不依赖公开诊断 metadata；空列表不得冒充已验证 |
 | R23 / P1/P2 | [可靠性分类](../../artemis/llm/reliability.py) 主要看 HTTP/异常文字，原生 Files 另有业务状态；原生适配如直接放 usage，现有 [meter](../../artemis/services/token_meter.py) 不一定识别 | 薄适配负责业务错误与 usage 规范化，复用既有恢复/计量；永久业务错误不重试成临时故障，不重复计入 thinking |
 
-已做的隔离复现：提取真实类型和函数后，不导入应用、不读取凭据，验证了注册别名校验失败、max_tokens 被丢弃、可选角色被丢弃，以及默认注册表/已脱敏探针的 MCP 验证返回空列表。协议审查还按锁文件 URL 与 SHA256 核对了 `langchain-anthropic==1.5.6` wheel 源码：支持 base_url/output_config 和搜索内容块，默认结构化输出不保留 raw。未安装依赖或调用真实模型。上述事实支持复用 SDK 并补契约，不支持重写全部 Agent 的结论。
+方案复核时的隔离复现：提取真实类型和函数后，不导入应用、不读取凭据，验证了注册别名校验失败、max_tokens 被丢弃、可选角色被丢弃，以及默认注册表/已脱敏探针的 MCP 验证返回空列表。协议审查还按锁文件 URL 与 SHA256 核对了 `langchain-anthropic==1.5.6` wheel 源码：支持 base_url/output_config 和搜索内容块，默认结构化输出不保留 raw。当时未安装依赖或调用真实模型；后续实施验证另见 Changelog。上述基线事实支持复用 SDK 并补契约的方案选择。
 
 ## 3. 方案选择与架构
 
@@ -422,6 +422,17 @@ MiniMax Anthropic 目录使用 `GET /anthropic/v1/models` 与 x-api-key，处理
 
 容器不会自动继承宿主用户目录。部署入口需将选定角色配置与最小 Provider 注册表通过受控秘密文件/挂载提供给容器，在容器内指定一致的 `ARTEMIS_APP_DIR`；校验 UID/权限和路径。不得把 Key 打入镜像、转发全部宿主厂商秘密或只新增环境变量白名单就宣称可用。配置更新后如何重载按任务快照规则处理，现有运行任务不切换凭据。
 
+当前容器部署约定：
+
+- 在根目录构建 `docker build -t artemis-runtime:latest .`，再执行 `docker build -f playground/artemis_container/Dockerfile -t artemis:latest .` 构建 manager 使用的 session 镜像，然后按对应 Compose 启动。两份 Playground Dockerfile 通过 `ARTEMIS_BASE_IMAGE` 复用根 runtime；session 镜像标签须与 manager 的 `ARTEMIS_IMAGE`（默认 `artemis:latest`）一致。根 runtime 包含 ffmpeg、OpenCV 系统库及构建后的 UI/client/core wheel。
+- Compose 的 `ARTEMIS_MAIN_CONFIG`、`ARTEMIS_PROVIDER_REGISTRY`、`ARTEMIS_SELECTED_ENV_FILE` 必须是实际源文件的绝对路径。registry-only MiniMax 仍需提供受保护的空 dotenv 文件。单独 session Compose 直接使用这些输入，部署者应提供已裁剪的选中配置/凭据；manager 的源 registry 可以包含多个配置，但对子容器只导出实际选中角色主备及辅助模型所需的条目。
+- manager 内 `ARTEMIS_EXPORT_ROOT` 默认 `/var/lib/artemis-session-configs`；必填 `ARTEMIS_EXPORT_HOST_ROOT` 是 Docker daemon 宿主机的绝对目录，并须通过 bind mount 映射到前者。非同机 daemon 也必须满足该映射，不能把 manager 内路径直接当作宿主路径。导出路径必须保持在受控根目录下。
+- 子容器设置 `ARTEMIS_ARTEMIS_JSONC=/run/artemis/artemis.jsonc`、`ARTEMIS_APP_DIR=/var/lib/artemis`、`ARTEMIS_CONFIG_READ_ONLY=1`。仅配置、registry 和选中 dotenv 文件只读挂载，日志/数据库等状态可写；HTTP 配置保存和清除返回 403。修改源文件后创建新任务/会话，现有任务不热切换凭据。
+- 导出文件权限先保护后写入，正常 stop/启动失败仅清理该 container ID 所拥有的生成文件和空目录。容器移除失败时保留绑定文件；manager 崩溃或外部生命周期留下的导出目录保留为受保护文件，操作员确认无容器使用后自行清理。本次不新增自动 GC/TTL。
+- CLI/API/MCP 父入口对新任务作纯配置预检，已接受任务保持幂等返回。队列提交校验提交时配置，SDK worker 启动时固定其实际配置；这不构成跨进程排队期间的秘密配置原子快照。配置改变后应重启已有长期进程。
+
+本机 Docker daemon 不可用，镜像构建/真实容器启动仍待验证；离线测试证明加载、权限、挂载参数与清理归属，不证明 Docker daemon 或实际设备可用。
+
 ## 10. 实施范围与阶段
 
 本文规定行为与接口，不代替实施时的逐文件任务计划。预期改动所有者如下。
@@ -528,6 +539,15 @@ Google 路径核查除六模块外，还包括 `artemis/constants.py`、`artemis
 ## 14. Changelog
 
 本节记录技术方案的变更与逐阶段实施证据；标明“实施中”的条目仍未完成验收。后续修订本文时须同步更新本节，按版本倒序记录日期、变更内容及验证范围。
+
+### 实施进度：D3 诊断、父入口与容器 — 2026-11-02
+
+- 候选实现从探针源头移除原始Key，MCP内部鉴权改读canonical私有端点，公开区分配置、鉴权、禁用与未验证。新任务在trace/queue/device前纯预检，MCP父入口和worker复用实际legacy override/explicit主文件选择；已接受的幂等任务保留原返回。
+- 容器复用根UI/client/core wheel runtime，按实际选定角色导出受保护的凭据子集及配置文件，只读挂载到可写应用目录。独立legacy Agent/LLM文件的设置和implicit aux语义保留，源文件变更拒绝，私有registry revision避免重读较新Key。
+- manager显式区分可见导出目录与Docker宿主路径；配置错误在移除旧容器前失败，只读注入的修改/清除明确403。正常stop/失败清理仅操作当前container ID拥有的导出文件；manager进程崩溃遗留受保护目录保留，不引入自动GC/TTL框架。
+- 首轮独立规格审查发现错误类型的Agent配置会将输入反射到公开/缓存诊断及Queue/MCP/container错误，另有legacy custom/ollama/vllm容器丢失选中Key。修复在canonical Agent配置启用验证错误input隐藏，按既有解析规则最小导出选中OPENAI_API_KEY；原5反例、301相关回归及独立18项delta复核通过。旧失败证据保留，未以探针局部掩盖替代其他入口修复。
+- 独立质量审查另复现启动请求取消后后台Docker线程晚失败遗留凭据、晚成功遗留容器。现复用既有drain helper，先shield并收尾真实worker，再收尾独立清理任务，重复取消仍保留原异常；移除失败保留绑定文件。原反例不相容的释放顺序及独立释放事件的新反例均保留，67项相关检查及独立规格17项、质量18项通过。
+- 最终23路径在完整suite前后保持冻结哈希/范围/Ruff/format/diff，root Python3.12完整单测3343 passed、8 skipped、89 warnings，386.09秒。旧视频fixture全局Path.stat引发的线程警告再次出现，已归E修复，不以exit0忽略。本机Docker daemon不可用，未实际build/start镜像，不把静态挂载/假客户端契约当真实部署验证；E与最终发行验证继续。
 
 ### 实施进度：D2 配置入口与初始化迁移 — 2026-11-02
 

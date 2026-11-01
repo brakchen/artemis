@@ -113,6 +113,20 @@ async def run_task(request: RunRequest):
                 "total_queued": len(state.queue_tasks),
             }
 
+    from artemis.config.task import prepare_task_submission
+
+    try:
+        prepare_task_submission(
+            request.profile or "flash",
+            verification_level=request.verification_level,
+            explorer_mode=request.explorer_mode,
+        )
+    except (ValueError, OSError):
+        raise HTTPException(
+            status_code=422,
+            detail="Task model configuration is invalid; check the selected profile and providers",
+        ) from None
+
     # Reject an explicit unknown/offline target before running the more
     # expensive readiness probe. Besides producing a stable SDK response,
     # this avoids probing the currently active device for a serial that can

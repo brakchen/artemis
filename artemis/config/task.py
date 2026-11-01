@@ -84,3 +84,28 @@ def prepare_selected_task_config(
     context_uses_minimax(prepared)
     prepared.model_snapshot = public_model_snapshot(prepared, requested_profile=requested)
     return prepared
+
+
+def prepare_task_submission(
+    profile: str | None = None,
+    *,
+    verification_level: str | None = None,
+    explorer_mode: str | None = None,
+) -> SimpleNamespace:
+    """Preflight console/queue input using the worker CLI's existing builder."""
+    from artemis.sdk import Agent
+    from third_party.mobile_use.main import new_default_config_builder
+
+    try:
+        builder = new_default_config_builder()
+        if verification_level:
+            builder.with_verification_level(verification_level)
+        if explorer_mode:
+            builder.with_explorer(pro_mode=explorer_mode)
+        return Agent(config=builder.build(validate_profiles=False)).prepare_task_config(profile)
+    except ValueError:
+        raise
+    except Exception:
+        # Legacy provider validation raises plain Exception. Admission surfaces
+        # one safe configuration error before it creates any external effects.
+        raise ValueError("Task model configuration could not be prepared") from None
