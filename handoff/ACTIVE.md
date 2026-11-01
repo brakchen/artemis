@@ -26,6 +26,6 @@
 
 | lane_id | Topic | owner(session) | branch/worktree | Owned files/directories | State | head_commit | synced_master | updated/ready_at (UTC) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| _example/lane-id | 示例：把任务描述写成祈使句 | _session-uuid_ | `feat/example` / `.worktrees/example` | `artemis/…`; `tests/unit/…` | draft | — | — | 2026-01-01T00:00Z |
+| minimax-design | 编写 MiniMax Anthropic 六模块技术方案 | Codex `01a1957d-26fb-7173-abdc-ba44f87b31d0` | `feat/model-config` / current checkout | `docs/designs/2026-11-01-minimax-anthropic.md` | active | — | `e7cbe5950fba16b7d31c852aa1e92309d7d6405c` (origin/main) | 2026-11-01T05:36:10Z |
 
-> 上面是格式示例，登记真实 lane 时请删除该行。
+> 本条为文档任务。当前运行环境为 Codex，owner 是实际 `CODEX_THREAD_ID`，不是 Pi session UUID；当前工具没有 tower-do。远端默认分支为 `origin/main`，不存在 `origin/master`，沿用用户已要求创建的 `feat/model-config` 分支。实现代码尚未认领或修改；方案待用户评审，lane 未进入 ready 或合并阶段。
