@@ -171,6 +171,7 @@ class ArtemisContext(DeviceClientAccessors, BaseModel):
     retired instead of counting it as a pass or failure."""
 
     _genai_client: Any | None = PrivateAttr(default=None)
+    _llm_endpoint_snapshot: dict[tuple[str, bool, bool], Any] = PrivateAttr(default_factory=dict)
     _video_blackboard: Any | None = PrivateAttr(default=None)
     _video_circuit_breaker: Any | None = PrivateAttr(default=None)
     _mobile_controller: Any | None = PrivateAttr(default=None)

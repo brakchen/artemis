@@ -14,7 +14,9 @@
 
 """Centralized constants, environment variable names, and type definitions for ARTEMIS."""
 
-from typing import Literal
+from typing import Annotated, Literal
+
+from pydantic import StringConstraints
 
 # ==============================================================================
 # Environment Variable Keys
@@ -118,8 +120,9 @@ DEFAULT_EXPLORER_VERSION: Literal["flash", "pro", "ultra"] = "flash"
 # Literals and Type Aliases
 # ==============================================================================
 
-LLMProvider = Literal[
-    "openai", "google", "openrouter", "xai", "vertexai", "anthropic", "ollama", "vllm", "custom"
+LLMProvider = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, to_lower=True, pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$"),
 ]
 ExplorerVersion = Literal["flash", "pro", "ultra"]
 

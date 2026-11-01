@@ -71,6 +71,17 @@ async def _initialize_agent(
 
 def resolve_profile_file() -> str | None:
     """Resolves the LLM configuration profile across multiple locations."""
+    # A selected main file owns model resolution; stale legacy profiles must
+    # not override it. initialize_llm_config surfaces a missing explicit path.
+    if any(
+        os.getenv(name)
+        for name in (
+            "ARTEMIS_ARTEMIS_JSONC",
+            "ARTEMIS_ARTEMIS_JSON",
+            "ARTEMIS_LLM_CONFIG_JSON",
+        )
+    ):
+        return None
     candidates = []
     artemis_config_dir = os.getenv("ARTEMIS_CONFIG_DIR")
     if artemis_config_dir:

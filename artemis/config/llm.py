@@ -15,6 +15,8 @@
 """LLM provider, model hierarchy, fallback chaining, and configuration loaders."""
 
 from pathlib import Path
+from copy import deepcopy
+import os
 from typing import Any
 
 
@@ -90,6 +92,7 @@ class LLMConfig(LLMConfigBase):
     validator_pixel_safety_net: LLMWithFallback | None = None
     planner_validation: LLMWithFallback | None = None
     output_analyzer: LLMWithFallback | None = None
+    default: LLMWithFallback | None = None
 
     def validate_providers(self) -> None:
         """Validate credentials across all configured agent nodes."""
@@ -130,81 +133,93 @@ class LLMConfig(LLMConfigBase):
         return val
 
 
-def _expand_default_into_nodes(config_dict: dict) -> dict:
-    """Expand unified config format with 'default' and 'nodes' into full LLMConfig schema."""
-    if "planner" in config_dict and "utils" in config_dict:
-        return config_dict
+AGENT_ROLES = tuple(name for name in LLMConfig.model_fields if name not in {"utils", "default"})
+OPTIONAL_AGENT_ROLES = tuple(
+    name for name in AGENT_ROLES if LLMConfig.model_fields[name].default is None
+)
+UTILITY_ROLES = tuple(LLMConfigUtils.model_fields)
 
-    default_model_cfg = config_dict.get(
-        "default",
-        {
-            "provider": "google",
-            "model": "gemini-3.8-flash",
-            "fallback": {
-                "provider": "google",
-                "model": "gemini-3.7-flash",
-            },
-        },
-    )
 
-    nodes_override = config_dict.get("nodes", {})
-
-    all_agent_nodes = [
-        "planner",
-        "summarizer",
-        "operator",
-        "operator_summarizer",
-        "log_reader_sub_agent",
-        "log_analyzer",
-        "diagnoser",
-        "checker",
-        "planner_avatar",
-        "history_analyzer_expert",
-        "diagnoser_expert",
-        "explorer",
-    ]
-
-    all_utils_nodes = [
-        "outputter",
-        "hopper",
-        "video_analyzer",
-        "object_detector",
-    ]
-
-    result: dict[str, Any] = {}
-    for node in all_agent_nodes:
-        node_cfg = dict(default_model_cfg)
-        if node in nodes_override:
-            for k, v in nodes_override[node].items():
-                if isinstance(v, dict) and isinstance(node_cfg.get(k), dict):
-                    node_cfg[k] = {**node_cfg[k], **v}
-                else:
-                    node_cfg[k] = v
-        result[node] = node_cfg
-
-    utils_dict: dict[str, Any] = {}
-    for util in all_utils_nodes:
-        util_cfg = dict(default_model_cfg)
-        if util in nodes_override:
-            for k, v in nodes_override[util].items():
-                if isinstance(v, dict) and isinstance(util_cfg.get(k), dict):
-                    util_cfg[k] = {**util_cfg[k], **v}
-                else:
-                    util_cfg[k] = v
-        utils_dict[util] = util_cfg
-    result["utils"] = utils_dict
-
+def _merge_dict(base: dict, override: dict) -> dict:
+    if "timeout" in override:
+        override = deepcopy(override)
+        timeout = override.pop("timeout")
+        if "timeout_seconds" in override and override["timeout_seconds"] != timeout:
+            raise ValueError("timeout and timeout_seconds conflict")
+        override["timeout_seconds"] = timeout
+    result = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _merge_dict(result[key], value)
+        else:
+            result[key] = deepcopy(value)
     return result
+
+
+def _expand_default_into_nodes(config_dict: dict, *, partial: bool = False) -> dict:
+    """Normalize both formats; partial profiles contribute only explicit values.
+
+    Top-level agent/device sections belong to other config owners. Model/role
+    fields stay strict, including optional roles and utility names.
+    """
+    if not isinstance(config_dict, dict):
+        raise ValueError("LLM configuration must be an object")
+    unrelated = {"agent", "device", "devices", "memory", "presets", "version"}
+    data = {k: deepcopy(v) for k, v in config_dict.items() if k not in unrelated}
+    unknown = set(data) - set(AGENT_ROLES) - {"default", "nodes", "utils"}
+    if unknown:
+        raise ValueError(f"Unknown LLM configuration roles: {sorted(unknown)}")
+    if "nodes" not in data and "default" not in data:
+        return data
+    default = data.pop("default", {})
+    nodes = data.pop("nodes", {})
+    if not isinstance(default, dict) or not isinstance(nodes, dict):
+        raise ValueError("default and nodes must be objects")
+    unknown = set(nodes) - set(AGENT_ROLES) - set(UTILITY_ROLES)
+    if unknown:
+        raise ValueError(f"Unknown LLM nodes: {sorted(unknown)}")
+    if not partial and not default:
+        raise ValueError("Unified LLM configuration requires a default model")
+    result: dict[str, Any] = {"default": deepcopy(default)} if default else {}
+    for role in AGENT_ROLES:
+        # Preserve legacy get_agent defaults when no role override is selected.
+        # A MiniMax task inherits the global model at the pinned snapshot boundary.
+        if role in OPTIONAL_AGENT_ROLES and role not in nodes:
+            continue
+        if not partial or default or role in nodes:
+            result[role] = (
+                None if nodes.get(role, {}) is None else _merge_dict(default, nodes.get(role, {}))
+            )
+    utils = {}
+    for role in UTILITY_ROLES:
+        if not partial or default or role in nodes:
+            utils[role] = (
+                None if nodes.get(role, {}) is None else _merge_dict(default, nodes.get(role, {}))
+            )
+    if utils:
+        result["utils"] = utils
+    return _merge_dict(result, data)
 
 
 def parse_llm_config() -> LLMConfig:
     """Parse and instantiate LLMConfig from artemis.jsonc or llm-config.json."""
     config_path = None
-    for candidate in ("artemis.jsonc", "artemis.json", LLM_CONFIG_FILENAME):
+    candidates = ("artemis.jsonc", "artemis.json", LLM_CONFIG_FILENAME)
+    # Explicit selection always precedes repository defaults, including a
+    # selected JSON/legacy filename when a normal artemis.jsonc also exists.
+    explicit = [
+        candidate
+        for candidate in candidates
+        if os.getenv(f"ARTEMIS_{candidate.upper().replace('.', '_').replace('-', '_')}")
+    ]
+    for candidate in explicit or candidates:
         try:
             config_path = get_config_path(candidate)
             break
         except FileNotFoundError:
+            env_name = f"ARTEMIS_{candidate.upper().replace('.', '_').replace('-', '_')}"
+            if os.getenv(env_name):
+                raise
             continue
 
     if not config_path:
@@ -232,17 +247,16 @@ def get_default_llm_config() -> LLMConfig:
 
 def deep_merge_llm_config(base: LLMConfig, overrides: dict) -> LLMConfig:
     """Recursively merge dictionary overrides into an existing LLMConfig object."""
+    normalized = _expand_default_into_nodes(overrides, partial=True)
     base_dict = base.model_dump()
-
-    def merge(d1: dict, d2: dict) -> None:
-        for k, v in d2.items():
-            if k in d1 and isinstance(d1[k], dict) and isinstance(v, dict):
-                merge(d1[k], v)
-            else:
-                d1[k] = v
-
-    merge(base_dict, overrides)
-    return LLMConfig.model_validate(base_dict)
+    if base_dict["default"] is None and isinstance(normalized.get("default"), dict):
+        # Flattened legacy files use Operator as the global baseline, matching
+        # endpoint resolution. Partial profiles must not create an incomplete LLM.
+        base_dict["default"] = base.operator.model_dump()
+    for role in OPTIONAL_AGENT_ROLES:
+        if base_dict[role] is None and isinstance(normalized.get(role), dict):
+            base_dict[role] = (base.default or base.get_agent(role)).model_dump()
+    return LLMConfig.model_validate(_merge_dict(base_dict, normalized))
 
 
 def load_llm_config_override(path: Path | str) -> LLMConfig:

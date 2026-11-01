@@ -58,6 +58,11 @@ from artemis.llm.reliability import (
     retry_policy_for,
 )
 from artemis.llm.router import ModelEndpoint, ModelFactory, ModelProvider
+from artemis.llm.resolution import (
+    context_uses_minimax,
+    get_effective_default_endpoint,
+    get_effective_endpoint as _pinned_effective_endpoint,
+)
 from artemis.services.token_meter import record_llm_usage
 from artemis.llm.structured import (
     ParseFailure,
@@ -625,7 +630,7 @@ class RobustChatModelWrapper:
 
     def _endpoint_key(self) -> str:
         if self.endpoint is not None:
-            return f"{self._provider_value()}:{self.endpoint.model_name}"
+            return self.endpoint.identity_key()
         return type(self.base_model).__name__
 
     def _traced_call(self, args: tuple, kwargs: dict) -> tuple[tuple, dict, Any]:
@@ -898,8 +903,16 @@ def get_google_llm(
         model_name=resolved.model,
         api_key=resolved.api_key,
         api_base=resolved.api_base,
-        temperature=temperature or 0.0,
-        timeout_seconds=timeout or 60.0,
+        vendor=resolved.vendor,
+        registry_name=resolved.registry_name,
+        temperature=0.0 if temperature is None else temperature,
+        timeout_seconds=timeout
+        if timeout is not None
+        else (
+            resolved.entry.timeout_seconds
+            if resolved.entry and resolved.entry.timeout_seconds is not None
+            else 60.0
+        ),
         thinking_budget=thinking_budget,
         thinking_level=thinking_level,
         include_thoughts=include_thoughts,
@@ -926,13 +939,14 @@ def _builtin_provider_has_key(provider_value: Any) -> bool | None:
         return None
 
 
-def _resolve_endpoint(
+def get_effective_endpoint(
     ctx: ArtemisContext,
     name: str,
+    *,
     is_utils: bool = False,
     use_fallback: bool = False,
 ) -> ModelEndpoint:
-    """Cleanly resolves a ModelEndpoint from context llm_config."""
+    """Return the pinned effective endpoint; ``name='default'`` is global config."""
     if getattr(ctx, "llm_config", None) is None:
         try:
             ctx.llm_config = get_default_llm_config()
@@ -944,63 +958,19 @@ def _resolve_endpoint(
                 f"Default LLM config could not be loaded while resolving '{name}': {exc}"
             ) from exc
 
-    cfg = ctx.llm_config.get_utils(name) if is_utils else ctx.llm_config.get_agent(name)
-
-    if use_fallback:
-        if isinstance(cfg, LLMWithFallback) or (hasattr(cfg, "fallback") and cfg.fallback):
-            cfg = cfg.fallback
-        else:
-            raise ValueError(f"LLM configuration for '{name}' has no fallback!")
-
-    def _get_val(obj, attr, expected_type):
-        val = getattr(obj, attr, None)
-        return val if isinstance(val, expected_type) else None
-
-    provider_val = getattr(cfg, "provider", None) or "google"
-    raw_model = getattr(cfg, "model", None)
-    model_val = "" if raw_model is None else str(raw_model).strip()
-    model_is_alias = model_val.lower() in ("", "default", "auto")
-
-    # User-registered providers (OpenAI-compatible base_url + api_key) live in
-    # the LLM provider registry: an explicit entry name, the "default" alias, or
-    # — when the configured built-in provider has no credentials at all — the
-    # registry default provider (see artemis.llm.providers).
-    resolution = resolve_provider_for_model(
-        provider_val,
-        builtin_has_key=_builtin_provider_has_key(provider_val),
+    return _pinned_effective_endpoint(
+        ctx,
+        name,
+        is_utils=is_utils,
+        use_fallback=use_fallback,
     )
-    api_key: str | None = None
-    api_base: str | None = None
-    provider_temperature: float | None = None
-    provider_timeout: float | None = None
-    if resolution.entry is not None:
-        entry = resolution.entry
-        api_key = entry.api_key.get_secret_value()
-        api_base = entry.api_base
-        provider_temperature = entry.temperature
-        provider_timeout = entry.timeout_seconds
-        if model_is_alias or resolution.source in ("fallback", "default"):
-            # The entry carries its own model pair (default + fallback), mirroring
-            # artemis.jsonc's default/fallback block. An alias or a substituted
-            # provider would otherwise receive a model name from another vendor.
-            preferred = entry.fallback_model if use_fallback else entry.model
-            model_val = preferred or entry.model or model_val
-    if not model_val:
-        model_val = "gemini-2.5-flash"
 
-    return ModelEndpoint(
-        provider=ModelProvider.from_string(resolution.provider),
-        model_name=model_val,
-        api_key=api_key,
-        api_base=api_base,
-        temperature=_get_val(cfg, "temperature", (int, float)) or provider_temperature or 0.0,
-        timeout_seconds=_get_val(cfg, "timeout", (int, float)) or provider_timeout or 60.0,
-        thinking_budget=_get_val(cfg, "thinking_budget", int),
-        thinking_level=_get_val(cfg, "thinking_level", str),
-        reasoning_effort=_get_val(cfg, "reasoning_effort", str),
-        include_thoughts=_get_val(cfg, "include_thoughts", bool),
-        enable_grounding=_get_val(cfg, "enable_grounding", bool) or False,
-    )
+
+def _resolve_endpoint(
+    ctx: ArtemisContext, name: str, is_utils: bool = False, use_fallback: bool = False
+) -> ModelEndpoint:
+    """Compatibility entry point for task-pinned canonical resolution."""
+    return get_effective_endpoint(ctx, name, is_utils=is_utils, use_fallback=use_fallback)
 
 
 def _get_llm(

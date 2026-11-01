@@ -162,6 +162,7 @@ def get_config_path(filename: str, default_bundled_path: Path | None = None) -> 
         env_path = Path(env_path_str)
         if env_path.exists():
             return env_path
+        raise FileNotFoundError(f"Explicit {env_var} path does not exist: {env_path}")
 
     # Check config/ directory
     config_dir_path = CONFIG_DIR / filename
