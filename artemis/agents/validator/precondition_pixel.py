@@ -24,9 +24,15 @@ is injected by the facade so that tests patching
 ``artemis.agents.validator.validator.get_llm`` keep working.
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
+import hashlib
 from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -35,6 +41,7 @@ from artemis.context import ArtemisContext
 from artemis.graph.state import State
 from artemis.services.llm import acomplete_structured
 from artemis.utils import visualization
+from artemis.utils.vision import image_size, uses_minimax
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -54,11 +61,23 @@ _MAX_ATTEMPTS = 3
 _RETRY_DELAY_SECONDS = 0.3
 
 
+class PixelVerdict(BaseModel):
+    """All fields required; malformed/uncertain evidence cannot authorize a tap."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    decision: Literal["allow", "block", "unknown"]
+    is_present: StrictBool
+    confidence: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    reasoning: str = Field(min_length=1)
+
+
 def _init_llm_and_prompt(ctx: ArtemisContext, get_llm_fn):
     """Resolves the VLM and loads the prompt template (once per validation)."""
     try:
         llm = get_llm_fn(ctx, name="validator_pixel_safety_net")
     except Exception:
+        if uses_minimax(ctx):
+            raise
         llm = get_llm_fn(ctx, name="validator")
 
     prompt_path = Path(__file__).parent.joinpath("pixel_safety_net.md")
@@ -246,6 +265,8 @@ async def validate_action_precondition_pixel(
     get_llm_fn,
 ) -> tuple[bool, ValidationErrorCategory, str]:
     """Pixel-level Safety Net entry point (see module docstring)."""
+    if uses_minimax(ctx):
+        return await _strict_pixel(ctx, session, action_item, pre_screenshot_b64, state, get_llm_fn)
     action_name = action_item.get("action")
 
     # 1. White-list filtering: Only validate interactive, element-focused actions
@@ -318,3 +339,94 @@ async def validate_action_precondition_pixel(
             return True, ValidationErrorCategory.PIXEL_BYPASSED, ""
 
     return True, ValidationErrorCategory.PIXEL_BYPASSED, ""
+
+
+async def _strict_pixel(ctx, session, action, reference_b64, state, get_llm_fn):
+    """One bounded logical A2 request; its canonical recovery owns retries."""
+    from artemis.mcp.target_guard import (
+        snapshot_error,
+        verification_capture,
+        local_target_verdict,
+        TargetDecision,
+        canonical_target_action,
+    )
+    from artemis.utils.coordinates import denormalize_point
+
+    error = snapshot_error(ctx, action.get("snapshot"))
+    if error:
+        return False, ValidationErrorCategory.PIXEL_TARGET_DISAPPEARED, error
+    local = local_target_verdict(ctx, action, state)
+    if local.decision is TargetDecision.BLOCK or (
+        local.decision is TargetDecision.UNKNOWN and not local.pixel_review_allowed
+    ):
+        action["precondition_outcome"] = {"decision": local.decision.value, "source": "recognition"}
+        return False, ValidationErrorCategory.PIXEL_TARGET_DISAPPEARED, local.reason
+    try:
+        snapshot = ctx._current_snapshot
+        prepared = canonical_target_action(ctx, action)
+        coords = denormalize_point(*prepared["coordinates"], snapshot.width, snapshot.height)
+        original = base64.b64decode(reference_b64, validate=True)
+        if hashlib.sha256(original).hexdigest() != snapshot.image_hash:
+            raise ValueError("Reference image does not match target snapshot; observe again")
+        live = base64.b64decode(
+            await verification_capture(ctx, session, action.get("snapshot")), validate=True
+        )
+        if image_size(original) != (snapshot.width, snapshot.height) or image_size(
+            live
+        ) != image_size(original):
+            raise ValueError("Verification capture dimensions differ; observe again")
+        reference_crop = visualization.crop_and_annotate_target(
+            original, coords, crop_size=None, dot_radius=15
+        )
+        live_crop = visualization.crop_and_annotate_target(
+            live, coords, crop_size=None, dot_radius=15
+        )
+        if not reference_crop or not live_crop:
+            raise ValueError("Target crop is unavailable")
+        llm, prompt = _init_llm_and_prompt(ctx, get_llm_fn)
+        prompt += (
+            "\nReturn the required JSON schema. decision=allow ONLY when the exact target at the dot "
+            "is present, visible, unobscured and actionable in BOTH images, with confidence >=0.7. "
+            "Missing evidence or ambiguity means unknown; a hidden/disabled/covered target means block."
+        )
+        result = await acomplete_structured(
+            llm,
+            _build_messages(prompt, reference_crop, live_crop, action, state),
+            schema=PixelVerdict,
+        )
+        verdict = (
+            result if isinstance(result, PixelVerdict) else PixelVerdict.model_validate(result)
+        )
+        error = snapshot_error(ctx, action.get("snapshot"))
+        if (
+            not error
+            and verdict.decision == "allow"
+            and verdict.is_present
+            and verdict.confidence >= 0.7
+        ):
+            action["precondition_outcome"] = {"decision": "allow", "source": "pixel"}
+            return True, ValidationErrorCategory.NONE, ""
+        action["precondition_outcome"] = {
+            "decision": "block"
+            if not error
+            and verdict.decision == "block"
+            and not verdict.is_present
+            and verdict.confidence >= 0.7
+            else "unknown",
+            "source": "pixel",
+        }
+        return False, ValidationErrorCategory.PIXEL_TARGET_DISAPPEARED, error or verdict.reasoning
+    except Exception as exc:
+        from artemis.llm.reliability import classify_failure
+
+        action["precondition_outcome"] = {
+            "decision": "unknown",
+            "source": "pixel",
+            "failure_category": classify_failure(exc).category.value,
+            "error_type": type(exc).__name__,
+        }
+        return (
+            False,
+            ValidationErrorCategory.PIXEL_TARGET_DISAPPEARED,
+            (f"Pixel validation unknown ({type(exc).__name__}); observe again: {exc}"),
+        )

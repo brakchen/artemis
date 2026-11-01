@@ -186,7 +186,7 @@ async def capture_screenshot_and_parse_ui(
     return obs.screenshot_path, screenshot_bytes, obs.elements_text
 
 
-def normalize_coordinate_target(target: Any) -> int | list[int] | Any:
+def normalize_coordinate_target(target: Any, *, strict: bool = False) -> int | list[int] | Any:
     """Normalizes coordinate targets or index references to standard types.
 
     Supports:
@@ -199,12 +199,16 @@ def normalize_coordinate_target(target: Any) -> int | list[int] | Any:
 
     if isinstance(target, (list, tuple)):
         if len(target) == 2:
+            if strict:
+                from artemis.utils.coordinates import validate_normalized_point
+
+                return validate_normalized_point(target)
             try:
                 return [int(target[0]), int(target[1])]
             except (ValueError, TypeError):
                 pass
         elif len(target) == 1:
-            return normalize_coordinate_target(target[0])
+            return normalize_coordinate_target(target[0], strict=strict)
 
     if isinstance(target, str):
         cleaned = target.strip()
@@ -212,7 +216,7 @@ def normalize_coordinate_target(target: Any) -> int | list[int] | Any:
             return int(cleaned)
         try:
             parsed = json.loads(cleaned)
-            return normalize_coordinate_target(parsed)
+            return normalize_coordinate_target(parsed, strict=strict)
         except (json.JSONDecodeError, TypeError):
             pass
         if "," in cleaned:

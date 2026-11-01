@@ -53,12 +53,16 @@ def uses_minimax(ctx: Any, role: str = "default", *, is_utils: bool = False) -> 
         endpoint = pinned.get((role, is_utils, False))
         if isinstance(endpoint, ModelEndpoint):
             return endpoint.vendor == "minimax"
-    if isinstance(getattr(ctx, "llm_config", None), LLMConfig) or issubclass(
-        type(ctx), ArtemisContext
+    config = getattr(ctx, "llm_config", None)
+    if issubclass(type(config), LLMConfig) or (
+        config is None and issubclass(type(ctx), ArtemisContext)
     ):
         # Canonical preflight is strict for MiniMax, but does not require an
         # unused legacy text key just to choose the independent OCR backend.
         return context_uses_minimax(ctx)
+    # Opaque SDK/legacy injections own their LLM. Do not interpret their
+    # arbitrary attributes as provider declarations, even in a model_construct
+    # context; normal Context validation accepts only typed config or None.
     return False
 
 

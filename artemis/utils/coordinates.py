@@ -25,6 +25,8 @@ from typing import Any
 def parse_swipe_parameters(
     args: Any,
     default_duration: int | None = 800,
+    *,
+    strict: bool = False,
 ) -> tuple[str | None, str | list[int] | None, int | None]:
     """Parses swipe/drag/scroll parameters from various possible input formats into a standardized tuple:
 
@@ -57,6 +59,37 @@ def parse_swipe_parameters(
         action = args
         gesture = None
         duration = default_duration
+
+    if strict:
+        # Check every raw endpoint before the legacy parser can coerce/truncate
+        # it or choose a directional fallback over malformed coordinates.
+        if start is not None or end is not None:
+            validate_normalized_point(start)
+            validate_normalized_point(end)
+        coordinate_candidates = (
+            (args.get("coordinates"), args.get("normalized_coordinates"))
+            if isinstance(args, dict)
+            else (coordinates,)
+        )
+        for candidate in (*coordinate_candidates, action, gesture, direction):
+            if isinstance(candidate, str):
+                try:
+                    candidate = json.loads(candidate)
+                except (ValueError, TypeError):
+                    if any(char.isdigit() for char in candidate):
+                        raise ValueError(
+                            "Swipe endpoints must be integer coordinate arrays"
+                        ) from None
+                    continue
+            if isinstance(candidate, (list, tuple)):
+                if len(candidate) == 4:
+                    validate_normalized_point(candidate[:2])
+                    validate_normalized_point(candidate[2:])
+                elif len(candidate) == 2 and all(isinstance(p, (list, tuple)) for p in candidate):
+                    validate_normalized_point(candidate[0])
+                    validate_normalized_point(candidate[1])
+                else:
+                    raise ValueError("Swipe requires two complete coordinate pairs")
 
     try:
         duration_int = int(duration) if duration is not None else default_duration
@@ -322,6 +355,19 @@ def _finite_number(value: Any) -> float:
     return float(value)
 
 
+def validate_normalized_point(point: Any) -> list[int]:
+    """Validate the public integer wire point before any lossy conversion."""
+    if not isinstance(point, (list, tuple)) or len(point) != 2:
+        raise ValueError("Coordinates must contain exactly two integers within 0..1000")
+    result = []
+    for value in point:
+        number = _finite_number(value)
+        if not 0 <= number <= 1000 or not number.is_integer():
+            raise ValueError("Coordinates must be finite integers within 0..1000")
+        result.append(int(number))
+    return result
+
+
 def validate_size(width: int, height: int) -> None:
     if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
         raise ValueError("Actual positive integer image dimensions are required")
@@ -343,6 +389,42 @@ def denormalize_point(nx: float, ny: float, width: int, height: int) -> list[int
         max(0, min(width - 1, round(_finite_number(nx) * width / 1000))),
         max(0, min(height - 1, round(_finite_number(ny) * height / 1000))),
     ]
+
+
+def normalize_target_point(point, bounds, width: int, height: int) -> list[int]:
+    """Choose the nearest wire-representable pixel within visible LTRB bounds.
+
+    An integer normalized coordinate cannot express every physical pixel on
+    displays wider/taller than 1000. Search the bounded public grid using the
+    same conversion as actuation; never round a target center outside its box.
+    """
+    validate_size(width, height)
+    if not isinstance(point, (list, tuple)) or len(point) != 2:
+        raise ValueError("Target needs a physical center")
+    if not isinstance(bounds, (list, tuple)) or len(bounds) != 4:
+        raise ValueError("Target needs visible physical bounds")
+    x, y = [_finite_number(v) for v in point]
+    left, top, right, bottom = [_finite_number(v) for v in bounds]
+    left, top, right, bottom = max(0, left), max(0, top), min(width, right), min(height, bottom)
+    if right <= left or bottom <= top:
+        raise ValueError("Target has no visible intersection")
+    result = []
+    for axis, (center, low, high, size) in enumerate(
+        ((x, left, right, width), (y, top, bottom, height))
+    ):
+        candidates = []
+        for coordinate in range(1001):
+            pair = [0, 0]
+            pair[axis] = coordinate
+            pixel = denormalize_point(*pair, width, height)[axis]
+            if low <= pixel < high:
+                candidates.append(
+                    (abs(pixel - center), abs(coordinate - center * 1000 / size), coordinate)
+                )
+        if not candidates:
+            raise ValueError("Target contains no wire-representable point; observe again")
+        result.append(min(candidates)[2])
+    return result
 
 
 def validate_bbox(bbox: Any) -> list[float]:

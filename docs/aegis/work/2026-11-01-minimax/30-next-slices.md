@@ -29,10 +29,15 @@
 ## C 视频与原生语音
 
 - VideoAnalyzer._init_engine/_resolve_video_processing 用 actual pinned utility endpoint；MiniMax auto/static 支持，显式 Gemini-only agentic 返回 unsupported，不静默切 static。
+- VideoAnalyzer.run 在 _init_engine 之后又将 self.model_name/temperature/thinking_level 从 raw utils 或 Gemini fallback 覆写（约 :842）；只改初始化仍会污染实际模型显示/blackboard 来源和后续分支，MiniMax run 也须消费 pinned actual endpoint。关闭/缺失工具功能的旧兼容分支保持明确。
 - _invoke_universal_model 及外层 _invoke_with_retry 当前多层重试；MiniMax 复用 A2 canonical recovery/logical_call_scope，永久错误不重试成字符串。
 - universal_engine 自动 raw audio + 拒绝后删音频重试改为 MiniMax ASR；音频 required/optional/no-track/unsupported 分开。run_universal 的循环耗尽、子工具失败、空最终答案不能 success；内部 complete/partial/incomplete/failed，旧 tuple 仅 complete 对应 success。
 - 官方 ASR：POST https://api.minimax.cn/v1/speech_to_text，Bearer，model asr-1.0，multipart，verbose_json + stream=false 返回 segments；单片 <=500秒/50MB，偏移加原录屏时间，必要重叠去重。自定义网关无已核实 native base 不把 Key 发往官方主机。
+- ASR 可复用 services.llm._run_with_recovery(call_once, provider, endpoint_key, minimax_target)，而不是自造 retry：其 MiniMax 分支会进入同一 logical_call_scope。native speech 使用 distinct operation/wire target，不能伪装 text 模型调用或造 token。媒体 helper 已有 async subprocess，但 vendored extract_audio_from_video 将 ffprobe 错误当无音轨、未处理 cancel terminate/await；C 若复用必须就地补足所有权与取消，不能只删临时文件留下 ffmpeg 运行。
+- ASR wire target按native base/asr-1.0/实际凭据隔离，与text model/effort不同；不能把text fallback换模型当作另一个ASR服务重置同native端点永久错误预算。视频run/子片/ASR共用有界总体次数与deadline，允许typed视频预算提供足够正常分段容量，但不得每片重开默认8次/180秒。只有真实ASR segments时间才可做转写对齐，无segments不能凭整片时长补造精确时间；无语音与无音轨分开。
 - 首版关键帧，必要时本地片段内联 video（source.type=url/base64，媒体限制50MB/总body64MB含base64膨胀，图像10MB）；不启用 Files 上传。官方 video_understanding 文件最长7天，删除 purpose 尚未核实，不能承诺主动清理；Files 保持可选后续升级。
+- 输入限额按真实编码后的完整 history/tools/body 检查，不能仅判断原视频 stat 或当前新增块；base64 膨胀与旧消息仍占请求体。OCR/定位的大图片也需在最终入口审计中核对单图上限，不能把 max_tokens 当输入预算。继续由锁定 SDK 序列化，不复制 SDK 的消息转换器。
+- root 检查锁定 langchain-anthropic 1.5.6：ChatAnthropic._get_request_payload(input_, stop=None, **kwargs) 先调用库自己的 _format_messages，再合并 model/预算/system/tools/history/thinking/output_config，最后过滤 None 返回 dict。若采用一个 MiniMax 专用小 subclass 在 super() 结果上只做输入限额检查，可覆盖所有角色与完整 history，继续由 SDK 序列化，避免重写 converter 或另建 HTTP client。私有 hook 需注明锁定版本与真实 SDK MockTransport 回归；URL 媒体大小只能由服务端核实，不能声称本地已检查远端文件字节。
 - 资源清理仅本任务创建临时文件/客户端，保留原始录屏；取消/失败也清理，不掩盖原错误。ASR 业务错误复用 A2 normalizer，不能凭 HTTP200 报成功；不要伪造 text token 用量。
 - C 只读独立准备确认：MiniMax ASR 的 error.type 包含 authorized_error/insufficient_balance_error/unprocessable_entity_error/server_error/bad_request_error，与Messages不同，C须补 canonical normalizer，未知error.type不能盖住HTTP401/402/422/400永久分类；视频分类器强转 VideoFailureCategory 会因A2新增BALANCE/PERMISSION/CONTENT_REFUSAL/QUOTA_EXHAUSTED/INVALID_OUTPUT抛ValueError，需相同所有者局部扩展。ASR 413官方示例limit=52428800bytes，multipart开销须预留。
 - 实际锁定SDK MockTransport确认native Anthropic video/image source块保留输入字段，LC standardized video块会报unsupported；C使用native source形状。已文档化thinking.signature及嵌套search content/page_age保留，不声称SDK对任意未来top-level extra字段逐字无损，不为未知扩展复制SDK。ASR仅speech，不得将转写称为非语音声学分析。
@@ -40,13 +45,23 @@
 - controller unified_controller.extract_segment_metadata 当前会命中共享trim缓存，output_path参数未用；VideoAnalyzer.cleanup 仅排除系统路径，不能保护原录屏/共享缓存，禁止盲收returned_path.parent。C可在现controller实现本任务独占导出、run独占scratch；默认借用controller返回源，只删除明确新建派生资源，不另造refcount库。对应controller及vendored视频utils已加入lane。
 - ASR language为可选header，verbose_json/stream=false/timestamp_level=sentence为multipart字段；httpx自行boundary。完整body限额与50MB文件区别，重叠仅按时间和相同文本去重，不删不同时间重复说话。可用Blackboard modality='speech'隔离旧audio，旧model/source_generation只存储未参与success命中，应校验来源。
 - C消费者实际接线：tools/video_tool.py Pro/pure仅判failed（漏error/partial），mcp/action_executor._video_analyzer仅failed/error失败，Outputter按ToolFailure；必须统一只有complete→旧tuple success，其他→error+结构事实/ToolFailure。universal._clean_text不能str(thinkinglist)当回答。
+- 可复用 chunk_conversation._validate_answer/_validate_timeline_events 现有区间/事件检查；universal_engine._extract_submit_payload 目前会 str(summary object)、给缺 analysis 填 No analysis provided，并可把错误 tool payload 降为原文完成。MiniMax 分支须真 schema/类型验证及 raw gate，再检查事件区间；不得把缺字段/无效调用用模板填成已验证分析，也不另复制 timeline validator。
 - 音频建议不是新增验收：复用既有VideoAnalyzerArgs和工具字段声明requested modalities，默认视觉、未请求音频公开；audio-only天生required_speech，显式required_acoustic unsupported；optional speech失败可视觉完成但公开未分析事实，required speech无轨/拒绝/错误阻止complete。主Agent按tool schema选择，主Checker核对原goal，不能把省略新字段一律降partial破坏既有视觉调用。
+- VideoAnalyzerArgs 目前只有两个 required string；VIDEO_ANALYZER_TOOL 将每字段硬编码 type=string 且所有字段全 required。加入可选 modality 字段时必须由真实 Pydantic JSON schema 保持类型/default/required，不能继续旧生成器把 list/enum/可选项全变字符串/必填。实际文件为 universal_tools.py/reliability.py/blackboard.py 等，无 models.py 或 tools.py；最小类型可放现有责任模块，不按不存在文件建第二套架构。
 
 ## D 入口与配置体验（可按 D1/D2/D3 串行拆分）
 
+- 实际 CLI 路径是 artemis/interfaces/cli/commands/{providers,init}.py，validator 是 artemis/utils/credentials_validator.py（不是 artemis/commands 或 core）。两条 CLI 文件已登记 lane；Angular service 位于 src/app/services/system.service.ts。
+- D2 需测真实 ASGI 请求验证（不只直接调用 router）：保存/测试/目录查询失败、Key 与 clear 冲突、Pydantic 错误及上游回显不能公开秘密。hide_input_in_errors 只影响错误字符串，不能假设 FastAPI 的 errors/input 自动脱敏。复用现有 Provider 模型构造完整候选，避免复制解析/保存规则；模型目录只证明目录与鉴权，不能显示成图片/工具功能均验证。
+- root 实际 ASGI 基线复现：独立 FastAPI 仅 include system.router，registry._read 全 stub、Settings.get_api_key classmethod 全 stub；POST llm-providers 的 api_key 误传包含假 Key 的 object →422，响应原样回显敏感字段 nested input。只打印 status/echo boolean，无 Key/外网/设备。D2 修复需覆盖真正 FastAPI 验证层，保持 Host/Origin boundary，不只修异常字符串。
+- D3 当前 DockerManager 逐个转发所有厂商环境 Key，compose 只传 Gemini/OpenAI；需改为选定 Provider 的最小只读配置/秘密文件注入。先检查现有配置可选入口，不挂整个 app dir。APP_DIR 本身日志/数据库保持可写，选定配置路径与 runtime loader 一致；真实 Docker 不可用时用精确 containers.run 参数及文件权限契约测试，不能把模拟返回当容器通过。
+- 容器所需Provider集合按所选角色配置的所有实际引用（含utility/主备/aux继承）取最小集合，不能只默认条目，也不能整registry导出；可以有多个合法同vendor别名。注入缺失/无效须在原有start里的old.remove之前失败；只读挂载的UI保存应明确失败，不能声称写入成功。BackendManager与Docker daemon的宿主路径语义须明确，不能把manager容器内路径未经映射当host bind路径。
 - apps/admin_console/routers/system.py Provider Request/Test/Models + CLI commands/providers.py + credentials_validator：共用完整待保存 candidate；kind/vendor/base 从草稿优先，空 Key 编辑复用/首次拒绝/clear 冲突一致。A1 registry 除 Key/enabled 外 metadata 为全量 replacement，D 必须发送完整候选。目录查询不是图片/工具能力认证，未知 vendor 明确 unsupported。
+- CLI编辑同名Provider时要区分“用户明确传了kind/vendor/base”与typer的默认值，构造完整候选后再调用registry；仅改Key不能因默认openai/None把已有MiniMax协议/厂商/地址意外洗掉。HTTP测试/目录查询若使用stored name，也只在草稿未显式给出字段时继承stored，不能把stored kind强行覆盖用户草稿；完整保存metadata的A1 core契约仍保持。
 - Angular 首页/Service/types/HTML/zh.ts：协议/厂商与 MiniMax preset、manual model entry、编辑保留 Key、保存后清空输入；去掉 currentApiKey/apiKeysMap/savedGemini/OCR 从诊断回填秘密。所有新字符串 t pipe，完成 npm run build。
 - CLI init：显式手动/环境导入 MINIMAX_API_KEY/MINIMAX_BASE_URL（bootstrap-only），已有 Key 非显式 replacement 不覆盖；不整体覆盖 .env、不写 Gemini ARTEMIS_DEFAULT_MODEL。规范化选中主配置全部主备与 utility、Flash summarizer/memory chunking 显式模型/旧参数，保留无关配置；先验证 candidate 再受保护备份/发布，失败恢复本次写入，不声称多文件原子。
+- 同步配置说明与默认示例的真实语义：config/artemis.jsonc 目前仍断言 object_detector 必须 Gemini ER、非 ER 一定失败；router enable_grounding 字段说明只提 Google。保留旧厂商默认兼容时也应明确 MiniMax 实现/开关映射，不能留下误导性绝对声明。不要为改注释更换用户实际默认厂商或替用户写凭据。
+- root核对 scripts/*.ps1/*.sh 无 Gemini/Key/默认模型专用提示，暂不需要脚本源码改动。实际遗漏 guidance 在 interfaces/cli/commands/run.py :436 catch 将所有 contains requires 错误当鉴权并推荐 GEMINI_API_KEY；D2 应按 canonical 错误或明确配置错误给 provider/selected file 提示，更新 MiniMax init/registry 指引，不以 Gemini 环境变量修复 MiniMax。run.py 已登记 lane。
 - D配置来源实际剩余：config/agent.load_agent_config 仍依次get_config_path(jsonc,json,agent_config)，显式ARTEMIS_ARTEMIS_JSON会被常规jsonc抢先，显式缺失jsonc还会被catch继续fallback。A1只统一LLM loader，D须让AgentGlobal/UI/init/diagnose共享同一选中主文件helper，保留旧独立agent_config兼容并让显式错路径失败；不能让OCR/视频/辅助参数与模型读不同文件。SDK AgentConfig与builder的OCR字段在B1补了，memory/aux字段D1还需按真实数据链核对。
 - credentials_probe metadata 目前包含 raw_key/key/current_key/api_keys；保留旧 probe IDs、公开仅布尔/掩码/来源；readiness/doctor/设备选择/嵌套缓存全检查。MiniMax OCR 不要求独立 Google Key。MCP diagnose._verify_credentials 改内部 resolver 取真实注册凭据，脱敏后不能返回 [] 假装验证；更新 Gemini .env 专用修复建议。
 - SDK._prewarm_llm_connections 在任务 ctx 前被调用，当前残留 Google Key 会初始化两个 Google client+付费 ping；先 resolve selected config，非 Google 不预热。FlashRunner._init_llm catch-all Google fallback 不适用 MiniMax。
@@ -54,6 +69,7 @@
 - D1独立只读fixture已证：SDK AgentConfig/builder缺typed memory，ensure_step_memory会在同task重新load第二份agentconfig；必须typed透传task副本。Pydantic fields_set能区别未显式旧Gemini默认与显式aux模型，直接typed builder/model_copy保留；model_dump→model_validate默认会洗成全explicit，exclude_unset才保留。合法显式MiniMax-M3不能被默认registry替换成Flash：resolve_model_config('google',M3)会替成registry.model，故从同次pin的summarizer endpoint派生，不再按builtin重新resolve。
 - D1 aux最小建议：在现resolution._snapshot发布前从同registry快照的summarizer主备预计算visual/chunk辅助端点；同model保留已pin参数，不同显式合法MM model仅继承vendor/provider/registry/base/key/共同预算，重新ModelEndpoint验证生成该model的thinking/effort默认，防model_copy把Flash medium/adaptive带到M3。现aux配置无typed effort字段，显式extra调参应校验/诊断而非吞掉。不另建resolver/cache。
 - D1 init真实时序：vendored AgentBase._init_internal先warmup(:195)，task.request.profile在_run_task(:397)后才选；init无法知道未来namedprofile。最小优选取消非必需init付费ping/Googleclient预热，保留startup进度与首次实际调用懒初始化；若延后warmup也须用actualtaskctx，不复制选profile规则。只看global/default后声称all profiles安全不成立。
+- root补读实际 _run_task：构造 context(agent_config=self._config,llm_config=selected_profile) 后进入 _execute_task_logic，:519 无条件调用 Artemis._prepare_tracing；本覆盖现从 self._config 构造 ExecutionSetup 再创建 DataEngine。可在此入口最前面固定 typed 深副本/端点并以该 task 副本构造 setup（不要后续又取 self._config），preflight 不应被可选 trace 失败吞掉或因 tracing disabled 跳过；保持 fields_set，不用完整 dump→validate。
 - ModelService 去 raw Operator/10s 旧缓存，SDK._prepare_tracing 将 public 实际模型快照放 Session.device_info；tasks/sessions 读取历史快照，不用当前全局模型污染历史。
 - ReplayManager.create_ctx 不能吞无效 config→None；replay_step_tool 仅真实 Google 路径 patch AsyncModels，MiniMax 走标准 trace，不创建 Google client。
 - docker_service/Compose：最小选定 provider secret JSON 与角色配置文件 readonly mount，APP_DIR runtime其他子目录仍可写；统一显式配置路径。禁止整个host用户目录/全部hostKey环境转发。缺注入明确错误，容器存在 ≠已配置。源码/wheel/非repo cwd验证，wheel携带新UI build产物。
@@ -61,5 +77,7 @@
 ## E 整体证据
 
 - 完整 C01–C32 映射；Google client/HTTP 全拒绝 spy 下 MiniMax 六模块与辅助入口的 offline 调用，残留 Google Key/raw Gemini/shared Client 仍不转厂商。新 schema/动作门禁测试不以语法正确证明目标语义正确。
+- 本机已确认 ffmpeg/ffprobe 8.0.1（已安装 WinGet/Gyan build），C可用合成媒体验证实际抽帧/片段/音轨与清理；没有真实媒体/设备。docker.exe存在，但docker version实际读取Server返回500（dockerDesktopLinuxEngine/v1.51/version），未启动/重启daemon/容器；D3/E不能把静态参数契约说成已跑真实容器。
+- root已用本机ffmpeg生成忽略目录内的合成夹具 scratch/minimax-synthetic/visual-60s.mp4（64×64/2fps/60秒/135321bytes、无音轨）与with-tone-2s.mp4（小视频+440Hz音调/20537bytes，音调不是人声）；C可直接用作本机实验输入，不能依赖此scratch用于其他机器单测，正式回归应在tmp生成或自带确定性mock。不是用户真实录屏，未使用模型/设备。
 - 每片段 fresh unit suite；环境仅进程 LOCALAPPDATA 指 scratch/test-localapp，不设置 ARTEMIS_APP_DIR（会破坏 platform 单测）；无 Key/设备/付费服务。最终 UI build + wheel 资源/非repo cwd +容器 mount 契约验证；真模型权限、定位精度和实机另记 needs-verification。
 - root sole Git owner，显式逐路径stage、提交并push feat/model-config，不合并/部署。同步技术方案 Changelog、20-checkpoint 与90-evidence；完整实现前不发最终完成声明。

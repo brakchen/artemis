@@ -39,12 +39,13 @@ running when the automation task ends.
 import asyncio
 from asyncio.subprocess import Process as AsyncProcess
 from collections import deque
+from functools import wraps
 import os
 import shlex
 from typing import Any, Literal
 import uuid
 
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
 from artemis.core.tool_failure import ToolFailure
@@ -60,6 +61,68 @@ from third_party.mobile_use.controllers.platform_specific_commands_controller im
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _raw_adb_operation(fn):
+    """Keep a MiniMax raw script barrier until its actual owner has finished.
+
+    Scripts are deliberately opaque. Cancellation only abandons the caller;
+    background handoff and process cleanup still run in the existing tool.
+    """
+
+    @wraps(fn)
+    async def execute(self, driver=None, ctx=None, *args, **kwargs):
+        from artemis.utils.vision import invalidate_snapshot, uses_minimax
+
+        if ctx is None or not uses_minimax(ctx):
+            return await fn(self, driver, ctx, *args, **kwargs)
+        ctx._raw_adb_active = getattr(ctx, "_raw_adb_active", 0) + 1
+        invalidate_snapshot(ctx)
+
+        def finished(task):
+            ctx._raw_adb_active -= 1
+            invalidate_snapshot(ctx)
+            if not task.cancelled():
+                task.exception()  # retrieve failures if the caller was cancelled
+
+        task = asyncio.create_task(fn(self, driver, ctx, *args, **kwargs))
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
+
+    return execute
+
+
+async def _virtual_shell(ctx, device, script, timeout):
+    """A thread can outlive a timeout; retain its raw-script barrier until done."""
+    from artemis.utils.vision import invalidate_snapshot, uses_minimax
+
+    task = asyncio.create_task(asyncio.to_thread(device.shell, script))
+    if ctx is not None and uses_minimax(ctx):
+        ctx._raw_adb_active = getattr(ctx, "_raw_adb_active", 0) + 1
+
+        def finished(future):
+            ctx._raw_adb_active -= 1
+            invalidate_snapshot(ctx)
+            if not future.cancelled():
+                future.exception()
+
+        task.add_done_callback(finished)
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    return await asyncio.wait_for(task, timeout=timeout)
+
+
+async def _retain_raw_process(ctx, process, command):
+    """Use the existing registry when a short command's termination is unknown."""
+    from artemis.utils.vision import uses_minimax
+
+    if ctx is not None and uses_minimax(ctx) and process.returncode is None:
+        registry = get_adb_task_registry(ctx)
+        task_id = f"task_unknown_{uuid.uuid4().hex[:8]}"
+        task = BackgroundTask(task_id, command, process, registry=registry)
+        task.status = "unknown"
+        registry.background[task_id] = task
+        await task.start(ctx)
+
 
 #: Maximum number of finished task records kept per registry.
 _FINISHED_TASKS_CAP = 50
@@ -428,6 +491,14 @@ class BackgroundTask:
                     f"Waiting for background ADB task {self.task_id} to exit failed: {exc}",
                     exc_info=True,
                 )
+        if ctx is not None and getattr(proc, "returncode", None) is None:
+            from artemis.utils.vision import uses_minimax
+
+            if uses_minimax(ctx):
+                self.status = "unknown"
+                self._stop_requested = False
+                # A failed kill does not prove the opaque script has stopped.
+                return
         if self.listener_task is not None and not self.listener_task.done():
             self.listener_task.cancel()
             try:
@@ -441,6 +512,12 @@ class BackgroundTask:
         """Moves the task from the active map to the finished cache exactly once."""
         if self._finalized:
             return
+        if ctx is not None and self.process.returncode is None:
+            from artemis.utils.vision import uses_minimax
+
+            if uses_minimax(ctx):
+                self.status = "unknown"
+                return
         self._finalized = True
         registry = self.registry or get_adb_task_registry(ctx)
 
@@ -469,6 +546,11 @@ class BackgroundTask:
             output=output_text,
         )
         registry.background.pop(self.task_id, None)
+        if ctx is not None:
+            from artemis.utils.vision import invalidate_snapshot, uses_minimax
+
+            if uses_minimax(ctx):
+                invalidate_snapshot(ctx)
 
     async def _listen(self, ctx: ArtemisContext):
         """Reads process output streams and updates lifecycle status."""
@@ -633,6 +715,7 @@ class RunAdbCommandTool(ArtemisTool):
         )
 
     # pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements,too-many-return-statements,too-many-positional-arguments,too-many-boolean-expressions
+    @_raw_adb_operation
     async def execute(
         self,
         driver: BaseDeviceDriver | None = None,
@@ -706,10 +789,7 @@ class RunAdbCommandTool(ArtemisTool):
         ):
             try:
                 device = get_adb_device(ctx)
-                output = await asyncio.wait_for(
-                    asyncio.to_thread(device.shell, phone_script),
-                    timeout=wait_seconds,
-                )
+                output = await _virtual_shell(ctx, device, phone_script, wait_seconds)
             except TimeoutError:
                 return ToolFailure(
                     f"Error: Command did not finish within {wait_seconds:.1f}s."
@@ -763,7 +843,13 @@ class RunAdbCommandTool(ArtemisTool):
                 await process.wait()
 
             await asyncio.wait_for(read_limit(), timeout=wait_seconds)
-        except TimeoutError:
+        except Exception as read_error:
+            from artemis.utils.vision import uses_minimax
+
+            if not isinstance(read_error, TimeoutError) and (ctx is None or not uses_minimax(ctx)):
+                raise
+            if not isinstance(read_error, TimeoutError) and process.returncode is not None:
+                return ToolFailure(f"Failed to read ADB command result: {read_error}")
             return await self._hand_off_to_background(
                 ctx,
                 registry,
@@ -863,9 +949,46 @@ run_adb_command = RunAdbCommandTool()
 RunAdbCommand = RunAdbCommandTool
 
 
+_AGENT_SHELL_UNSUPPORTED = (
+    "Unsupported: opaque ADB commands and interactive script input are unavailable to MiniMax "
+    "Agents. Use the device actions declared in the current tool set; for diagnosis use the "
+    "declared log/hierarchy tools or diagnostic agent."
+)
+
+
+def _agent_shell_binding(ctx, tool, *, name=None, management=False) -> BaseTool:
+    """Bind the existing Agent exports without granting raw script execution.
+
+    This closure is trusted program state, never a model-provided origin flag.
+    Direct explicit-user execute/__call__ entry points retain their contract.
+    """
+    from artemis.utils.vision import uses_minimax
+
+    if not uses_minimax(ctx):
+        return trace_langchain_tool(tool.to_langchain_tool(ctx, name=name), ctx)
+
+    async def invoke(**kwargs):
+        action = kwargs.get("Action") or kwargs.get("action") or "list"
+        if management and action != "send_input":
+            return await tool.execute(ctx=ctx, **kwargs)
+        return ToolFailure(_AGENT_SHELL_UNSUPPORTED)
+
+    bound = StructuredTool.from_function(
+        coroutine=invoke,
+        name=name or tool.name,
+        description=(
+            "List, inspect or terminate existing background tasks. Sending script input is unsupported for MiniMax Agents."
+            if management
+            else _AGENT_SHELL_UNSUPPORTED
+        ),
+        args_schema=tool.args_schema,
+    )
+    return trace_langchain_tool(bound, ctx)
+
+
 def get_run_adb_command_tool(ctx: ArtemisContext) -> BaseTool:
     """Exports run_adb_command as a LangChain BaseTool."""
-    return trace_langchain_tool(run_adb_command.to_langchain_tool(ctx), ctx)
+    return _agent_shell_binding(ctx, run_adb_command)
 
 
 # ---------------------------------------------------------------------------
@@ -948,6 +1071,13 @@ class ManageTaskTool(ArtemisTool):
             return ToolFailure("Error: TaskId is required for status, kill, or send_input actions.")
 
         task = registry.background.get(task_id)
+        if task is not None and task.process.returncode is not None:
+            from artemis.utils.vision import uses_minimax
+
+            if ctx is not None and uses_minimax(ctx):
+                task.exit_code = task.process.returncode
+                task.status = "completed" if task.exit_code == 0 else "failed"
+                task._finalize(ctx)
 
         if action == "status":
             task_info = _get_task_info(task_id, ctx)
@@ -981,6 +1111,10 @@ class ManageTaskTool(ArtemisTool):
                 await task.stop(ctx, status="killed")
             except Exception as e:  # pylint: disable=broad-exception-caught
                 return ToolFailure(f"Failed to terminate task {task_id}: {e}")
+            if task.status == "unknown":
+                return ToolFailure(
+                    f"Termination of task {task_id} is unknown. Coordinate targets remain blocked; confirm the process exits, then observe again."
+                )
             if task.exit_code is not None:
                 return f"Terminated task {task_id} (exit code {task.exit_code})."
             return f"Terminated task {task_id}."
@@ -996,6 +1130,10 @@ class ManageTaskTool(ArtemisTool):
                     " stdin is closed. Relaunch the command with Interactive=true."
                 )
             try:
+                from artemis.utils.vision import invalidate_snapshot, uses_minimax
+
+                if ctx is not None and uses_minimax(ctx):
+                    invalidate_snapshot(ctx)
                 task.process.stdin.write(input_str.encode())
                 await task.process.stdin.drain()
                 return f"Sent input to task {task_id}."
@@ -1012,7 +1150,7 @@ ManageTask = ManageTaskTool
 
 def get_manage_task_tool(ctx: ArtemisContext) -> BaseTool:
     """Exports manage_task as a LangChain BaseTool."""
-    return trace_langchain_tool(manage_task.to_langchain_tool(ctx), ctx)
+    return _agent_shell_binding(ctx, manage_task, management=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1051,6 +1189,7 @@ class RunShortAdbCommandTool(ArtemisTool):
         )
 
     # pylint: disable=too-many-locals,too-many-return-statements
+    @_raw_adb_operation
     async def execute(
         self,
         driver: BaseDeviceDriver | None = None,
@@ -1090,10 +1229,7 @@ class RunShortAdbCommandTool(ArtemisTool):
         ):
             try:
                 device = get_adb_device(ctx)
-                output = await asyncio.wait_for(
-                    asyncio.to_thread(device.shell, phone_script),
-                    timeout=timeout,
-                )
+                output = await _virtual_shell(ctx, device, phone_script, timeout)
                 return f"ADB command completed.\nOutput:\n{output}"
             except TimeoutError:
                 return ToolFailure(f"Error: Command timed out after {timeout:.0f} seconds.")
@@ -1132,8 +1268,17 @@ class RunShortAdbCommandTool(ArtemisTool):
                     process.kill()
                 except (ProcessLookupError, OSError):
                     pass
+                from artemis.utils.vision import uses_minimax
+
+                if ctx is not None and uses_minimax(ctx):
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=_TERMINATE_GRACE_SECONDS)
+                    except Exception:
+                        pass
+            await _retain_raw_process(ctx, process, cmd_line)
             return ToolFailure(f"Error: Command timed out after {timeout:.0f} seconds.")
         except Exception as e:  # pylint: disable=broad-exception-caught
+            await _retain_raw_process(ctx, process, cmd_line)
             return ToolFailure(f"Error running command: {e}")
 
 
@@ -1144,10 +1289,7 @@ RunShortAdbCommand = RunShortAdbCommandTool
 
 def get_run_short_adb_command_tool(ctx: ArtemisContext) -> BaseTool:
     """Exports run_short_adb_command as a LangChain BaseTool."""
-    return trace_langchain_tool(
-        run_short_adb_command.to_langchain_tool(ctx, name="run_adb_command"),
-        ctx,
-    )
+    return _agent_shell_binding(ctx, run_short_adb_command, name="run_adb_command")
 
 
 # Expose Wrappers

@@ -135,7 +135,10 @@ class _TurnRecord:
             if status != "success":
                 # Executor messages name the action themselves ("Error
                 # executing click: ..."); prefix only the ones that don't.
-                return {"status": "failed", "error": text if name in text else f"{name}: {text}"}
+                return {
+                    "status": "unknown" if status == "unknown" else "failed",
+                    "error": text if name in text else f"{name}: {text}",
+                }
         return None
 
 
@@ -303,7 +306,18 @@ class FlashRunner:
         prompt_path = Path(__file__).parent / "flash_runner.md"
         prompt_template = prompt_path.read_text(encoding="utf-8")
         available_tools = frozenset(t.name for t in tools_declaration)
-        return Template(prompt_template).render(goal=self.goal, available_tools=available_tools)
+        prompt = Template(prompt_template).render(goal=self.goal, available_tools=available_tools)
+        from artemis.utils.vision import uses_minimax
+
+        if uses_minimax(self.ctx):
+            prompt += (
+                "\nMiniMax execution contract: choose one screen-changing action, then inspect the "
+                "new observation before choosing another target or reporting completion. Indexed "
+                "and coordinate targets are validated; click_sequence cannot batch targets across "
+                "screen changes. Unknown dispatch may already have taken effect: observe and "
+                "diagnose instead of replaying. Dispatched is not proof of goal success."
+            )
+        return prompt
 
     # ------------------------------------------------------------------
     # Per-turn helpers (observe / think)
@@ -603,6 +617,11 @@ class FlashRunner:
         post_img_bytes = exec_result.screenshot_bytes
         if post_img_bytes or name not in action_names:
             return post_img_bytes
+        from artemis.mcp.target_guard import changes_screen
+        from artemis.utils.vision import uses_minimax
+
+        if uses_minimax(self.ctx) and not changes_screen(name):
+            return post_img_bytes
         try:
             obs, screenshot_bytes = await observe(self.ctx, self.controller, settle_ms=0)
         except Exception as shot_err:
@@ -722,7 +741,9 @@ class FlashRunner:
 
             succeeded = exec_result.status == "success"
             last_execution_result = {
-                "status": "dispatched" if succeeded else "failed",
+                "status": "unknown"
+                if exec_result.metadata.get("dispatch_state") == "unknown"
+                else ("dispatched" if succeeded else "failed"),
                 "result": exec_result.text_summary,
             }
             if not succeeded:
@@ -823,7 +844,12 @@ class FlashRunner:
 
             if name in action_names:
                 turn.step_keys.append(str(recorded_step_id) if recorded_step_id else str(tc_id))
-                turn.actions.append((name, exec_result.status, exec_result.text_summary))
+                dispatch_status = (
+                    "unknown"
+                    if exec_result.metadata.get("dispatch_state") == "unknown"
+                    else exec_result.status
+                )
+                turn.actions.append((name, dispatch_status, exec_result.text_summary))
 
             # ⚡ Non-blocking dispatch of objective visual transition summarizer
             if self.summarizer and name in action_names:
@@ -935,10 +961,30 @@ class FlashRunner:
         """
         action_names = self.executor.action_tool_names
         index_elements = self._turn_index_snapshot(state)
+        from artemis.utils.vision import state_version, uses_minimax
+
+        strict = uses_minimax(self.ctx)
+        turn_version = state_version(self.ctx)
+        turn_snapshot = getattr(self.ctx, "_current_snapshot", None)
         for tc in tool_calls:
             name = tc["name"].split(":")[-1] if ":" in tc["name"] else tc["name"]
             args = tc.get("args") or {}
             tc_id = tc.get("id") or str(uuid.uuid4())
+            if strict and (
+                state_version(self.ctx) != turn_version
+                or getattr(self.ctx, "_current_snapshot", None) != turn_snapshot
+            ):
+                messages.append(
+                    ToolMessage(
+                        tool_call_id=tc_id,
+                        name=name,
+                        status="error",
+                        content="Observation changed. Remaining decisions are stale; inspect the new observation before acting or reporting completion.",
+                    )
+                )
+                if name in action_names:
+                    turn.actions.append((name, "error", "Skipped: fresh observation required."))
+                continue
             logger.info(f"Executing Flash tool: {name}({args})")
 
             if name == "report_task_status":

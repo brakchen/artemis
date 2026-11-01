@@ -490,6 +490,20 @@ class OperatorNode:
         tool_limit_exceeded = False
         plan_gate_bounced = False
 
+        if uses_minimax(self.ctx):
+            current_messages.append(
+                SystemMessage(
+                    content=(
+                        "MiniMax execution contract: emit one screen-changing action, then inspect a fresh "
+                        "observation before selecting another target. Every indexed/coordinate target is "
+                        "checked, including burst members; old targets and invisible/uncertain candidates "
+                        "cannot bypass validation. Unknown dispatch may already have taken effect: observe "
+                        "and diagnose, never replay it. Dispatched does not mean the task goal succeeded. "
+                        "Raw ADB scripts invalidate targets; finish/terminate active scripts and re-observe."
+                    )
+                )
+            )
+
         for iteration in range(max_iterations):
             if iteration == max_iterations - 1:
                 logger.warning(
@@ -1140,6 +1154,13 @@ class OperatorNode:
             model's own ``target_description``. The two never mix.
             """
             if isinstance(target, (int, float)):
+                if uses_minimax(self.ctx) and (
+                    isinstance(target, bool) or not float(target).is_integer()
+                ):
+                    return (
+                        None,
+                        "Error: Target index must be an integer from the current observation.",
+                    )
                 try:
                     target_int = int(target)
                 except (ValueError, TypeError):
@@ -1147,8 +1168,21 @@ class OperatorNode:
                 indexed_elements = getattr(state, "indexed_elements", None) or []
                 if 1 <= target_int <= len(indexed_elements):
                     el = indexed_elements[target_int - 1]
+                    center = el.get("center")
+                    normalized_target = None
+                    if uses_minimax(self.ctx):
+                        from artemis.utils.coordinates import normalize_target_point
+
+                        try:
+                            normalized_target = normalize_target_point(
+                                center, el.get("bounds"), width, height
+                            )
+                            center = denormalize_point(*normalized_target, width, height)
+                        except ValueError as error:
+                            return None, f"Error: {error}"
                     return {
-                        "center": el.get("center"),
+                        "center": center,
+                        "_normalized_target": normalized_target,
                         "target_text": el.get("text"),
                         "target_bounds": el.get("bounds"),
                         "target_resource_id": el.get("resource_id"),
@@ -1163,6 +1197,13 @@ class OperatorNode:
                     ),
                 )
             elif isinstance(target, list) and len(target) == 2:
+                if uses_minimax(self.ctx):
+                    from artemis.utils.coordinates import validate_normalized_point
+
+                    try:
+                        target = validate_normalized_point(target)
+                    except ValueError as error:
+                        return None, f"Error: {error}"
                 described = _described(description)
                 if described is None:
                     return (
@@ -1175,7 +1216,10 @@ class OperatorNode:
                     )
                 try:
                     x, y = denormalize_point(target[0], target[1], width, height)
-                    return {"center": [x, y], "target_description": described}, None
+                    result = {"center": [x, y], "target_description": described}
+                    if uses_minimax(self.ctx):
+                        result["snapshot"] = operator_raw_data.get("snapshot")
+                    return result, None
                 except (ValueError, TypeError):
                     return (
                         None,
@@ -1191,7 +1235,7 @@ class OperatorNode:
 
         def target_fields(el: dict) -> dict:
             """The recorded target semantics: observed (index) or described (coords)."""
-            return {k: v for k, v in el.items() if k != "center"}
+            return {k: v for k, v in el.items() if k not in {"center", "_normalized_target"}}
 
         if tool_name == "click":
             target = args.get("target")
@@ -1200,7 +1244,7 @@ class OperatorNode:
             el, err = resolve_target_element(target, args.get("target_description"))
             if err:
                 return [], err
-            norm_c = normalize_point(*el["center"], width, height)
+            norm_c = el.get("_normalized_target") or normalize_point(*el["center"], width, height)
             return [
                 {
                     "action": "tap",
@@ -1219,7 +1263,7 @@ class OperatorNode:
             el, err = resolve_target_element(target, args.get("target_description"))
             if err:
                 return [], err
-            norm_c = normalize_point(*el["center"], width, height)
+            norm_c = el.get("_normalized_target") or normalize_point(*el["center"], width, height)
             return [
                 {
                     "action": "long_press_on",
@@ -1248,7 +1292,7 @@ class OperatorNode:
             if err:
                 return [], err
 
-            norm_c = normalize_point(*el["center"], width, height)
+            norm_c = el.get("_normalized_target") or normalize_point(*el["center"], width, height)
             actions = []
             actions.append(
                 {
@@ -1264,7 +1308,12 @@ class OperatorNode:
             return actions, None
 
         elif tool_name == "swipe":
-            kind, target, parsed_duration = parse_swipe_parameters(args, default_duration=None)
+            try:
+                kind, target, parsed_duration = parse_swipe_parameters(
+                    args, default_duration=None, strict=uses_minimax(self.ctx)
+                )
+            except ValueError as error:
+                return [], f"Error: {error}"
             duration = args.get("duration")
 
             if duration is not None:
@@ -1284,7 +1333,13 @@ class OperatorNode:
             # Only a coordinate gesture needs the model to say what it drags; a
             # directional scroll targets the page, not an element.
             described: str | None = None
+            swipe_semantics = {}
             if kind == "direction":
+                if uses_minimax(self.ctx) and isinstance(args.get("target"), (int, float)):
+                    element, error = resolve_target_element(args["target"], None)
+                    if error:
+                        return [], error
+                    swipe_semantics = target_fields(element)
                 x1, y1, x2, y2, smart_dur = compute_smart_swipe_coordinates(
                     direction=target,
                     target=args.get("target"),
@@ -1353,6 +1408,12 @@ class OperatorNode:
                     # bare coordinate path.
                     **({"direction": str(target)} if kind == "direction" else {}),
                     **({"target_description": described} if described else {}),
+                    **swipe_semantics,
+                    **(
+                        {"snapshot": operator_raw_data.get("snapshot")}
+                        if uses_minimax(self.ctx)
+                        else {}
+                    ),
                 }
             ], None
 

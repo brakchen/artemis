@@ -120,15 +120,23 @@ class AdbActuator:
     # --- Coordinate helpers ----------------------------------------------------------
 
     def _dims(self) -> tuple[int, int]:
+        from artemis.utils.vision import uses_minimax
+
+        if uses_minimax(self.ctx):
+            width = getattr(self.ctx.device, "device_width", None)
+            height = getattr(self.ctx.device, "device_height", None)
+            if type(width) is not int or type(height) is not int or min(width, height) <= 1:
+                raise ValueError("MiniMax dispatch requires actual device dimensions")
+            return width, height
         width = getattr(self.ctx.device, "device_width", 1080) if self.ctx.device else 1080
         height = getattr(self.ctx.device, "device_height", 2400) if self.ctx.device else 2400
         return width or 1080, height or 2400
 
     def _to_px(self, nx: int, ny: int) -> tuple[int, int]:
         width, height = self._dims()
-        x = int(max(0, min(width - 1, int(nx) * width / 1000)))
-        y = int(max(0, min(height - 1, int(ny) * height / 1000)))
-        return x, y
+        from artemis.utils.coordinates import denormalize_point
+
+        return denormalize_point(nx, ny, width, height)
 
     # --- Required action -------------------------------------------------------------
 
@@ -299,7 +307,10 @@ class AdbActuator:
         target_pkg = pkg
 
         if action.lower() == "launch":
-            res_launch = launch_app_with_retries(self.ctx, target_pkg)
+            from artemis.utils.vision import uses_minimax
+
+            launch_options = {"max_retries": 1} if uses_minimax(self.ctx) else {}
+            res_launch = launch_app_with_retries(self.ctx, target_pkg, **launch_options)
             if inspect.iscoroutine(res_launch):
                 res_launch = await res_launch
             if isinstance(res_launch, tuple):

@@ -1499,6 +1499,11 @@ def test_operator_translation_uses_public_rounding_and_pixel_endpoints(coords):
     actions, error = node._translate_and_validate_tool(
         {"name": "click", "args": {"target": coords, "target_description": "Search"}}, state
     )
+    if coords == [0.5, 1.5]:
+        # Agent and wire schemas declare integer arrays. Fractional input must
+        # be rejected before adapters can truncate it into a different target.
+        assert not actions and "integers" in error
+        return
     assert error is None
     assert actions[0]["coordinates"] == denormalize_point(*coords, 1080, 2400)
     if coords == [123, 456]:

@@ -149,6 +149,8 @@ NODE_VISIBILITY: dict[str, NodeVisibility] = {
             # In-place turn-scoped mutations (formalized as TurnWorkspace in
             # Phase 2): post-action screenshot and re-derived index mappings.
             "latest_screenshot",
+            "operator_raw_data",
+            "latest_ui_hierarchy",
             "indexed_points",
             "indexed_elements",
         },

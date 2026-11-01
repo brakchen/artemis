@@ -42,6 +42,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -99,6 +108,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -152,6 +165,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -209,6 +231,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -259,6 +285,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -316,6 +351,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -378,6 +417,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -435,6 +483,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -493,6 +545,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -550,6 +611,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -592,6 +657,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -649,6 +723,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -696,6 +774,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -753,6 +840,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -795,6 +886,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -852,6 +952,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -904,6 +1008,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -961,6 +1074,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -1003,6 +1120,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -1060,6 +1186,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -1094,6 +1224,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -1151,6 +1290,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
@@ -1196,6 +1339,15 @@
           ],
           "title": "ActionCode",
           "type": "string"
+        },
+        "DispatchState": {
+          "enum": [
+            "not_dispatched",
+            "dispatched",
+            "unknown"
+          ],
+          "title": "DispatchState",
+          "type": "string"
         }
       },
       "description": "Outcome of one device action, independent of any transport or agent.",
@@ -1253,6 +1405,10 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "dispatch_state": {
+          "$ref": "#/$defs/DispatchState",
+          "default": "unknown"
         }
       },
       "required": [
