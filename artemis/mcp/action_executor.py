@@ -772,6 +772,11 @@ class McpActionExecutor:
                 text, ok = await self._video_analyzer(
                     args.get("time_description") or args.get("TimeDescription") or "",
                     args.get("purpose") or args.get("Purpose") or "",
+                    **{
+                        name: args[name]
+                        for name in ("visual", "speech", "acoustic")
+                        if name in args
+                    },
                 )
             elif raw_name in HISTORY_TOOL_NAMES:
                 text, blocks = await self._history_tool(raw_name, args)
@@ -844,7 +849,9 @@ class McpActionExecutor:
             return text or "Screenshot attached.", result
         return text, None
 
-    async def _video_analyzer(self, time_description: str, purpose: str) -> tuple[str, bool]:
+    async def _video_analyzer(
+        self, time_description: str, purpose: str, **media_args
+    ) -> tuple[str, bool]:
         """Runs the video-analyzing subagent over the session recording.
 
         Same subagent the Pro operator's ``video_analyzer`` LangChain tool
@@ -853,11 +860,13 @@ class McpActionExecutor:
         from artemis.agents.video_analyzer.video_analyzer import VideoAnalyzer
 
         try:
-            outcome, status = await VideoAnalyzer(self.ctx).run(time_description, purpose)
+            outcome, status = await VideoAnalyzer(self.ctx).run(
+                time_description, purpose, **media_args
+            )
         except Exception as e:
             logger.error(f"Error running video analyzer: {e}")
             return f"Error running video analyzer: {e}", False
-        if status in ("failed", "error"):
+        if status not in ("success", "complete"):
             return f"Video analysis failed: {outcome}", False
         return outcome, True
 

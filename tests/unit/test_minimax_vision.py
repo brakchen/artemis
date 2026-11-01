@@ -491,7 +491,7 @@ async def test_ocr_partial_status_is_visible_to_each_consumer(
         _, text = await _capture_final_screen(ctx)
     else:
         module = importlib.import_module("mcp_server.tools.device_state")
-        monkeypatch.setattr(module, "_get_controller", lambda **kw: controller)
+        monkeypatch.setattr("artemis.mcp.adb_server._get_controller", lambda **kw: controller)
         monkeypatch.setattr(module.env_utils, "get_project_root", lambda: str(tmp_path))
         text = await module.mobile_get_device_state("hierarchy")
     assert "status: partial" in text and "source: minimax" in text
@@ -586,7 +586,7 @@ async def test_ocr_error_is_visible_as_xml_degradation_not_empty(monkeypatch, tm
         assert "Native XML" in text
     else:
         module = importlib.import_module("mcp_server.tools.device_state")
-        monkeypatch.setattr(module, "_get_controller", lambda **kw: controller)
+        monkeypatch.setattr("artemis.mcp.adb_server._get_controller", lambda **kw: controller)
         monkeypatch.setattr(module.env_utils, "get_project_root", lambda: str(tmp_path))
         text = await module.mobile_get_device_state("hierarchy")
         assert "Native XML" in text
@@ -804,6 +804,7 @@ async def test_statusbar_offset_matches_actual_crop_in_each_consumer(
             base_dir=tmp_path,
             get_image_path=lambda _: tmp_path / "screen.png",
             get_or_create_image=lambda *a, **kw: "fixture",
+            _run_in_background=lambda fn, *args: fn(*args),
         )
         monkeypatch.setattr(
             "artemis.graph.perception.UnifiedMobileController", lambda _: controller
@@ -821,9 +822,9 @@ async def test_statusbar_offset_matches_actual_crop_in_each_consumer(
         assert "Notification" in text and "status: complete" in text
     else:
         module = importlib.import_module("mcp_server.tools.device_state")
-        monkeypatch.setattr(module, "_get_controller", lambda **kw: controller)
+        monkeypatch.setattr("artemis.mcp.adb_server._get_controller", lambda **kw: controller)
         monkeypatch.setattr(module.env_utils, "get_project_root", lambda: str(tmp_path))
-        monkeypatch.setattr(module, "fuse_ocr_with_xml", fusion)
+        monkeypatch.setattr("artemis.utils.ocr_xml_fusion.fuse_ocr_with_xml", fusion)
         text = await module.mobile_get_device_state("hierarchy")
         assert "Notification" in text and "status: complete" in text
     assert len(raw.calls) == len(captured_rows) == 1
@@ -1309,6 +1310,7 @@ async def test_perception_and_checker_automatic_off_and_opt_in_ctx_once(monkeypa
         base_dir=tmp_path,
         get_image_path=lambda _: tmp_path / "screen.png",
         get_or_create_image=lambda *a, **kw: "fixture",
+        _run_in_background=lambda fn, *args: fn(*args),
     )
     ctx.data_engine = engine
     data = png((200, 300))

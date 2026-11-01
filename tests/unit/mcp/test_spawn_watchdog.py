@@ -4,6 +4,7 @@ import json
 import os
 from unittest.mock import patch
 
+from artemis.runtime import DeviceExecutionLock, trace_store
 from mcp_server.tools import task_runner as spawn_tool
 
 
@@ -14,7 +15,7 @@ def _write_status(trace_dir: str, trace_id: str, status: str) -> None:
 
 
 def _patch_trace_dir(tmp_path):
-    return patch.object(spawn_tool.trace_store, "TRACES_DIR", str(tmp_path))
+    return patch.object(trace_store, "TRACES_DIR", str(tmp_path))
 
 
 def test_watchdog_passes_when_runner_creates_logs(tmp_path):
@@ -60,7 +61,7 @@ def test_watchdog_kills_and_fails_hung_runner(tmp_path):
     with (
         _patch_trace_dir(tmp_path),
         patch.object(spawn_tool, "_kill_process_tree") as kill,
-        patch.object(spawn_tool.DeviceExecutionLock, "cancel_reservation") as cancel,
+        patch.object(DeviceExecutionLock, "cancel_reservation") as cancel,
         patch.object(spawn_tool, "notify") as notifier,
     ):
         assert not spawn_tool._watch_spawn(
@@ -88,7 +89,7 @@ def test_watchdog_tolerates_logs_appearing_at_deadline(tmp_path):
     trace_dir = tmp_path / trace_id
     _write_status(str(trace_dir), trace_id, "running")
 
-    real_read_status = spawn_tool.trace_store.read_status
+    real_read_status = trace_store.read_status
     calls = {"n": 0}
 
     def read_status_and_create_log(tid):
@@ -99,7 +100,7 @@ def test_watchdog_tolerates_logs_appearing_at_deadline(tmp_path):
 
     with (
         _patch_trace_dir(tmp_path),
-        patch.object(spawn_tool.trace_store, "read_status", side_effect=read_status_and_create_log),
+        patch.object(trace_store, "read_status", side_effect=read_status_and_create_log),
         patch.object(spawn_tool, "_kill_process_tree") as kill,
     ):
         assert spawn_tool._watch_spawn(

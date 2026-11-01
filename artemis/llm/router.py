@@ -353,6 +353,8 @@ class ModelFactory:
             from langchain_anthropic import ChatAnthropic
 
             if endpoint.vendor == "minimax":
+                from artemis.llm.minimax_media import MiniMaxChatAnthropic
+
                 # langchain-anthropic 1.5.6 (MIT), official ChatAnthropic API:
                 # https://reference.langchain.com/python/langchain-anthropic/chat_models/ChatAnthropic
                 # Keep SDK retries off: Artemis owns the shared retry budget.
@@ -368,7 +370,7 @@ class ModelFactory:
                     kwargs["thinking"] = {"type": endpoint.thinking_mode}
                 if endpoint.reasoning_effort:
                     kwargs["output_config"] = {"effort": endpoint.reasoning_effort}
-                return ChatAnthropic(**{k: v for k, v in kwargs.items() if v is not None})
+                return MiniMaxChatAnthropic(**{k: v for k, v in kwargs.items() if v is not None})
 
             api_key = (
                 endpoint.api_key

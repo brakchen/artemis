@@ -33,6 +33,7 @@ from artemis.runtime.awake_lease import ScreenAwakeLease
 from artemis.runtime.awake_service import _run_awake_adb_command
 from third_party.mobile_use.clients import ui_automator_client
 from third_party.mobile_use.utils.logger import get_logger
+from mcp_server import server
 from mcp_server.utils import device_utils, env_utils
 
 
@@ -61,7 +62,8 @@ def _readline_with_timeout(pipe, timeout: float) -> str | None:
     return line.decode("utf-8").strip()
 
 
-def test_mcp_stdio_handshake_immediate_input():
+@pytest.mark.parametrize("deny_artemis", [False, True], ids=["production", "deny-sdk-imports"])
+def test_mcp_stdio_handshake_immediate_input(deny_artemis, tmp_path):
     """Verify that MCP server over stdio responds to an immediate initialize request
 
     without hanging, even when stdin data is pushed concurrently with process startup.
@@ -70,14 +72,30 @@ def test_mcp_stdio_handshake_immediate_input():
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
     python_exe = sys.executable
+    argv = [python_exe, "-m", "mcp_server"]
+    if deny_artemis:
+        argv = [
+            python_exe,
+            "-c",
+            "import importlib.abc, runpy, sys\n"
+            "class DenyArtemis(importlib.abc.MetaPathFinder):\n"
+            "    def find_spec(self, fullname, path=None, target=None):\n"
+            "        if fullname == 'artemis' or fullname.startswith('artemis.'):\n"
+            "            raise AssertionError('disabled main imported SDK: ' + fullname)\n"
+            "sys.meta_path.insert(0, DenyArtemis())\n"
+            "runpy.run_module('mcp_server', run_name='__main__')\n",
+        ]
 
     p = subprocess.Popen(
-        [python_exe, "-m", "mcp_server"],
+        argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env={
             "PYTHONUNBUFFERED": "1",
+            "ARTEMIS_KEEP_DEVICE_AWAKE": "false",
+            "PYTHON_DOTENV_DISABLED": "1",
+            "ARTEMIS_APP_DIR": str(tmp_path / "artemis"),
             "PATH": os.environ.get("PATH", ""),
             "PYTHONPATH": project_root,
             # Windows: the interpreter's socket stack (Winsock/_overlapped),
@@ -98,9 +116,18 @@ def test_mcp_stdio_handshake_immediate_input():
                 )
                 if key in os.environ
             },
+            "APPDATA": str(tmp_path / "appdata"),
+            "LOCALAPPDATA": str(tmp_path / "localapp"),
         },
         cwd=project_root,
     )
+    stderr = []
+
+    def drain_stderr():
+        stderr.extend(p.stderr)
+
+    stderr_reader = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_reader.start()
 
     try:
         # Immediately write the JSON-RPC initialize request into stdin
@@ -150,11 +177,128 @@ def test_mcp_stdio_handshake_immediate_input():
         }.issubset(tool_names)
 
     finally:
-        p.terminate()
+        p.stdin.close()
         try:
             p.wait(timeout=3)
         except subprocess.TimeoutExpired:
             p.kill()
+            p.wait(timeout=3)
+        stderr_reader.join(timeout=3)
+    assert p.returncode == 0, b"".join(stderr).decode("utf-8", errors="replace")
+    assert b"disabled main imported SDK" not in b"".join(stderr)
+
+
+@pytest.mark.parametrize("transport", ["stdio", "sse"])
+@pytest.mark.parametrize("run_fails", [False, True])
+@pytest.mark.parametrize("awake_setting", [None, "true", "1", "yes", "on", ""])
+def test_main_preserves_awake_service_lifecycle(transport, run_fails, awake_setting, monkeypatch):
+    """Awake still starts in a daemon thread and shuts down even if serving fails."""
+    events = []
+    if awake_setting is None:
+        monkeypatch.delenv("ARTEMIS_KEEP_DEVICE_AWAKE", raising=False)
+    else:
+        monkeypatch.setenv("ARTEMIS_KEEP_DEVICE_AWAKE", awake_setting)
+
+    def run(**kwargs):
+        events.append("serve")
+        if run_fails:
+            raise RuntimeError("test serving failure")
+
+    with (
+        patch("artemis.runtime.start_awake_service", side_effect=lambda: events.append("awake")),
+        patch("artemis.runtime.shutdown_awake_service", side_effect=lambda: events.append("stop")),
+        patch.object(server.threading, "Thread") as thread,
+        patch.object(server.mcp, "run", side_effect=run) as serve,
+    ):
+        thread.return_value.start.side_effect = lambda: thread.call_args.kwargs["target"]()
+        if run_fails:
+            with pytest.raises(RuntimeError, match="test serving failure"):
+                server.main(transport=transport, host="127.0.0.2", port=8123)
+        else:
+            server.main(transport=transport, host="127.0.0.2", port=8123)
+
+        assert thread.call_args.kwargs["daemon"] is True
+        assert thread.call_args.kwargs["name"] == "artemis-awake-init"
+        thread.return_value.start.assert_called_once_with()
+        expected = {"transport": transport}
+        if transport == "sse":
+            expected.update(host="127.0.0.2", port=8123)
+        serve.assert_called_once_with(**expected)
+    assert events == ["awake", "serve", "stop"]
+
+
+@pytest.mark.parametrize(
+    "awake_setting", ["0", "false", "no", "off", " 0 ", " FALSE ", "\tNo\n", " OFF "]
+)
+def test_disabled_main_does_not_bootstrap_unused_runtime(awake_setting, monkeypatch):
+    monkeypatch.setenv("ARTEMIS_KEEP_DEVICE_AWAKE", awake_setting)
+    monkeypatch.delitem(sys.modules, "artemis.runtime", raising=False)
+    with (
+        patch.object(server.threading, "Thread") as thread,
+        patch.object(server.env_utils, "import_artemis_package") as bootstrap,
+        patch.object(server.mcp, "run") as serve,
+    ):
+        server.main()
+    thread.assert_not_called()
+    bootstrap.assert_not_called()
+    serve.assert_called_once_with(transport="stdio")
+
+
+@pytest.mark.parametrize("run_fails", [False, True])
+def test_disabled_main_cleans_up_runtime_loaded_by_tools(run_fails, monkeypatch):
+    monkeypatch.setenv("ARTEMIS_KEEP_DEVICE_AWAKE", "false")
+    events = []
+
+    def run(**kwargs):
+        events.append("serve")
+        if run_fails:
+            raise RuntimeError("test serving failure")
+
+    with (
+        patch("artemis.runtime.shutdown_awake_service", side_effect=lambda: events.append("stop")),
+        patch.object(server.threading, "Thread") as thread,
+        patch.object(server.mcp, "run", side_effect=run),
+    ):
+        if run_fails:
+            with pytest.raises(RuntimeError, match="test serving failure"):
+                server.main()
+        else:
+            server.main()
+    thread.assert_not_called()
+    assert events == ["serve", "stop"]
+
+
+def test_enabled_main_preserves_shutdown_before_delayed_awake_start(monkeypatch):
+    monkeypatch.setenv("ARTEMIS_KEEP_DEVICE_AWAKE", "true")
+    entered, release = threading.Event(), threading.Event()
+    awake_threads = []
+    events = []
+
+    def bootstrap():
+        if threading.current_thread().name == "artemis-awake-init":
+            awake_threads.append(threading.current_thread())
+            entered.set()
+            assert release.wait(timeout=3)
+
+    def run(**kwargs):
+        assert entered.wait(timeout=3)
+        events.append("serve")
+
+    with (
+        patch.object(server.env_utils, "import_artemis_package", side_effect=bootstrap),
+        patch("artemis.runtime.start_awake_service", side_effect=lambda: events.append("awake")),
+        patch("artemis.runtime.shutdown_awake_service", side_effect=lambda: events.append("stop")),
+        patch.object(server.mcp, "run", side_effect=run),
+    ):
+        try:
+            server.main()
+            assert events == ["serve", "stop"]
+        finally:
+            release.set()
+            for thread in awake_threads:
+                thread.join(timeout=3)
+                assert not thread.is_alive()
+    assert events == ["serve", "stop", "awake"]
 
 
 def test_awake_service_adb_command_isolates_stdin():

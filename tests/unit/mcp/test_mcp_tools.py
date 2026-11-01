@@ -92,10 +92,10 @@ def test_mobile_run_task_reserves_and_passes_global_queue_ticket(temp_trace_env)
     process = MagicMock(pid=43210)
     with (
         patch(
-            "mcp_server.tools.task_runner.DeviceExecutionLock.reserve",
+            "artemis.runtime.DeviceExecutionLock.reserve",
             return_value="queue-ticket-1",
         ) as reserve,
-        patch("mcp_server.tools.task_runner.DeviceExecutionLock.transfer_reservation") as transfer,
+        patch("artemis.runtime.DeviceExecutionLock.transfer_reservation") as transfer,
         patch("mcp_server.tools.task_runner.subprocess.Popen", return_value=process) as popen,
     ):
         result = mobile_run_task(
@@ -125,10 +125,10 @@ def test_mobile_run_task_with_device_serial(temp_trace_env):
     process = MagicMock(pid=54321)
     with (
         patch(
-            "mcp_server.tools.task_runner.DeviceExecutionLock.reserve",
+            "artemis.runtime.DeviceExecutionLock.reserve",
             return_value="queue-ticket-dev",
         ) as reserve,
-        patch("mcp_server.tools.task_runner.DeviceExecutionLock.transfer_reservation") as transfer,
+        patch("artemis.runtime.DeviceExecutionLock.transfer_reservation") as transfer,
         patch("mcp_server.tools.task_runner.subprocess.Popen", return_value=process) as popen,
         # Hermetic device validation: the requested serial reports as ready
         # regardless of what is attached to the host running the tests.
@@ -173,11 +173,11 @@ def test_mobile_run_task_dispatched_to_daemon(temp_trace_env, monkeypatch):
     monkeypatch.delenv("ARTEMIS_STANDALONE", raising=False)
     with (
         patch(
-            "mcp_server.tools.task_runner.ensure_daemon_running",
+            "artemis.runtime.ensure_daemon_running",
             return_value=(True, "http://127.0.0.1:8000"),
         ),
         patch(
-            "mcp_server.tools.task_runner.submit_task_to_daemon",
+            "artemis.runtime.submit_task_to_daemon",
             return_value={"status": "started", "tasks": [{"session_id": "daemon-sid-1"}]},
         ),
         patch("mcp_server.tools.task_runner.subprocess.Popen") as popen,
@@ -215,8 +215,8 @@ def test_mobile_run_task_rejects_unknown_pro_tuning_before_creating_a_trace(
 def test_mobile_run_task_forwards_pro_tuning_to_background_runner(temp_trace_env):
     process = MagicMock(pid=777)
     with (
-        patch("mcp_server.tools.task_runner.DeviceExecutionLock.reserve", return_value="t"),
-        patch("mcp_server.tools.task_runner.DeviceExecutionLock.transfer_reservation"),
+        patch("artemis.runtime.DeviceExecutionLock.reserve", return_value="t"),
+        patch("artemis.runtime.DeviceExecutionLock.transfer_reservation"),
         patch("mcp_server.tools.task_runner.subprocess.Popen", return_value=process) as popen,
     ):
         mobile_run_task(
@@ -235,8 +235,8 @@ def test_mobile_run_task_forwards_pro_tuning_to_background_runner(temp_trace_env
 def test_mobile_run_task_omits_pro_tuning_flags_when_unset(temp_trace_env):
     process = MagicMock(pid=778)
     with (
-        patch("mcp_server.tools.task_runner.DeviceExecutionLock.reserve", return_value="t"),
-        patch("mcp_server.tools.task_runner.DeviceExecutionLock.transfer_reservation"),
+        patch("artemis.runtime.DeviceExecutionLock.reserve", return_value="t"),
+        patch("artemis.runtime.DeviceExecutionLock.transfer_reservation"),
         patch("mcp_server.tools.task_runner.subprocess.Popen", return_value=process) as popen,
     ):
         mobile_run_task(task_desc="Open Settings", model="Pro", verification_level="  ")
@@ -250,11 +250,11 @@ def test_mobile_run_task_forwards_pro_tuning_to_daemon(temp_trace_env, monkeypat
     monkeypatch.delenv("ARTEMIS_STANDALONE", raising=False)
     with (
         patch(
-            "mcp_server.tools.task_runner.ensure_daemon_running",
+            "artemis.runtime.ensure_daemon_running",
             return_value=(True, "http://127.0.0.1:8000"),
         ),
         patch(
-            "mcp_server.tools.task_runner.submit_task_to_daemon",
+            "artemis.runtime.submit_task_to_daemon",
             return_value={"status": "started", "tasks": [{"session_id": "daemon-sid-2"}]},
         ) as submit,
         patch("mcp_server.tools.task_runner.subprocess.Popen") as popen,
@@ -357,11 +357,9 @@ async def test_mobile_get_device_state_hierarchy_without_ocr():
     )
 
     with (
-        patch("mcp_server.tools.device_state._get_controller", return_value=controller),
-        patch("mcp_server.tools.device_state.is_ocr_configured", return_value=False),
-        patch(
-            "mcp_server.tools.device_state.perform_ocr", new_callable=AsyncMock
-        ) as perform_ocr_mock,
+        patch("artemis.mcp.adb_server._get_controller", return_value=controller),
+        patch("artemis.utils.ocr_api.is_ocr_configured", return_value=False),
+        patch("artemis.utils.ocr_api.perform_ocr", new_callable=AsyncMock) as perform_ocr_mock,
     ):
         result = await mobile_get_device_state(view_type="hierarchy")
 
@@ -392,10 +390,8 @@ async def test_mobile_get_device_state_passes_device_serial():
     )
 
     with (
-        patch(
-            "mcp_server.tools.device_state._get_controller", return_value=controller
-        ) as get_ctrl_mock,
-        patch("mcp_server.tools.device_state.is_ocr_configured", return_value=False),
+        patch("artemis.mcp.adb_server._get_controller", return_value=controller) as get_ctrl_mock,
+        patch("artemis.utils.ocr_api.is_ocr_configured", return_value=False),
     ):
         await mobile_get_device_state(view_type="hierarchy", device_serial="device-serial-abc")
 
@@ -498,8 +494,8 @@ def test_mobile_manage_task_stop_via_daemon(temp_trace_env, monkeypatch):
     trace_store.init_trace(trace_id, "Daemon task to stop", "Flash", "conv-stop")
 
     with (
-        patch("mcp_server.tools.task_manager.is_daemon_running", return_value=True),
-        patch("mcp_server.tools.task_manager.stop_task_on_daemon", return_value=True) as mock_stop,
+        patch("artemis.runtime.is_daemon_running", return_value=True),
+        patch("artemis.runtime.stop_task_on_daemon", return_value=True) as mock_stop,
     ):
         res = mobile_manage_task(action="stop", trace_id=trace_id)
         mock_stop.assert_called_once_with(trace_id)

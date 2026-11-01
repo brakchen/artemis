@@ -397,12 +397,15 @@ class Diagnoser:
                     state=state,
                 )
                 result_content = get_tool_result_content(result_obj)
+                failed = (
+                    is_tool_failure(result_obj) or getattr(result_obj, "status", None) == "error"
+                )
                 self.ctx.background_jobs[job_id]["result"] = result_content
-                self.ctx.background_jobs[job_id]["status"] = "completed"
+                self.ctx.background_jobs[job_id]["status"] = "failed" if failed else "completed"
                 if self.ctx.data_engine:
                     self.ctx.data_engine.unregister_background_task(
                         task_id=job_id,
-                        status="completed",
+                        status="failed" if failed else "completed",
                     )
             else:
                 self.ctx.background_jobs[job_id]["result"] = "Error: video_analyzer tool not found"
@@ -411,6 +414,13 @@ class Diagnoser:
                     self.ctx.data_engine.unregister_background_task(task_id=job_id, status="failed")
         except asyncio.CancelledError:
             logger.info(f"Background job {job_id} cancelled.")
+            self.ctx.background_jobs[job_id]["result"] = "Video analysis cancelled"
+            self.ctx.background_jobs[job_id]["status"] = "failed"
+            if self.ctx.data_engine:
+                try:
+                    self.ctx.data_engine.unregister_background_task(task_id=job_id, status="failed")
+                except Exception as error:
+                    logger.warning(f"Failed to unregister cancelled video job: {error}")
             raise
         except Exception as e:
             logger.error(f"Background job {job_id} failed: {e}")

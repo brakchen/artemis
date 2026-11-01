@@ -68,6 +68,10 @@ async def exec_analyze_audio_only(
     analyzer, start_time: float, end_time: float | None, specific_query: str
 ) -> str:
     """Analyzes only the audio track of a segment, with claim/lease and retries."""
+    if analyzer.is_minimax:
+        from artemis.agents.video_analyzer.universal_engine import analyze_minimax_speech
+
+        return await analyze_minimax_speech(analyzer, start_time, end_time, specific_query)
     if not isinstance(start_time, (int, float)):
         return "Error: start_time must be a numeric recording-relative timestamp."
     if not str(specific_query or "").strip():
@@ -86,10 +90,6 @@ async def exec_analyze_audio_only(
             return f"Error fetching audio segment metadata: {metadata.message}"
         current_start = round(float(actual_start), 1)
         current_end = round(current_start + float(duration), 1)
-        if metadata.video_path:
-            metadata_path = Path(metadata.video_path)
-            analyzer.local_files_to_cleanup.add(metadata_path)
-            analyzer.local_dirs_to_cleanup.add(metadata_path.parent)
     if current_end <= current_start:
         return "Error: end_time must be greater than start_time."
 
@@ -298,14 +298,11 @@ async def _prepare_audio_media(
     if not result.success or not result.video_path:
         raise Exception(f"Failed to get video segment: {result.message}")
 
-    path = Path(result.video_path)
-    analyzer.local_files_to_cleanup.add(path)
-    analyzer.local_dirs_to_cleanup.add(path.parent)
+    path = analyzer._own_segment(Path(result.video_path))
 
     async with _va.TRANSCODE_SEMAPHORE:
         audio_path = await _va.extract_audio_from_video(path)
     analyzer.local_files_to_cleanup.add(audio_path)
-    analyzer.local_dirs_to_cleanup.add(audio_path.parent)
     media.audio_path = audio_path
     actual_start = getattr(result, "actual_start_relative_time", current_start)
     if not isinstance(actual_start, (int, float)):

@@ -15,6 +15,8 @@
 """Unit tests for Artemis System Diagnostics & Readiness Engine."""
 
 import asyncio
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -199,8 +201,19 @@ async def test_readiness_engine_coalesces_concurrent_full_scans():
     assert all(report.overall_ready for report in reports)
 
 
+@pytest.fixture
+def readiness_clock(monkeypatch):
+    """Keep report timestamps on one tick without freezing the asyncio clock."""
+    now = [100.0]
+    monkeypatch.setattr(
+        "artemis.core.diagnostics.engine.time",
+        SimpleNamespace(monotonic=lambda: now[0], time=time.time),
+    )
+    return now
+
+
 @pytest.mark.asyncio
-async def test_readiness_engine_reuses_cache_until_forced():
+async def test_readiness_engine_reuses_cache_until_forced(readiness_clock):
     engine = ReadinessEngine()
     result = ProbeResult(
         id="test_probe",
@@ -225,7 +238,89 @@ async def test_readiness_engine_reuses_cache_until_forced():
 
 
 @pytest.mark.asyncio
-async def test_invalidation_prevents_in_flight_report_from_becoming_shared_cache():
+@pytest.mark.parametrize("force_refresh", [False, True])
+@pytest.mark.parametrize("warm_cache", [False, True])
+async def test_readiness_engine_coalesces_same_tick_refreshes(
+    readiness_clock, force_refresh, warm_cache
+):
+    engine = ReadinessEngine()
+    result = ProbeResult(
+        id="test_probe",
+        category=ProbeCategory.RUNTIME,
+        title="Test",
+        status=ProbeStatus.PASS,
+        is_blocker=True,
+        summary="Ready",
+        description="Ready",
+        metadata={"details": {"version": 1}},
+    )
+    probe = Mock()
+    probe.probe = AsyncMock(return_value=result)
+    engine._probes = {"test_probe": probe}
+    if warm_cache:
+        await engine.run_all()
+        readiness_clock[0] += engine._REPORT_CACHE_TTL_SECONDS + 1
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def controlled_probe():
+        started.set()
+        await release.wait()
+        return result
+
+    probe.probe.side_effect = controlled_probe
+    first = asyncio.create_task(engine.run_all(force_refresh=force_refresh))
+    await started.wait()
+    waiters = [
+        asyncio.create_task(engine.run_all(force_refresh=forced)) for forced in (False, True, True)
+    ]
+    await asyncio.sleep(0)
+    release.set()
+    reports = await asyncio.gather(first, *waiters)
+
+    assert probe.probe.await_count == 1 + int(warm_cache)
+    assert all(report.model_dump() == reports[0].model_dump() for report in reports)
+    reports[0].probes[0].metadata["details"]["version"] = 2
+    assert all(report.probes[0].metadata["details"]["version"] == 1 for report in reports[1:])
+
+
+@pytest.mark.asyncio
+async def test_readiness_engine_cache_expires_and_filtered_scans_stay_separate(readiness_clock):
+    engine = ReadinessEngine()
+    result = ProbeResult(
+        id="test_probe",
+        category=ProbeCategory.RUNTIME,
+        title="Test",
+        status=ProbeStatus.PASS,
+        is_blocker=True,
+        summary="Ready",
+        description="Ready",
+    )
+    probe = Mock(category=ProbeCategory.RUNTIME)
+    probe.probe = AsyncMock(return_value=result)
+    engine._probes = {"test_probe": probe}
+
+    await engine.run_all()
+    readiness_clock[0] += engine._REPORT_CACHE_TTL_SECONDS
+    await engine.run_all()
+    assert probe.probe.await_count == 1
+
+    readiness_clock[0] += 0.1
+    await engine.run_all()
+    assert probe.probe.await_count == 2
+    await engine.run_all(categories=[ProbeCategory.RUNTIME], force_refresh=True)
+    assert probe.probe.await_count == 3
+    await engine.run_all()
+    assert probe.probe.await_count == 3
+
+    engine.invalidate_cache()
+    await engine.run_all()
+    assert probe.probe.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_invalidation_prevents_in_flight_report_from_becoming_shared_cache(readiness_clock):
     engine = ReadinessEngine()
     result = ProbeResult(
         id="test_probe",
@@ -256,6 +351,34 @@ async def test_invalidation_prevents_in_flight_report_from_becoming_shared_cache
     await engine.run_all()
 
     assert probe.probe.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_readiness_scan_does_not_publish_cache(readiness_clock):
+    engine = ReadinessEngine()
+    result = ProbeResult(
+        id="test_probe",
+        category=ProbeCategory.RUNTIME,
+        title="Test",
+        status=ProbeStatus.PASS,
+        is_blocker=True,
+        summary="Ready",
+        description="Ready",
+    )
+    probe = Mock()
+    probe.probe = AsyncMock(side_effect=[asyncio.CancelledError(), result])
+    engine._probes = {"test_probe": probe}
+
+    with pytest.raises(asyncio.CancelledError):
+        await engine.run_all()
+    assert engine._report_cache is None
+    assert engine._report_cache_time == 0.0
+
+    report = await engine.run_all(force_refresh=True)
+    cached = await engine.run_all()
+    assert probe.probe.await_count == 2
+    assert report.overall_ready is True
+    assert cached.model_dump() == report.model_dump()
 
 
 @pytest.mark.asyncio

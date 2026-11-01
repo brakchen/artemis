@@ -111,7 +111,7 @@ class UnifiedMobileController(UnifiedMobileControllerBase):
             return no_active_recording(device_id)
 
         cache_key = None
-        if end_time is not None:
+        if end_time is not None and output_path is None:
             cache_key = (
                 str(session.video_id),
                 session.generation,
@@ -184,11 +184,15 @@ class UnifiedMobileController(UnifiedMobileControllerBase):
                     ),
                 )
 
-            trim_output_dir = tempfile.mkdtemp(
-                prefix="video_trimmed_",
-                dir=get_temp_dir("trimmed_videos"),
-            )
-            trim_output_path = Path(trim_output_dir) / "segment.mp4"
+            if output_path is None:
+                trim_output_dir = tempfile.mkdtemp(
+                    prefix="video_trimmed_",
+                    dir=get_temp_dir("trimmed_videos"),
+                )
+                trim_output_path = Path(trim_output_dir) / "segment.mp4"
+            else:
+                trim_output_path = Path(output_path)
+                trim_output_path.parent.mkdir(parents=True, exist_ok=True)
 
             success = False
             for attempt in range(3):

@@ -413,10 +413,10 @@ def test_budget_timeout_and_zero_temperature_precedence(mini_registry):
 def test_flash_constructor_has_explicit_transport_and_native_effort(
     mini_registry, monkeypatch, effort
 ):
-    import langchain_anthropic
+    from artemis.llm import minimax_media
 
     constructor = Mock()
-    monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", constructor)
+    monkeypatch.setattr(minimax_media, "MiniMaxChatAnthropic", constructor)
     endpoint = get_effective_endpoint(
         SimpleNamespace(
             llm_config=_config(
@@ -535,7 +535,7 @@ async def test_actual_langchain_anthropic_wire_uses_resolved_limits(mini_registr
 
 
 def test_minimax_grounding_remains_an_app_level_switch(mini_registry, monkeypatch):
-    import langchain_anthropic
+    from artemis.llm import minimax_media
 
     endpoint = get_effective_endpoint(
         SimpleNamespace(
@@ -549,7 +549,7 @@ def test_minimax_grounding_remains_an_app_level_switch(mini_registry, monkeypatc
     )
     assert endpoint.enable_grounding is True
     constructor = Mock()
-    monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", constructor)
+    monkeypatch.setattr(minimax_media, "MiniMaxChatAnthropic", constructor)
     ModelFactory.create_model(endpoint)
     assert "enable_grounding" not in constructor.call_args.kwargs
 

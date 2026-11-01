@@ -14,6 +14,8 @@
 
 """MCP Tool: mobile_manage_task."""
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -26,14 +28,6 @@ from typing import Any
 from mcp_server.base import mcp
 from mcp_server.notifiers import notify
 from mcp_server.utils import env_utils
-from artemis.runtime import (
-    DeviceExecutionLock,
-    is_daemon_running,
-    process_supervisor,
-    stop_task_on_daemon,
-    trace_store,
-)
-from artemis.runtime.process_probe import pid_is_alive
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +38,8 @@ _STARTUP_GRACE_SECONDS = 45.0
 
 
 def _find_data_engine_db() -> str | None:
+    from artemis.runtime import trace_store
+
     db_path = os.path.join(trace_store.TRACES_DIR, "data_engine.db")
     if os.path.exists(db_path):
         return db_path
@@ -52,6 +48,8 @@ def _find_data_engine_db() -> str | None:
 
 
 def _pid_alive(pid: int | None) -> bool:
+    from artemis.runtime.process_probe import pid_is_alive
+
     if not pid:
         return False
     try:
@@ -70,6 +68,9 @@ def _session_tracked_by_lock(trace_id: str) -> bool | None:
     not treat a failed probe as evidence of death (same "uncertain defaults to
     alive" stance as ``pid_is_alive``).
     """
+
+    from artemis.runtime import DeviceExecutionLock
+
     uncertain = False
     try:
         for q_item in DeviceExecutionLock.get_queued_tasks():
@@ -102,6 +103,9 @@ def _reconcile_task_state(
     Returns ``(current_status, pid, is_alive)`` and persists any correction back
     to status.json (including recovering from a previously misreported failure).
     """
+
+    from artemis.runtime import trace_store
+
     current_status = status_data.get("status", "unknown")
     pid = status_data.get("pid")
     dirty = False
@@ -189,6 +193,8 @@ def _reconcile_task_state(
 
 
 def _mark_liveness_failure(trace_id: str, status_data: dict[str, Any]) -> None:
+    from artemis.runtime import trace_store
+
     trace_store.update_trace_status(trace_id, "failed", error=_LIVENESS_FAILURE_ERROR)
     status_data["status"] = "failed"
     status_data["error"] = _LIVENESS_FAILURE_ERROR
@@ -262,6 +268,16 @@ def mobile_manage_task(
           that authorizes the subagent to complete continuous monitoring
           loops and finish the task gracefully.
     """
+
+    env_utils.import_artemis_package()
+    from artemis.runtime import (
+        DeviceExecutionLock,
+        is_daemon_running,
+        process_supervisor,
+        stop_task_on_daemon,
+        trace_store,
+    )
+
     status_data = trace_store.read_status(trace_id)
     if not status_data:
         return {

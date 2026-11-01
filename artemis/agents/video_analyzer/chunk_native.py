@@ -47,6 +47,8 @@ async def exec_single_chunk(
 ) -> str:
     """Analyzes one closed chunk interval, with claim/lease and retry handling."""
     max_retries = analyzer.native_max_retries
+    if analyzer.is_minimax:
+        max_retries = 0
     current_start = round(start_time, 1) if isinstance(start_time, (int, float)) else start_time
     current_end = round(end_time, 1) if isinstance(end_time, (int, float)) else end_time
 
@@ -61,8 +63,13 @@ async def exec_single_chunk(
         specific_query,
         model_name=analyzer.model_name,
         source_generation=(active_session.generation if active_session is not None else None),
+        **analyzer._cache_identity(),
     )
     if claim.state == "cached":
+        if analyzer.is_minimax:
+            analyzer._record_cached_coverage(
+                current_start, current_end, media_facts=claim.media_facts
+            )
         cached = (
             f"[from {current_start:.1f}s to {current_end:.1f}s] Summary: "
             f"{claim.summary or 'No summary provided.'}"
@@ -71,6 +78,8 @@ async def exec_single_chunk(
             cached += f" Analysis: {claim.analysis}"
         return cached
     if claim.state == "in_progress":
+        if analyzer.is_minimax:
+            raise RuntimeError("Required video evidence is still in progress in another analyzer")
         return (
             f"[from {current_start:.1f}s to {current_end:.1f}s] "
             "Analysis is already in progress in another video agent; do not duplicate it."
@@ -126,6 +135,8 @@ async def exec_single_chunk(
                     lease_owner,
                     summary,
                     analysis,
+                    **analyzer._cache_identity(),
+                    **({"media_facts": chunk_result.media_facts} if analyzer.is_minimax else {}),
                 )
                 return chunk_result
 
@@ -152,6 +163,18 @@ async def exec_single_chunk(
                 lease_owner,
             )
 
+        except asyncio.CancelledError:
+            analyzer.blackboard.fail_segment(
+                current_start,
+                current_end,
+                specific_query,
+                lease_owner,
+                "Video analysis cancelled",
+                retryable=True,
+                error_category="cancelled",
+                **analyzer._cache_identity(),
+            )
+            raise
         except Exception as e:
             # Retry decisions are owned by the shared classification layer.
             # Every attempt restarts from scratch (segment re-extracted,
@@ -330,6 +353,7 @@ async def _finish_failed_chunk(
         str(error),
         retryable=failure.retryable if retryable is None else retryable,
         error_category=failure.category.value,
+        **analyzer._cache_identity(),
     )
     raise error
 
@@ -343,16 +367,22 @@ async def _prepare_chunk_media(
         result = await controller.extract_segment_metadata(current_start, current_end)
     if not result.success or not result.video_path:
         raise Exception(f"Failed to get video segment: {result.message}")
+    if analyzer.is_minimax:
+        analyzer._assert_recording_source(result)
 
-    path = Path(result.video_path)
-    analyzer.local_files_to_cleanup.add(path)
-    analyzer.local_dirs_to_cleanup.add(path.parent)
+    path = analyzer._own_segment(Path(result.video_path))
     media.path = path
 
     actual_start = getattr(result, "actual_start_relative_time", current_start)
     if not isinstance(actual_start, (int, float)):
         actual_start = current_start
     media.actual_start = actual_start
+
+    if analyzer.is_minimax:
+        # Keyframes and native inline video use original-speed recording time.
+        # Gemini's slowdown/overlay codec path must not change this clock.
+        media.compressed_path = path
+        return result, 1.0
 
     slowdown_factor = 1.0
     if current_end is not None and (current_end - current_start) <= _va.SLOWDOWN_THRESHOLD_SECONDS:
@@ -367,7 +397,6 @@ async def _prepare_chunk_media(
         )
     if compressed_path != path:
         analyzer.local_files_to_cleanup.add(compressed_path)
-        analyzer.local_dirs_to_cleanup.add(compressed_path.parent)
     media.compressed_path = compressed_path
 
     actual_start = getattr(result, "actual_start_relative_time", current_start)
@@ -407,7 +436,14 @@ def _build_chunk_prompt(
     if slowdown_factor != 1.0:
         slowdown_note = "WARNING: This video is slowed down to capture fast micro-actions.\n\n"
 
-    if _va.is_ffmpeg_drawtext_supported():
+    if analyzer.is_minimax:
+        timing_note = (
+            "No timestamp overlay is added. Keyframe captions use original recording time; "
+            "native inline playback timestamps are segment start plus playback seconds. "
+            "State the observed sample interval, evidence and unknowns. Do not infer speech "
+            "or non-speech sounds from images."
+        )
+    elif _va.is_ffmpeg_drawtext_supported():
         timing_note = (
             "A timestamp showing the exact test relative time (formatted as"
             " '<seconds> s') is burned in the top-right corner of the video."

@@ -46,14 +46,18 @@ class SegmentClaim:
     lease_owner: str | None = None
     summary: str | None = None
     analysis: str | None = None
+    media_facts: dict[str, Any] | None = None
 
 
 def _normalise_query(query: str | None) -> str:
     return " ".join(str(query or "").strip().lower().split())
 
 
-def _query_key(query: str | None) -> str:
-    return hashlib.sha256(_normalise_query(query).encode("utf-8")).hexdigest()
+def _query_key(query: str | None, cache_identity: str | None = None) -> str:
+    text = _normalise_query(query)
+    if cache_identity is not None:
+        text = json.dumps([text, cache_identity], separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _to_ms(value: float | int) -> int:
@@ -62,6 +66,35 @@ def _to_ms(value: float | int) -> int:
 
 def _to_seconds(value: int) -> float:
     return round(value / 1000.0, 3)
+
+
+def uncovered_intervals(
+    start: float, end: float, intervals: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    """Subtract a union of successful intervals, at the board's millisecond precision."""
+    start_ms, end_ms = _to_ms(start), _to_ms(end)
+    if end_ms <= start_ms:
+        return []
+    covered = sorted(
+        (max(start_ms, _to_ms(left)), min(end_ms, _to_ms(right))) for left, right in intervals
+    )
+    merged: list[tuple[int, int]] = []
+    for left, right in covered:
+        if right <= left:
+            continue
+        if not merged or left > merged[-1][1]:
+            merged.append((left, right))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+    missing: list[tuple[float, float]] = []
+    cursor = start_ms
+    for left, right in merged:
+        if left > cursor:
+            missing.append((_to_seconds(cursor), _to_seconds(left)))
+        cursor = max(cursor, right)
+    if cursor < end_ms:
+        missing.append((_to_seconds(cursor), _to_seconds(end_ms)))
+    return missing
 
 
 class VideoBlackboard:
@@ -154,6 +187,7 @@ class VideoBlackboard:
                 ("error_category", "TEXT"),
                 ("model_name", "TEXT"),
                 ("source_generation", "INTEGER"),
+                ("media_facts_json", "TEXT"),
             ):
                 if name not in columns:
                     try:
@@ -197,6 +231,8 @@ class VideoBlackboard:
                 shutil.copy2(source, destination)
             except OSError as exc:
                 logger.warning(f"Failed to persist video evidence {source}: {exc}")
+                if entry.get("media_source"):
+                    raise RuntimeError("MiniMax evidence could not be persisted") from exc
                 return str(source)
         return str(destination)
 
@@ -216,6 +252,7 @@ class VideoBlackboard:
                 "query": _normalise_query(query_text),
                 "summary": summary,
                 "modality": modality,
+                **({"media_source": entry["media_source"]} if entry.get("media_source") else {}),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -368,6 +405,7 @@ class VideoBlackboard:
         modality: str = "video",
         model_name: str | None = None,
         source_generation: int | None = None,
+        cache_identity: str | None = None,
     ) -> SegmentClaim:
         """Atomically acquire work, or return a cached/in-progress result."""
 
@@ -375,7 +413,7 @@ class VideoBlackboard:
         end_ms = _to_ms(end)
         if end_ms <= start_ms:
             raise ValueError("Video analysis segment end must be greater than start")
-        q_key = _query_key(query)
+        q_key = _query_key(query, cache_identity)
         key = (q_key, modality, start_ms, end_ms)
         now = time.time()
         owner = str(uuid4())
@@ -386,7 +424,10 @@ class VideoBlackboard:
                 existing = self._memory_segments.get(key)
                 if existing and existing["status"] == "succeeded":
                     return SegmentClaim(
-                        "cached", summary=existing.get("summary"), analysis=existing.get("analysis")
+                        "cached",
+                        summary=existing.get("summary"),
+                        analysis=existing.get("analysis"),
+                        media_facts=existing.get("media_facts"),
                     )
                 if (
                     existing
@@ -421,7 +462,14 @@ class VideoBlackboard:
             ).fetchone()
             if row is not None and row["status"] == "succeeded":
                 conn.commit()
-                return SegmentClaim("cached", summary=row["summary"], analysis=row["analysis"])
+                return SegmentClaim(
+                    "cached",
+                    summary=row["summary"],
+                    analysis=row["analysis"],
+                    media_facts=json.loads(row["media_facts_json"])
+                    if row["media_facts_json"]
+                    else None,
+                )
             if (
                 row is not None
                 and row["status"] == "running"
@@ -491,10 +539,12 @@ class VideoBlackboard:
         analysis: str | None = None,
         *,
         modality: str = "video",
+        cache_identity: str | None = None,
+        media_facts: dict[str, Any] | None = None,
     ) -> None:
         """Commit a complete result while preserving lease ownership."""
 
-        key = (_query_key(query), modality, _to_ms(start), _to_ms(end))
+        key = (_query_key(query, cache_identity), modality, _to_ms(start), _to_ms(end))
         now = time.time()
         if self.db_path is None:
             with self._lock:
@@ -506,6 +556,7 @@ class VideoBlackboard:
                         "status": "succeeded",
                         "summary": summary,
                         "analysis": analysis,
+                        "media_facts": media_facts,
                         "lease_expires_at": None,
                         "updated_at": now,
                     }
@@ -517,7 +568,7 @@ class VideoBlackboard:
                 """
                 UPDATE video_analysis_segments
                 SET status = 'succeeded', summary = ?, analysis = ?, error = NULL,
-                    lease_expires_at = NULL, updated_at = ?
+                    lease_expires_at = NULL, updated_at = ?, media_facts_json = ?
                 WHERE board_key = ? AND query_key = ? AND modality = ?
                   AND start_ms = ? AND end_ms = ? AND lease_owner = ?
                 """,
@@ -525,6 +576,7 @@ class VideoBlackboard:
                     summary,
                     analysis,
                     now,
+                    json.dumps(media_facts) if media_facts is not None else None,
                     self.board_key,
                     key[0],
                     modality,
@@ -546,10 +598,11 @@ class VideoBlackboard:
         modality: str = "video",
         retryable: bool = True,
         error_category: str | None = None,
+        cache_identity: str | None = None,
     ) -> None:
         """Persist a failed attempt without deleting prior observations."""
 
-        key = (_query_key(query), modality, _to_ms(start), _to_ms(end))
+        key = (_query_key(query, cache_identity), modality, _to_ms(start), _to_ms(end))
         status = "retryable_failed" if retryable else "permanent_failed"
         now = time.time()
         if self.db_path is None:
@@ -644,12 +697,18 @@ class VideoBlackboard:
         }
 
     def successful_segments(
-        self, start: float, end: float, query: str, *, modality: str = "video"
+        self,
+        start: float,
+        end: float,
+        query: str,
+        *,
+        modality: str = "video",
+        cache_identity: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return successful segments overlapping a requested interval."""
 
         start_ms, end_ms = _to_ms(start), _to_ms(end)
-        q_key = _query_key(query)
+        q_key = _query_key(query, cache_identity)
         if self.db_path is None:
             with self._lock:
                 rows = []
@@ -678,7 +737,7 @@ class VideoBlackboard:
         with self._connection() as conn:
             db_rows = conn.execute(
                 """
-                SELECT start_ms, end_ms, summary, analysis, status
+                SELECT start_ms, end_ms, summary, analysis, status, media_facts_json
                 FROM video_analysis_segments
                 WHERE board_key = ? AND query_key = ? AND modality = ?
                   AND status = 'succeeded' AND end_ms > ? AND start_ms < ?
@@ -693,47 +752,50 @@ class VideoBlackboard:
                 "summary": row["summary"],
                 "analysis": row["analysis"],
                 "status": row["status"],
+                "media_facts": json.loads(row["media_facts_json"])
+                if row["media_facts_json"]
+                else None,
             }
             for row in db_rows
         ]
 
     def missing_intervals(
-        self, start: float, end: float, query: str, *, modality: str = "video"
+        self,
+        start: float,
+        end: float,
+        query: str,
+        *,
+        modality: str = "video",
+        cache_identity: str | None = None,
     ) -> list[tuple[float, float]]:
         """Subtract successful exact-query coverage from a requested interval."""
 
-        start_ms, end_ms = _to_ms(start), _to_ms(end)
-        if end_ms <= start_ms:
-            return []
-        covered = []
-        for row in self.successful_segments(start, end, query, modality=modality):
-            covered.append((max(start_ms, _to_ms(row["start"])), min(end_ms, _to_ms(row["end"]))))
-        covered = sorted((left, right) for left, right in covered if right > left)
-
-        merged: list[tuple[int, int]] = []
-        for left, right in covered:
-            if not merged or left > merged[-1][1]:
-                merged.append((left, right))
-            else:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], right))
-
-        missing: list[tuple[float, float]] = []
-        cursor = start_ms
-        for left, right in merged:
-            if left > cursor:
-                missing.append((_to_seconds(cursor), _to_seconds(left)))
-            cursor = max(cursor, right)
-        if cursor < end_ms:
-            missing.append((_to_seconds(cursor), _to_seconds(end_ms)))
-        return missing
+        return uncovered_intervals(
+            start,
+            end,
+            [
+                (row["start"], row["end"])
+                for row in self.successful_segments(
+                    start, end, query, modality=modality, cache_identity=cache_identity
+                )
+            ],
+        )
 
     def format_cached_segments(
-        self, start: float, end: float, query: str, *, modality: str = "video"
+        self,
+        start: float,
+        end: float,
+        query: str,
+        *,
+        modality: str = "video",
+        cache_identity: str | None = None,
     ) -> list[str]:
         """Format cached segment results in the child-agent response shape."""
 
         results = []
-        for row in self.successful_segments(start, end, query, modality=modality):
+        for row in self.successful_segments(
+            start, end, query, modality=modality, cache_identity=cache_identity
+        ):
             text = (
                 f"[from {row['start']:.1f}s to {row['end']:.1f}s] "
                 f"Summary: {row.get('summary') or 'No summary provided.'}"
@@ -777,10 +839,6 @@ def _latest_recorded_video_key(db_path: Path | None, session_id: Any) -> str | N
 def get_video_blackboard(ctx: ArtemisContext) -> VideoBlackboard:
     """Return the blackboard shared by every analyzer in an Artemis context."""
 
-    existing = getattr(ctx, "_video_blackboard", None)
-    if isinstance(existing, VideoBlackboard):
-        return existing
-
     device_id = str(getattr(getattr(ctx, "device", None), "device_id", "default"))
     data_engine = getattr(ctx, "data_engine", None)
     db_path = None
@@ -810,6 +868,10 @@ def get_video_blackboard(ctx: ArtemisContext) -> VideoBlackboard:
         board_key = _latest_recorded_video_key(db_path, current_session_id) or (
             f"session:{current_session_id}" if current_session_id else f"device:{device_id}:runtime"
         )
+
+    existing = getattr(ctx, "_video_blackboard", None)
+    if isinstance(existing, VideoBlackboard) and existing.board_key == board_key:
+        return existing
 
     board = VideoBlackboard(board_key, db_path=db_path, evidence_dir=evidence_dir)
     try:

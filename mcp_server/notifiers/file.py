@@ -14,14 +14,16 @@
 
 """File-based notification recorder."""
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import time
 from typing import Any
 
-from artemis.runtime import trace_store
 from mcp_server.notifiers.base import BaseNotifier
+from mcp_server.utils import env_utils
 
 logger = logging.getLogger("mcp_server.notifiers.file")
 
@@ -44,6 +46,9 @@ class FileNotifier(BaseNotifier):
         event_type: str = "completed",
         payload: dict[str, Any] | None = None,
     ) -> bool:
+        env_utils.import_artemis_package()
+        from artemis.runtime import trace_store
+
         trace_id = (payload or {}).get("trace_id") or (payload or {}).get("session_id")
         if not trace_id:
             return False

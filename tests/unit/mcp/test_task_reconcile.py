@@ -26,6 +26,7 @@ import time
 
 import pytest
 
+from artemis.runtime import trace_store
 import mcp_server.tools.task_manager as task_manager
 from mcp_server.tools.task_manager import _LIVENESS_FAILURE_ERROR, _reconcile_task_state
 
@@ -35,8 +36,8 @@ def no_persistence(monkeypatch):
     """Keep reconciliation in-memory: no DB, no status writes, no lock queries."""
     monkeypatch.setattr(task_manager, "_find_data_engine_db", lambda: None)
     monkeypatch.setattr(task_manager, "_session_tracked_by_lock", lambda _tid: False)
-    monkeypatch.setattr(task_manager.trace_store, "write_status", lambda *_a, **_k: None)
-    monkeypatch.setattr(task_manager.trace_store, "update_trace_status", lambda *_a, **_k: None)
+    monkeypatch.setattr(trace_store, "write_status", lambda *_a, **_k: None)
+    monkeypatch.setattr(trace_store, "update_trace_status", lambda *_a, **_k: None)
     monkeypatch.setattr(task_manager, "notify", lambda *_a, **_k: None)
 
 

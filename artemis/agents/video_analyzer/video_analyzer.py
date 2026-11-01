@@ -28,6 +28,7 @@ import base64
 from datetime import datetime
 import glob
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -35,6 +36,7 @@ import shutil
 import tempfile
 import time
 from typing import Any
+from uuid import uuid4
 
 from google import genai
 from google.genai import types
@@ -48,7 +50,7 @@ from langchain_core.messages import (
 from artemis.agents.video_analyzer.conflict_resolution import (
     ConflictResolutionService,
 )
-from artemis.agents.video_analyzer.blackboard import get_video_blackboard
+from artemis.agents.video_analyzer.blackboard import get_video_blackboard, uncovered_intervals
 from artemis.agents.video_analyzer.gemini_files import (
     cleanup_abandoned_gemini_files,
 )
@@ -56,6 +58,9 @@ from artemis.agents.video_analyzer.reliability import (
     AgenticVideoDegraded,
     VideoCircuitBreaker,
     classify_video_failure,
+    MediaAnalysisResult,
+    MediaCoverage,
+    RequestedMediaScope,
 )
 from artemis.agents.video_analyzer.universal_tools import (
     UNIVERSAL_MAIN_TOOLS,
@@ -66,6 +71,7 @@ from artemis.agents.video_analyzer.universal_tools import (
 from artemis.config import get_temp_dir, settings
 from artemis.constants import SAFETY_SETTINGS_BLOCK_NONE
 from artemis.context import ArtemisContext
+from artemis.core.tool_failure import ToolFailure
 from artemis.controllers.controller_factory import get_controller
 from artemis.data_engine.trace import CURRENT_TRACE_ID, TraceSpan, trace
 from artemis.llm.google import (
@@ -73,8 +79,14 @@ from artemis.llm.google import (
     resolve_video_processing,
     strip_provider_prefix,
 )
-from artemis.llm.reliability import retry_policy_for
-from artemis.services.llm import _record_llm_event, _record_llm_retry, get_llm
+from artemis.llm.reliability import LLMInvalidOutputError, logical_call_scope, retry_policy_for
+from artemis.config.llm import LLMConfig
+from artemis.services.llm import (
+    _record_llm_event,
+    _record_llm_retry,
+    get_llm,
+    get_effective_endpoint,
+)
 from artemis.utils.video import (
     extract_frames_at_timestamps,
     extract_keyframes_from_video,
@@ -153,7 +165,7 @@ async def _invoke_with_retry(operation, label: str, max_attempts: int = 3):
 class VideoAnalyzer:
     def __init__(self, ctx: ArtemisContext):
         self.ctx = ctx
-        self.blackboard = get_video_blackboard(ctx)
+        self._begin_recording_job()
         self.blackboard_entries = self.blackboard.list_ledger_entries()
         agent_config = getattr(ctx, "agent_config", None)
         self.video_config = getattr(agent_config, "video_analyzer", None)
@@ -203,6 +215,15 @@ class VideoAnalyzer:
         self.local_files_to_cleanup = set()
         self.local_dirs_to_cleanup = set()
         self.cloud_files_to_cleanup = set()
+        self._owned_dirs: set[Path] = set()
+        self.speech_requirement = "not_requested"
+        self.request_visual = True
+        self.acoustic_requested = False
+        self.media_coverage: list[dict] = []
+        self.speech_facts: list[dict] = []
+        self.media_errors: list[dict] = []
+        self.last_result: MediaAnalysisResult | None = None
+        self.requested_scope: RequestedMediaScope | None = None
 
         sub_prompt_path = Path(__file__).parent / "video_sub_agent.md"
         self.sub_system_prompt = (
@@ -243,6 +264,28 @@ class VideoAnalyzer:
         (never less than half). A hanging primary therefore cannot double the
         wall clock of a sub-agent call before the fallback even starts.
         """
+
+        if self.is_minimax:
+            self._assert_recording_source()
+            # RobustChatModelWrapper owns canonical attempts and permanent
+            # failures. Do not surround it with the legacy circuit/retry loop.
+            from artemis.services.llm import with_fallback
+
+            async def call(use_fallback=False):
+                llm = self._get_universal_llm(use_fallback=use_fallback)
+                endpoint = get_effective_endpoint(
+                    self.ctx, "video_analyzer", is_utils=True, use_fallback=use_fallback
+                )
+                async with asyncio.timeout(min(timeout, endpoint.timeout_seconds)):
+                    return await llm.bind_tools(tools).ainvoke(messages)
+
+            if force_fallback:
+                return await call(True)
+            try:
+                get_effective_endpoint(self.ctx, "video_analyzer", is_utils=True, use_fallback=True)
+            except ValueError:
+                return await call()
+            return await with_fallback(lambda: call(), lambda: call(True))
 
         primary_key = f"video_analyzer:{self.model_name}:primary"
         attempts = [True] if force_fallback else [False, True]
@@ -334,10 +377,92 @@ class VideoAnalyzer:
         ):
             try:
                 resolved = directory.resolve()
-                if resolved not in protected and directory.exists():
+                if (
+                    resolved not in protected
+                    and resolved in self._owned_dirs
+                    and directory.exists()
+                ):
                     shutil.rmtree(directory, ignore_errors=True)
             except OSError as error:
                 logger.warning(f"Failed to delete temporary video directory {directory}: {error}")
+
+    def _scratch_dir(self) -> Path:
+        """A directory exclusively created by this run, never a returned parent."""
+        root = get_temp_dir("video_analyzer")
+        root.mkdir(parents=True, exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix="media_job_", dir=root)).resolve()
+        self._owned_dirs.add(directory)
+        self.local_dirs_to_cleanup.add(directory)
+        return directory
+
+    def _own_segment(self, path: Path) -> Path:
+        if not path.is_file():
+            return path  # Legacy mocks may only provide a path.
+        output = self._scratch_dir() / path.name
+        shutil.copyfile(path, output)
+        return output
+
+    def _cache_identity(self) -> dict:
+        if not self.is_minimax:
+            return {}
+        return {
+            "cache_identity": json.dumps(
+                [
+                    self.media_source_identity,
+                    self.recording_source,
+                    self._unknown_source_scope if not self.recording_source["confirmed"] else None,
+                    self.request_visual,
+                    self.speech_requirement,
+                    self.static_chunk_size_seconds,
+                    self.action_window_seconds,
+                    self.dense_action_fps,
+                    self.max_dense_action_frames,
+                    getattr(self.video_config, "speech_language", None),
+                ]
+            )
+        }
+
+    def _current_recording_source(self) -> dict:
+        board = get_video_blackboard(self.ctx)
+        device_id = getattr(getattr(self.ctx, "device", None), "device_id", None)
+        session = get_active_session(device_id) if device_id else None
+        video_id = (
+            str(session.video_id)
+            if session is not None
+            else (board.board_key[6:] if board.board_key.startswith("video:") else None)
+        )
+        return {
+            "video_id": video_id,
+            "generation": getattr(session, "generation", None),
+            "board_key": board.board_key,
+            "confirmed": video_id is not None,
+        }
+
+    def _begin_recording_job(self) -> None:
+        self.blackboard = get_video_blackboard(self.ctx)
+        self.recording_source = self._current_recording_source()
+        # An unidentified source may be used within this job, never across jobs.
+        self._unknown_source_scope = str(uuid4())
+
+    def _assert_recording_source(self, media=None) -> None:
+        if self._current_recording_source() != self.recording_source:
+            raise LLMInvalidOutputError("Recording source changed during video analysis")
+        video_id = getattr(media, "video_id", None)
+        generation = getattr(media, "generation", None)
+        if (
+            video_id is not None
+            and self.recording_source["confirmed"]
+            and str(video_id) != self.recording_source["video_id"]
+        ):
+            raise LLMInvalidOutputError("Exported media belongs to a different recording")
+        if (
+            generation is not None
+            and self.recording_source["generation"] is not None
+            and generation != self.recording_source["generation"]
+        ):
+            raise LLMInvalidOutputError(
+                "Exported media belongs to a different recording generation"
+            )
 
     def _action_timestamps(self, start: float, end: float) -> list[float]:
         """Return test-relative timestamps for recorded actions in an interval."""
@@ -407,6 +532,8 @@ class VideoAnalyzer:
         self, entry: dict[str, Any], *, modality: str = "video"
     ) -> dict[str, Any]:
         """Persist an observation immediately, then update this agent's ledger."""
+        if self.is_minimax:
+            entry = {**entry, "media_source": self._cache_identity()["cache_identity"]}
         stored = self.blackboard.add_observation(entry, modality=modality)
         observation_id = stored.get("observation_id")
         if not any(
@@ -438,6 +565,34 @@ class VideoAnalyzer:
         llm_config = getattr(ctx, "llm_config", None)
         utils_cfg = getattr(llm_config, "utils", None) if llm_config else None
         llm_cfg = getattr(utils_cfg, "video_analyzer", None) if utils_cfg else None
+        self.is_minimax = False
+        self.endpoint = None
+        # Typed tasks and small explicitly configured SDK contexts consume the
+        # pinned actual endpoint. Raw-name-only legacy mocks retain their path.
+        if (
+            isinstance(llm_config, LLMConfig)
+            or isinstance(getattr(ctx, "_llm_endpoint_snapshot", None), dict)
+            or isinstance(getattr(llm_cfg, "provider", None), str)
+        ):
+            self.endpoint = get_effective_endpoint(ctx, "video_analyzer", is_utils=True)
+            self.is_minimax = self.endpoint.vendor == "minimax"
+        if self.is_minimax:
+            self.model_name = self.endpoint.model_name
+            self.client = None
+            self.use_native_gemini = False
+            try:
+                fallback = get_effective_endpoint(
+                    ctx, "video_analyzer", is_utils=True, use_fallback=True
+                )
+            except ValueError:
+                fallback = None
+            self.media_source_identity = (
+                "keyframes-native-v3:"
+                + self.endpoint.identity_key()
+                + (":fallback:" + fallback.identity_key() if fallback is not None else "")
+            )
+            self._resolve_video_processing()
+            return
         self.model_name = strip_provider_prefix(
             llm_cfg.model if (llm_cfg and hasattr(llm_cfg, "model")) else "gemini-3.8-flash"
         )
@@ -474,6 +629,7 @@ class VideoAnalyzer:
         because agentic sub-agents are built to take long clips.
         """
         configured = getattr(self.video_config, "processing", "auto")
+        self.unsupported_processing = self.is_minimax and configured == "agentic"
         mode = "static"
         if self.use_native_gemini:
             mode = resolve_video_processing(configured, self.model_name)
@@ -490,10 +646,14 @@ class VideoAnalyzer:
     @property
     def blackboard_ledger(self) -> str:
         self._clean_blackboard()
-        if not self.blackboard_entries:
+        entries = self.blackboard_entries
+        if self.is_minimax:
+            source = self._cache_identity()["cache_identity"]
+            entries = [entry for entry in entries if entry.get("media_source") == source]
+        if not entries:
             return "No video segments analyzed yet."
         lines = []
-        for e in self.blackboard_entries:
+        for e in entries:
             lines.append(f"{e['start']}s - {e['end']}s: {e['summary']}")
         return " | ".join(lines)
 
@@ -538,13 +698,26 @@ class VideoAnalyzer:
     async def exec_extract_segment_metadata(
         self, start_time: float, end_time: float | None = None
     ) -> str:
+        if (
+            not isinstance(start_time, (int, float))
+            or isinstance(start_time, bool)
+            or not math.isfinite(start_time)
+            or (
+                end_time is not None
+                and (
+                    not isinstance(end_time, (int, float))
+                    or isinstance(end_time, bool)
+                    or not math.isfinite(end_time)
+                    or end_time <= start_time
+                )
+            )
+        ):
+            raise ValueError("Metadata requires finite recording-relative interval bounds")
         controller = get_controller(self.ctx)
         async with TRANSCODE_SEMAPHORE:
             result = await controller.extract_segment_metadata(start_time, end_time)
         if result.success and result.video_path:
             path = Path(result.video_path)
-            self.local_files_to_cleanup.add(path)
-            self.local_dirs_to_cleanup.add(path.parent)
             size_mb = (
                 result.file_size_mb
                 if result.file_size_mb is not None
@@ -589,7 +762,12 @@ class VideoAnalyzer:
             )
         duration = getattr(metadata_result, "duration_seconds", None)
         actual_start = getattr(metadata_result, "actual_start_relative_time", requested_start)
-        if not isinstance(duration, (int, float)) or duration <= 0:
+        if (
+            not isinstance(duration, (int, float))
+            or isinstance(duration, bool)
+            or not math.isfinite(duration)
+            or duration <= 0
+        ):
             return (
                 requested_start,
                 None,
@@ -599,11 +777,194 @@ class VideoAnalyzer:
             actual_start = requested_start
         requested_start = round(float(actual_start), 3)
         requested_end = round(requested_start + float(duration), 3)
-        if metadata_result.video_path:
-            metadata_path = Path(metadata_result.video_path)
-            self.local_files_to_cleanup.add(metadata_path)
-            self.local_dirs_to_cleanup.add(metadata_path.parent)
         return requested_start, requested_end, None
+
+    async def _bind_requested_scope(self, time_description: str) -> RequestedMediaScope:
+        """Confirm explicit seconds or recording end before the coordinator runs.
+
+        Unsupported natural language remains unresolved; sub-tool choices are
+        observations and can never define what interval the user requested.
+        """
+        scope = RequestedMediaScope(time_description=time_description)
+        seconds = r"(\d+(?:\.\d+)?)\s*(?:s|sec(?:ond)?s?)?"
+        match = re.fullmatch(
+            rf"\s*(?:from\s+)?{seconds}\s*(?:to|[-–—])\s*({seconds}|(?:the\s+)?end)\s*",
+            time_description,
+            re.IGNORECASE,
+        )
+        if match:
+            start = float(match.group(1))
+            end_text = match.group(2)
+            if math.isfinite(start):
+                if re.fullmatch(r"(?:the\s+)?end", end_text, re.IGNORECASE):
+                    _, end, error = await self._resolve_open_ended_interval(start)
+                    if error is None and end is not None and math.isfinite(end) and end > start:
+                        return RequestedMediaScope(
+                            time_description=time_description,
+                            resolution="recording_metadata",
+                            start=start,
+                            end=end,
+                        )
+                    scope.error = error or "Recording end is unavailable"
+                    return scope
+                end = float(match.group(3))
+                if math.isfinite(end) and end > start:
+                    return RequestedMediaScope(
+                        time_description=time_description,
+                        resolution="explicit",
+                        start=start,
+                        end=end,
+                    )
+        if time_description.strip().casefold() in {
+            "entire recording",
+            "full recording",
+            "the entire recording",
+            "the full recording",
+        }:
+            _, end, error = await self._resolve_open_ended_interval(0.0)
+            if error is None and end is not None and math.isfinite(end) and end > 0:
+                return RequestedMediaScope(
+                    time_description=time_description,
+                    resolution="recording_metadata",
+                    start=0.0,
+                    end=end,
+                )
+            scope.error = error or "Recording end is unavailable"
+            return scope
+        scope.error = "Requested interval cannot be confirmed; use 'from 5s to 12s', 'from 20s to the end', or 'entire recording'"
+        return scope
+
+    def _finalize_media_result(
+        self, outcome: str, *, successful: bool, failed: bool = False
+    ) -> MediaAnalysisResult:
+        """Require each requested modality to cover the independently bound scope."""
+        coverage = []
+        if self._current_recording_source() != self.recording_source:
+            successful = False
+            self.media_errors.append(
+                {
+                    "category": "recording_source_changed",
+                    "error": "Recording source changed during video analysis",
+                }
+            )
+        for record in self.media_coverage:
+            try:
+                coverage.append(MediaCoverage.model_validate(record))
+            except ValueError:
+                successful = False
+                self.media_errors.append(
+                    {
+                        "category": "invalid_coverage",
+                        "error": "Media evidence has no valid modality/interval",
+                    }
+                )
+        scope = self.requested_scope
+        interval = scope.interval if scope else None
+        requested = (["visual"] if self.request_visual else []) + (
+            ["speech"] if self.speech_requirement != "not_requested" else []
+        )
+        required = (["visual"] if self.request_visual else []) + (
+            ["speech"] if self.speech_requirement == "required" else []
+        )
+        gaps = (
+            {
+                modality: uncovered_intervals(
+                    *interval,
+                    [
+                        (record.start, record.end)
+                        for record in coverage
+                        if record.modality == modality
+                    ],
+                )
+                for modality in requested
+            }
+            if interval
+            else {}
+        )
+        if interval is None:
+            result_status = "incomplete"
+        elif successful and not any(gaps[modality] for modality in required):
+            result_status = "complete"
+        else:
+            result_status = "partial" if coverage else "failed" if failed else "incomplete"
+        for modality in required:
+            if gaps.get(modality):
+                self.media_errors.append(
+                    {
+                        "category": "missing_required_coverage",
+                        "modality": modality,
+                        "intervals": gaps[modality],
+                    }
+                )
+        visual_status = (
+            "not_requested"
+            if not self.request_visual
+            else "analyzed"
+            if interval and not gaps["visual"]
+            else "partial"
+            if any(record.modality == "visual" for record in coverage)
+            else "unavailable"
+        )
+        self.last_result = MediaAnalysisResult(
+            status=result_status,
+            outcome=outcome,
+            requested_scope=scope,
+            coverage=coverage,
+            missing_coverage=gaps,
+            modalities={
+                "visual": visual_status,
+                "speech_requirement": self.speech_requirement,
+                "speech": self.speech_facts
+                or [
+                    {
+                        "status": "not_requested"
+                        if self.speech_requirement == "not_requested"
+                        else "not_analyzed"
+                    }
+                ],
+                "acoustic": "not_analyzed",
+            },
+            errors=self.media_errors,
+            recording_source=self.recording_source,
+        )
+        return self.last_result
+
+    def _record_cached_coverage(
+        self, start: float, end: float, *, media_facts: dict | None = None
+    ) -> None:
+        """A matching visual cache row also proves speech only for a required-speech key."""
+        for modality in ["visual", *(["speech"] if self.speech_requirement == "required" else [])]:
+            self.media_coverage.append(
+                {
+                    "modality": modality,
+                    "start": start,
+                    "end": end,
+                    "strategy": "cached_verified",
+                    "evidence": "same_source_model_strategy",
+                }
+            )
+        if self.speech_requirement == "required":
+            self.speech_facts.append({"status": "cached_verified", "start": start, "end": end})
+        if media_facts:
+            for fact in media_facts.get("speech", []):
+                self.speech_facts.append(fact)
+                if self.speech_requirement == "optional" and fact.get("status") in {
+                    "transcribed",
+                    "no_speech",
+                }:
+                    for record in fact.get("coverage", []):
+                        left, right = max(start, record["start"]), min(end, record["end"])
+                        if right > left:
+                            self.media_coverage.append(
+                                {
+                                    **record,
+                                    "modality": "speech",
+                                    "start": left,
+                                    "end": right,
+                                    "strategy": "cached_verified",
+                                }
+                            )
+            self.media_errors.extend(media_facts.get("errors", []))
 
     def _plan_chunks(self, intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
         """Cuts intervals into consecutive chunks of at most ``chunk_size_seconds``."""
@@ -621,15 +982,27 @@ class VideoAnalyzer:
     async def exec_spawn_sub_agent(
         self, start_time: float, end_time: float | None, specific_query: str
     ) -> str:
-        if not isinstance(start_time, (int, float)):
-            return "Error: start_time must be a numeric recording-relative timestamp."
+        if self.is_minimax:
+            self._assert_recording_source()
+        if (
+            not isinstance(start_time, (int, float))
+            or isinstance(start_time, bool)
+            or not math.isfinite(start_time)
+        ):
+            return ToolFailure("Error: start_time must be a numeric recording-relative timestamp.")
         if not str(specific_query or "").strip():
-            return "Error: specific_query must describe the evidence to find."
+            return ToolFailure("Error: specific_query must describe the evidence to find.")
+        if end_time is not None and (
+            not isinstance(end_time, (int, float))
+            or isinstance(end_time, bool)
+            or not math.isfinite(end_time)
+        ):
+            return ToolFailure("Error: end_time must be a finite recording-relative timestamp.")
 
         requested_start = round(float(start_time), 3)
         requested_end = round(float(end_time), 3) if isinstance(end_time, (int, float)) else None
         if requested_end is not None and requested_end <= requested_start:
-            return "Error: end_time must be greater than start_time."
+            return ToolFailure("Error: end_time must be greater than start_time.")
 
         # A closed interval does not need a throw-away full-range trim merely
         # to discover its duration. Open-ended requests are resolved once to a
@@ -639,12 +1012,23 @@ class VideoAnalyzer:
                 requested_start
             )
             if error is not None:
-                return error
+                return ToolFailure(error)
 
         cached_results = self.blackboard.format_cached_segments(
-            requested_start, requested_end, specific_query
+            requested_start, requested_end, specific_query, **self._cache_identity()
         )
-        missing = self.blackboard.missing_intervals(requested_start, requested_end, specific_query)
+        missing = self.blackboard.missing_intervals(
+            requested_start, requested_end, specific_query, **self._cache_identity()
+        )
+        if self.is_minimax:
+            for cached in self.blackboard.successful_segments(
+                requested_start, requested_end, specific_query, **self._cache_identity()
+            ):
+                self._record_cached_coverage(
+                    max(requested_start, cached["start"]),
+                    min(requested_end, cached["end"]),
+                    media_facts=cached.get("media_facts"),
+                )
         if not missing:
             logger.info(
                 "Reusing complete video-blackboard coverage for "
@@ -667,6 +1051,18 @@ class VideoAnalyzer:
                 return [value], []
             except Exception as error:
                 failure = classify_video_failure(error)
+                if self.is_minimax:
+                    self.media_errors.append(
+                        {
+                            "start": cs,
+                            "end": ce,
+                            "category": failure.category.value,
+                            "error": str(error),
+                        }
+                    )
+                    # Canonical text/native recovery is already exhausted. A
+                    # second string-based split/retry would reset the budget.
+                    return [], [f"{cs:.1f}s-{ce:.1f}s [{failure.category.value}]: {error}"]
                 duration = ce - cs
                 fits_ceiling = duration <= self.chunk_size_seconds + 1e-3
                 degraded = isinstance(error, AgenticVideoDegraded)
@@ -731,10 +1127,12 @@ class VideoAnalyzer:
 
         valid_results = cached_results + fresh_results
         if not valid_results:
-            return "All sub-agent chunks failed. Failed intervals: " + "; ".join(failed_chunks)
+            return ToolFailure(
+                "All sub-agent chunks failed. Failed intervals: " + "; ".join(failed_chunks)
+            )
         combined = " ".join(valid_results)
         if failed_chunks:
-            return (
+            return ToolFailure(
                 "PARTIAL VIDEO ANALYSIS (successful chunks were persisted). "
                 f"Failed intervals: {'; '.join(failed_chunks)}. Results: {combined}"
             )
@@ -825,17 +1223,33 @@ class VideoAnalyzer:
         )
 
     @trace(type="agent", name="video_analyzer")
-    async def run(self, time_description: str, purpose: str) -> tuple[str, str]:
+    async def run(
+        self,
+        time_description: str,
+        purpose: str,
+        *,
+        visual: bool = True,
+        speech: str = "not_requested",
+        acoustic: bool = False,
+    ) -> tuple[str, str]:
         ctx = self.ctx
         async with MAIN_AGENT_SEMAPHORE:
             logger.info(
                 f"Video analyzer invoked with time: '{time_description}', purpose: '{purpose}'"
             )
 
+            self._begin_recording_job()
             self._refresh_blackboard()
 
             # Initialize engine & cleanup tracking
             self._init_engine()
+            self.request_visual = visual
+            self.speech_requirement = "required" if not visual else speech
+            self.acoustic_requested = acoustic
+            self.media_coverage = []
+            self.speech_facts = []
+            self.media_errors = []
+            self.requested_scope = RequestedMediaScope(time_description=time_description)
 
             # Resolve model name and temperature from config
             llm_config = getattr(ctx, "llm_config", None)
@@ -843,7 +1257,10 @@ class VideoAnalyzer:
             llm_cfg = getattr(utils_cfg, "video_analyzer", None) if utils_cfg else None
             temperature = 0.2
             thinking_level = None
-            if llm_cfg:
+            if self.is_minimax:
+                temperature = self.endpoint.temperature
+                thinking_level = self.endpoint.thinking_level
+            elif llm_cfg:
                 self.model_name = strip_provider_prefix(llm_cfg.model)
                 if getattr(llm_cfg, "temperature", None) is not None:
                     temperature = llm_cfg.temperature
@@ -856,6 +1273,7 @@ class VideoAnalyzer:
             self.local_files_to_cleanup = set()
             self.local_dirs_to_cleanup = set()
             self.cloud_files_to_cleanup = set()
+            self._owned_dirs = set()
 
         sub_prompt_path = Path(__file__).parent / "video_sub_agent.md"
         self.sub_system_prompt = sub_prompt_path.read_text(encoding="utf-8")
@@ -875,6 +1293,55 @@ class VideoAnalyzer:
 
         if not self.use_native_gemini:
             try:
+                if self.is_minimax:
+                    if self.unsupported_processing or acoustic:
+                        self.last_result = MediaAnalysisResult(
+                            status="incomplete",
+                            outcome="Requested media mode is unsupported by MiniMax",
+                            requested_scope=self.requested_scope,
+                            recording_source=self.recording_source,
+                            modalities={
+                                "visual": visual,
+                                "speech": self.speech_requirement,
+                                "acoustic": "unsupported" if acoustic else "not_requested",
+                            },
+                            errors=[
+                                {
+                                    "category": "unsupported",
+                                    "detail": "Gemini agentic processing or non-speech acoustic analysis is unsupported",
+                                }
+                            ],
+                        )
+                        return self.last_result.legacy()
+                    if speech not in {"not_requested", "optional", "required"}:
+                        raise ValueError("speech must be not_requested, optional or required")
+                    with logical_call_scope(
+                        max_attempts=getattr(self.video_config, "max_job_attempts", 64),
+                        timeout_seconds=getattr(self.video_config, "job_timeout_seconds", 900.0),
+                    ):
+                        async with asyncio.timeout(
+                            getattr(self.video_config, "job_timeout_seconds", 900.0)
+                        ):
+                            try:
+                                self.requested_scope = await self._bind_requested_scope(
+                                    time_description
+                                )
+                            except (OSError, RuntimeError, ValueError) as error:
+                                self.requested_scope.error = f"Requested interval could not be resolved ({type(error).__name__})"
+                            if self.requested_scope.interval is None:
+                                self.media_errors.append(
+                                    {
+                                        "category": "requested_scope_unresolved",
+                                        "error": self.requested_scope.error,
+                                    }
+                                )
+                                return self._finalize_media_result(
+                                    "The requested recording interval could not be confirmed",
+                                    successful=False,
+                                ).legacy()
+                            return await self._run_universal(
+                                time_description, purpose, system_prompt
+                            )
                 return await self._run_universal(
                     time_description=time_description,
                     purpose=purpose,

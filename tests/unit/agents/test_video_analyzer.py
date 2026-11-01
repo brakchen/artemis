@@ -264,7 +264,7 @@ async def test_video_analyzer_preserves_thought_signature():
 
 
 @pytest.mark.asyncio
-async def test_video_analyzer_sub_agent_confidence_validation():
+async def test_video_analyzer_sub_agent_confidence_validation(tmp_path):
     # Mock context
     mock_ctx = MagicMock(spec=ArtemisContext)
     mock_ctx.data_engine = None
@@ -273,12 +273,16 @@ async def test_video_analyzer_sub_agent_confidence_validation():
     mock_ctx.llm_config.utils.video_analyzer.model = "gemini-3.7-flash"
     mock_ctx.agent_config = SimpleNamespace(video_analyzer=SimpleNamespace(processing="static"))
 
+    borrowed_video = tmp_path / "video.mp4"
+    video_bytes = b"synthetic video fixture"
+    borrowed_video.write_bytes(video_bytes)
+
     # Mock MobileDeviceController
     mock_controller = MagicMock()
     mock_controller.extract_segment_metadata = AsyncMock(
         return_value=MagicMock(
             success=True,
-            video_path="/tmp/video.mp4",
+            video_path=str(borrowed_video),
             actual_start_relative_time=10.0,
         )
     )
@@ -418,6 +422,11 @@ async def test_video_analyzer_sub_agent_confidence_validation():
             return mock_sub_prompt
         return ""
 
+    async def mock_compress_video(path, **kwargs):
+        assert path != borrowed_video
+        assert path.read_bytes() == video_bytes
+        return path
+
     with (
         patch(
             "artemis.agents.video_analyzer.video_analyzer.genai.Client",
@@ -427,26 +436,14 @@ async def test_video_analyzer_sub_agent_confidence_validation():
             "artemis.agents.video_analyzer.video_analyzer.get_controller",
             return_value=mock_controller,
         ),
-        patch(
-            "pathlib.Path.exists",
-            autospec=True,
-            side_effect=lambda self: not str(self).endswith(".jpg"),
-        ),
-        patch(
-            "pathlib.Path.stat",
-            return_value=os.stat_result((0o100644, 0, 0, 0, 0, 0, 1024 * 1024, 0, 0, 0)),
-        ),
         patch("pathlib.Path.read_text", mock_read_text),
-        patch("pathlib.Path.mkdir"),
-        patch("pathlib.Path.touch"),
-        patch("pathlib.Path.is_dir", return_value=True),
         patch(
             "artemis.agents.video_analyzer.video_analyzer.cleanup_abandoned_gemini_files",
             AsyncMock(),
         ),
         patch(
             "artemis.agents.video_analyzer.video_analyzer.compress_video_for_api",
-            AsyncMock(return_value=Path("/tmp/video.mp4")),
+            AsyncMock(side_effect=mock_compress_video),
         ),
         patch(
             "asyncio.create_subprocess_exec",
@@ -471,6 +468,8 @@ async def test_video_analyzer_sub_agent_confidence_validation():
         model_turns = [c for c in sub_turn_2_contents if c.role == "model"]
         assert len(model_turns) == 1
         assert model_turns[0].parts[0].thought_signature == sub_dummy_signature
+
+    assert borrowed_video.read_bytes() == video_bytes
 
 
 # ------------------------------------------------- static sub-agent loop

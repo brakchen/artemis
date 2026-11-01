@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from functools import partial
 import hashlib
 import json
 from pathlib import Path
@@ -234,8 +235,8 @@ async def perception_node(state: State, ctx: ArtemisContext) -> dict:
     if ctx.data_engine:
         image_name = hashlib.sha256(latest_screenshot_bytes).hexdigest()
         screenshot_path = str(ctx.data_engine.get_image_path(image_name))
-        asyncio.create_task(
-            asyncio.to_thread(
+        ctx.data_engine._run_in_background(
+            partial(
                 ctx.data_engine.get_or_create_image,
                 latest_screenshot_bytes,
                 ui_tree=xml_hierarchy,

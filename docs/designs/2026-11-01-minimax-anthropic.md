@@ -244,6 +244,8 @@ MiniMax 首版 processing=auto 选择关键帧/static；显式 static 支持，�
 
 视频内部结果使用 complete/partial/incomplete/failed，按已分析时段、必需模态和有效最终回答决定状态。循环耗尽不是 complete；子工具错误必须可识别，不能仅返回字符串后报成功。适配现有 `(outcome,status)` 时，只有 complete 可标 success，其余保留明确的未完成/错误事实并同步调用方，不能把 partial 映射为完整成功。
 
+请求范围在协调模型运行前固定：明确秒数如 `from 5s to 12s` 直接绑定；`from 20s to the end` 或 `entire recording` 先由录屏元数据确认结束。无法确认的描述返回 incomplete，不用模型选择的少量子片段反向定义请求。visual 与必需 speech 分别计算成功时段的联合覆盖，ASR 证据不计作画面证据；结果公开 requested_scope 和逐模态 missing_coverage，重叠时段不会重复抵消缺口。
+
 音轨分片同时满足官方 500 秒/50 MB 限制，采用 `response_format=verbose_json`、`stream=false` 获取 segments；普通 json 即使传 timestamp_level 也没有对齐时间。记录片段起点，把 ASR 相对时间和视频时间映射到整段录屏，处理边界重叠；无音轨与转写失败分别记录。[S3]
 
 官方 MiniMax 预设显式关联 Messages 基址与原生 API 基址：Files/ASR 发往 `https://api.minimax.cn/v1/...`，不能把原生路径接在 `/anthropic` 下。自定义网关未配置/核实对应媒体端点时禁用这项能力并报错，不能将其 Key 自动发往另一个官方主机。媒体鉴权沿用该任务选定的受控凭据，不读取全局其他 Key。
@@ -525,7 +527,22 @@ Google 路径核查除六模块外，还包括 `artemis/constants.py`、`artemis
 
 ## 14. Changelog
 
-本节记录技术方案的变更，不代表对应功能已经实现。后续修订本文时须同步更新本节，按版本倒序记录日期、变更内容及验证范围。
+本节记录技术方案的变更与逐阶段实施证据；标明“实施中”的条目仍未完成验收。后续修订本文时须同步更新本节，按版本倒序记录日期、变更内容及验证范围。
+
+### 实施进度：C 视频、语音及回归修复 — 2026-11-01～02
+
+- 实际 universal/Blackboard 入口按任务固定的 MiniMax utility 端点分流，优先于残留 Google Key、raw Gemini 名与共享 Google client。支持 auto/static 关键帧和有界内联视频；显式不支持的 processing 报错，Files 上传未启用。
+- 显式记录请求范围、视觉及语音需求、逐模态联合覆盖和缺口。完整、未完成、无音轨、无语音及分析失败分别处理；ASR-only 不计为视觉完成。Pro/pure/Flash、MCP 与诊断消费者正确消费未完成结果，保留原两参数调用。
+- native ASR 使用对应官方原生端点、同任务凭据、multipart 大小/时长校验与带时间分段，叠加切片偏移并去除重叠重复；声学事件仍明确不支持。ASR 用量独立记录；整个作业共享有界调用预算，永久业务错误停止重试。
+- 厂商专用小子类在锁定 SDK 完整 payload 上校验媒体限额，包含历史内容；schema 字面量不误判为媒体。CPU 顺序解码保留真实 VFR PTS，证据先持久复制；反复取消先等待解码/ffmpeg 释放再清理本任务媒体，借入文件、旧录屏及兄弟文件保留。
+- 独立审查关闭请求范围不足、ASR-only 误报视觉、跨录屏缓存、重复取消及可选 ASR 失败事实丢失：UUID/generation 绑定来源，发送前再次核对；SQLite additive media_facts_json 保留程序确认的模态及错误事实，旧历史保留。媒体作者453例、root68例及独立实际入口10/质量14项通过。
+- 完整回归另暴露 MCP 冷启动、Windows 文件队列和 Python 3.12 两项问题，按独立片段修复并复核。MCP 只延后 metadata→execution 重依赖，公开SDK包入口保持原内容；执行采用标准 root-before-leaf 导入，KEEP_DEVICE_AWAKE=false 时跳过不必要线程，已使用 runtime 的清理保留。原6秒/4秒/45秒断言均未延长，最终规格13例和质量14例通过。历史冷启动超时仍保留，未声称所有耗时波动已根除。
+- 文件队列在未知/暂不可读票据下保持FIFO及容量约束，failed claim 仅清理本请求票；预留 token 使用字面量匹配，拒绝路径分隔符，避免 glob 删除其他任务。相关193例、独立93例及5个实际 Windows IO 场景通过；自然压力202次时既有 replace 失败的非PASS结果保留，未提高重试次数。
+- Python 3.12 缓存合并以进入时的报告对象身份判断实际完成顺序，避免粗粒度时钟误合并顺序 force；旧视频测试改用真实借入临时文件，保留全部 confidence/history/thought_signature 断言。相关155例、312/314关键各11例、规格20例及质量312/314各18例通过。
+- 媒体、MCP、先前队列与Python3.12修复各自通过独立规格/质量复核。root full8 为3111 passed/8 skipped/2 failed；新反例复现同time_ns随机token错序和未登记截图保存，后继五路径修复相关333例及314关键39例通过。
+- 该后继 v1 独立规格复核又发现新 admission FileLock 无界等待绕过 acquire 的 nonblocking/timeout/cancel（真实外部holder复现），因此不通过、不进入质量/完整测试；v2在现owner透传同一总预算和取消条件，获得锁/发布票/获取owner前复核，轮询按剩余预算截断；作者相关125例和314关键46例通过，旧反例/失败证据保留；独立规格v2的7个真实持锁场景、3个正常对照及19代表用例通过，P1关闭；质量复核另发现native释放报错时已发布票残留及原取消异常被覆盖，v3改为公共acquire/release和异常优先的清理，作者相关131例及314关键52例通过；独立规格delta重审12例、7个持锁场景与原质量反例通过，独立质量重审10例及原反例通过，45源哈希与root格式/范围预检通过；root Python3.12完整单测full9最终3161 passed、8 skipped、88既有warnings，388.95秒；suite后45源物理哈希保持、Ruff/format/diff及独立规格/质量复核通过。不是放宽超时或以隔离通过代替完整验收。
+- D1辅助模型与任务快照、D2配置入口、D3诊断/容器及E整体CI仍待完成；无真实Key、模型请求、SDK.initialize或设备操作，不以离线通过宣称实际模型精度/账号权限已验证。
+
 
 ### 实施进度：B2 动作闭环 — 2026-11-01
 

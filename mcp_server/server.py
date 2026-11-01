@@ -14,6 +14,8 @@
 
 """Universal Model Context Protocol (MCP) Server for ARTEMIS."""
 
+from __future__ import annotations
+
 import datetime
 import os
 import sys
@@ -81,10 +83,10 @@ except OSError:
 
 # 1. Import shared FastMCP instance
 from mcp_server.base import mcp
+from mcp_server.utils import env_utils
 
 # 2. Import tools to register them
 import mcp_server.tools  # noqa: F401
-from artemis.runtime import shutdown_awake_service, start_awake_service
 
 
 import threading
@@ -92,14 +94,36 @@ import threading
 
 def main(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8001):
     """Main entrypoint to run the Artemis Mobile Agent MCP server."""
-    threading.Thread(target=start_awake_service, daemon=True, name="artemis-awake-init").start()
+    # Match runtime.awake_service's opt-out without importing the SDK just to
+    # discover that awake startup is disabled.
+    awake_enabled = os.environ.get("ARTEMIS_KEEP_DEVICE_AWAKE", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+    def start_awake() -> None:
+        env_utils.import_artemis_package()
+        from artemis.runtime import start_awake_service
+
+        start_awake_service()
+
+    if awake_enabled:
+        threading.Thread(target=start_awake, daemon=True, name="artemis-awake-init").start()
     try:
         if transport.lower() == "sse":
             mcp.run(transport="sse", host=host, port=port)
         else:
             mcp.run(transport="stdio")
     finally:
-        shutdown_awake_service()
+        # Tools may have loaded runtime even when awake startup was disabled.
+        # Preserve their cleanup without loading an otherwise unused SDK.
+        if awake_enabled or "artemis.runtime" in sys.modules:
+            env_utils.import_artemis_package()
+            from artemis.runtime import shutdown_awake_service
+
+            shutdown_awake_service()
 
 
 if __name__ == "__main__":

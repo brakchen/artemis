@@ -20,18 +20,7 @@ import base64
 import os
 
 from mcp_server.base import mcp
-from artemis.mcp.adb_server import _get_controller
 from mcp_server.utils import env_utils
-from artemis.utils.ocr_xml_fusion import (
-    fuse_ocr_with_xml,
-    pure_xml_hierarchy,
-    _detect_status_bar_height,
-    _crop_image_remove_status_bar,
-    _map_coordinates_back,
-)
-from artemis.utils.ocr_api import is_ocr_configured, perform_ocr, ocr_outcome, ocr_status_text
-from artemis.utils.vision import SnapshotRef, ImageTransform, create_snapshot, uses_minimax
-from artemis.utils.visualization import format_minimal_list_with_elements
 
 
 @mcp.tool()
@@ -53,6 +42,20 @@ async def mobile_get_device_state(view_type: str, device_serial: str | None = No
           several devices attached, confirm the target with the user
           (`adb devices -l` lists serials).
     """
+
+    env_utils.import_artemis_package()
+    from artemis.mcp.adb_server import _get_controller
+    from artemis.utils.ocr_xml_fusion import (
+        fuse_ocr_with_xml,
+        pure_xml_hierarchy,
+        _detect_status_bar_height,
+        _crop_image_remove_status_bar,
+        _map_coordinates_back,
+    )
+    from artemis.utils.ocr_api import is_ocr_configured, perform_ocr, ocr_outcome, ocr_status_text
+    from artemis.utils.vision import SnapshotRef, ImageTransform, create_snapshot, uses_minimax
+    from artemis.utils.visualization import format_minimal_list_with_elements
+
     try:
         controller = _get_controller(device_serial=device_serial)
         device_width = controller.ctx.device.device_width

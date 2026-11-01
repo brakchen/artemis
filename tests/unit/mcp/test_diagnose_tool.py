@@ -24,6 +24,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from artemis.core.diagnostics import readiness_engine
+from artemis.core.diagnostics import readiness as readiness_module
+import artemis.runtime.helper_manager as helper_module
+import artemis.utils.credentials_validator as credentials_module
 from artemis.core.diagnostics.emulator_manager import EmulatorLaunchStage
 from artemis.core.diagnostics.probes.host_probe import IntegrationHostProbe
 from artemis.core.diagnostics.schema import (
@@ -34,7 +38,7 @@ from artemis.core.diagnostics.schema import (
     ProbeStatus,
     SystemReadinessReport,
 )
-from artemis.runtime import trace_store
+from artemis.runtime import DeviceExecutionLock, trace_store
 from artemis.runtime.device_lock import DeviceLockOwner
 from mcp_server.tools import diagnose
 from mcp_server.tools.diagnose import mobile_diagnose
@@ -291,12 +295,12 @@ def _run(
             side_effect=lambda serial: dict(helper_status or _helper_healthy(serial))
         )
         fake_helper.provision = helper_provision or MagicMock(return_value=_provision_ok())
-        stack.enter_context(patch.object(diagnose, "helper_manager", fake_helper))
+        stack.enter_context(patch.object(helper_module, "helper_manager", fake_helper))
         stack.enter_context(patch.object(diagnose, "_hierarchy_backend", lambda: backend))
         kwargs["_fake_helper"] = fake_helper
         stack.enter_context(
             patch.object(
-                diagnose.readiness_engine,
+                readiness_engine,
                 "run_all",
                 run_all or AsyncMock(return_value=report or _report(probes)),
             )
@@ -306,42 +310,42 @@ def _run(
         )
         stack.enter_context(
             patch.object(
-                diagnose.readiness_engine,
+                readiness_engine,
                 "get_emulator_status",
                 MagicMock(return_value=emulator_status or dict(_IDLE_EMULATOR)),
             )
         )
         stack.enter_context(
             patch.object(
-                diagnose.readiness_engine,
+                readiness_engine,
                 "launch_emulator",
                 launch or AsyncMock(return_value=_emulator_state(EmulatorLaunchStage.STARTING)),
             )
         )
         stack.enter_context(
             patch.object(
-                diagnose.DeviceExecutionLock,
+                DeviceExecutionLock,
                 "get_active_owners",
                 MagicMock(return_value=active_owners or {}),
             )
         )
         stack.enter_context(
             patch.object(
-                diagnose.DeviceExecutionLock,
+                DeviceExecutionLock,
                 "get_queued_tasks",
                 MagicMock(return_value=queued or []),
             )
         )
         stack.enter_context(
             patch.object(
-                diagnose.DeviceExecutionLock,
+                DeviceExecutionLock,
                 "cleanup_stale_locks",
                 cleanup if isinstance(cleanup, MagicMock) else MagicMock(return_value=cleanup),
             )
         )
         stack.enter_context(
             patch.object(
-                diagnose,
+                credentials_module,
                 "validate_api_key",
                 validate or AsyncMock(return_value=(True, "verified")),
             )
@@ -979,12 +983,12 @@ def test_attempt_fix_heals_corrupted_keys_then_rechecks(temp_trace_env):
     heal = AsyncMock(return_value={"success": True, "message": "keys regenerated"})
     restart = AsyncMock()
     with (
-        patch.object(diagnose.readiness_engine, "run_all", run_all),
-        patch.object(diagnose.readiness_engine, "heal_adb_keys", heal),
-        patch.object(diagnose.readiness_engine, "restart_adb_server", restart),
-        patch.object(diagnose.DeviceExecutionLock, "cleanup_stale_locks", return_value=0),
-        patch.object(diagnose.DeviceExecutionLock, "get_active_owners", return_value={}),
-        patch.object(diagnose.DeviceExecutionLock, "get_queued_tasks", return_value=[]),
+        patch.object(readiness_engine, "run_all", run_all),
+        patch.object(readiness_engine, "heal_adb_keys", heal),
+        patch.object(readiness_engine, "restart_adb_server", restart),
+        patch.object(DeviceExecutionLock, "cleanup_stale_locks", return_value=0),
+        patch.object(DeviceExecutionLock, "get_active_owners", return_value={}),
+        patch.object(DeviceExecutionLock, "get_queued_tasks", return_value=[]),
         patch.object(IntegrationHostProbe, "probe", AsyncMock(return_value=_host())),
         patch.object(
             diagnose,
@@ -1008,7 +1012,7 @@ def test_attempt_fix_restarts_adb_only_without_ready_device_or_active_task(temp_
     no_device = _no_device_probes([])
     restart = AsyncMock(return_value={"success": False, "message": "adb start-server failed"})
 
-    with patch.object(diagnose.readiness_engine, "restart_adb_server", restart):
+    with patch.object(readiness_engine, "restart_adb_server", restart):
         result = _run(no_device, attempt_fix=True)
     restart.assert_awaited_once()
     assert result["fixes_applied"][0]["fix"] == "restart_adb_server"
@@ -1016,14 +1020,14 @@ def test_attempt_fix_restarts_adb_only_without_ready_device_or_active_task(temp_
     assert any("did not help" in s for s in result["next_steps"])
 
     restart.reset_mock()
-    with patch.object(diagnose.readiness_engine, "restart_adb_server", restart):
+    with patch.object(readiness_engine, "restart_adb_server", restart):
         result = _run(no_device, active_owners={"d": _owner("d")}, attempt_fix=True)
     restart.assert_not_awaited()
     assert result["fixes_applied"][0]["skipped"] is True
 
     # A ready device means there is nothing to restart, even with attempt_fix.
     restart.reset_mock()
-    with patch.object(diagnose.readiness_engine, "restart_adb_server", restart):
+    with patch.object(readiness_engine, "restart_adb_server", restart):
         result = _run(_healthy_probes(), attempt_fix=True)
     restart.assert_not_awaited()
     assert result["fixes_applied"] == []
@@ -1124,10 +1128,10 @@ def test_hung_probe_yields_blocked_verdict_instead_of_hanging(temp_trace_env, mo
         await asyncio.sleep(10)
 
     monkeypatch.setattr(diagnose, "DIAGNOSIS_TIMEOUT_SECONDS", 0.05)
-    monkeypatch.setattr(diagnose, "collect_readiness", _never)
+    monkeypatch.setattr(readiness_module, "collect_readiness", _never)
     with (
-        patch.object(diagnose.DeviceExecutionLock, "get_active_owners", return_value={}),
-        patch.object(diagnose.DeviceExecutionLock, "get_queued_tasks", return_value=[]),
+        patch.object(DeviceExecutionLock, "get_active_owners", return_value={}),
+        patch.object(DeviceExecutionLock, "get_queued_tasks", return_value=[]),
     ):
         result = asyncio.run(mobile_diagnose())
 

@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import hashlib
 import json
 import logging
 from pathlib import Path
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import HumanMessage
@@ -190,7 +193,8 @@ async def test_record_step_background_image_and_step_persistence(
 
 
 @pytest.mark.asyncio
-async def test_perception_node_async_offloading(mock_artemis_ctx, tmp_path):
+@pytest.mark.parametrize("ocr_enabled", [False, True])
+async def test_perception_node_async_offloading(mock_artemis_ctx, tmp_path, ocr_enabled):
     """Verify perception_node offloads injected_instruction reading/unlinking and get_or_create_image to background."""
     from artemis.graph.perception import perception_node
 
@@ -212,12 +216,31 @@ async def test_perception_node_async_offloading(mock_artemis_ctx, tmp_path):
     mock_screen_data.elements = [{"resource-id": "app_bar", "bounds": "[0,0][1080,200]"}]
     mock_screen_data.width = 1080
     mock_screen_data.height = 2400
+    storage_started = asyncio.Event()
+    finish_storage = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_save = engine.get_or_create_image
+    drain_started = asyncio.Event()
+    drain_task = None
+
+    def blocked_save(*args, **kwargs):
+        loop.call_soon_threadsafe(storage_started.set)
+        assert finish_storage.wait(timeout=2.0)
+        return original_save(*args, **kwargs)
+
+    async def drain_owner():
+        drain_started.set()
+        await engine.shutdown()
 
     with (
         patch("artemis.graph.perception.UnifiedMobileController") as mock_controller_cls,
         patch("artemis.graph.perception.perform_ocr", new_callable=AsyncMock) as mock_ocr,
         patch("artemis.graph.perception._detect_status_bar_height", return_value=0),
         patch("artemis.graph.perception._should_skip_settling", return_value=True),
+        patch("artemis.graph.perception.automatic_ocr_enabled", return_value=ocr_enabled),
+        patch("artemis.graph.perception.is_ocr_configured", return_value=ocr_enabled),
+        patch("artemis.graph.perception.ocr_outcome", return_value={"status": "complete"}),
+        patch.object(engine, "get_or_create_image", side_effect=blocked_save),
     ):
         mock_controller = mock_controller_cls.return_value
         mock_controller.get_screen_data = AsyncMock(return_value=mock_screen_data)
@@ -230,7 +253,25 @@ async def test_perception_node_async_offloading(mock_artemis_ctx, tmp_path):
             structured_decisions=None,
         )
 
-        update = await perception_node(state, mock_artemis_ctx)
+        try:
+            update = await asyncio.wait_for(perception_node(state, mock_artemis_ctx), timeout=1.0)
+            await asyncio.wait_for(storage_started.wait(), timeout=1.0)
+            # The node returned while storage is still blocked, and its owner can drain it.
+            pending = set(engine._pending_tasks)
+            assert pending
+            assert engine.has_pending_operations()
+            assert all(not task.done() for task in pending)
+            assert engine.storage.get_image(expected_hash) is None
+            assert not engine.get_image_path(expected_hash).exists()
+            drain_task = asyncio.create_task(drain_owner())
+            await asyncio.wait_for(drain_started.wait(), timeout=1.0)
+            assert not drain_task.done()
+        finally:
+            finish_storage.set()
+            if drain_task is not None:
+                await drain_task
+            else:
+                await engine.shutdown()
 
     # Verify perception_node returned expected update immediately
     assert update["injected_instruction"] == "Avoid clicking Ads"
@@ -240,16 +281,72 @@ async def test_perception_node_async_offloading(mock_artemis_ctx, tmp_path):
     # Verify injected_instruction.json was unlinked
     assert not instruction_file.exists()
 
-    # Await background tasks triggered by perception_node
-    await asyncio.sleep(0.1)
-    if engine._pending_tasks:
-        await asyncio.gather(*engine._pending_tasks)
-
     # Verify image record and file were created in background by perception_node
     img_record = engine.storage.get_image(expected_hash)
     assert img_record is not None
     assert img_record.image_name == expected_hash
     assert engine.get_image_path(expected_hash).exists()
+    assert engine.get_image_path(expected_hash).read_bytes() == fake_screenshot_bytes
+    assert img_record.ui_tree == mock_screen_data.elements
+    assert img_record.ocr_result == (mock_ocr.return_value if ocr_enabled else None)
+    assert update["operator_raw_data"]["screenshot_b64"] == fake_screenshot_b64
+    assert update["operator_raw_data"]["xml_hierarchy"] == mock_screen_data.elements
+    assert update["operator_raw_data"]["height"] == 2400
+    assert update["operator_raw_data"]["snapshot"]["image_hash"] == expected_hash
+    assert update["operator_raw_data"]["snapshot"] == mock_artemis_ctx._current_snapshot.model_dump(
+        mode="json"
+    )
+    assert all(task.done() for task in pending)
+    assert not engine._pending_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_perception_image_task_uses_owner_error_and_cancellation_handling(
+    mock_artemis_ctx, cancelled
+):
+    from artemis.graph.perception import perception_node
+
+    with patch.object(DataEngine, "_ipc_port_candidates", return_value=[]):
+        engine = DataEngine(mock_artemis_ctx)
+    engine.start_session("Perception storage lifecycle")
+    mock_artemis_ctx.data_engine = engine
+    screenshot = b"perception storage lifecycle"
+    screen = MagicMock(
+        base64=base64.b64encode(screenshot).decode("ascii"), elements=[], width=10, height=20
+    )
+    failure = OSError("image persistence refused")
+    with (
+        patch("artemis.graph.perception.UnifiedMobileController") as controller,
+        patch("artemis.graph.perception._check_injected_instruction_file", return_value=None),
+        patch("artemis.graph.perception._should_skip_settling", return_value=True),
+        patch("artemis.graph.perception.automatic_ocr_enabled", return_value=False),
+        patch.object(engine, "get_or_create_image", side_effect=failure) as save,
+        patch("artemis.data_engine.engine.logger.error") as log_error,
+    ):
+        controller.return_value.get_screen_data = AsyncMock(return_value=screen)
+        update = await perception_node(State(initial_goal="test goal"), mock_artemis_ctx)
+        tasks = set(engine._pending_tasks)
+        assert len(tasks) == 1
+        task = next(iter(tasks))
+        if cancelled:
+            task.cancel()
+        await engine.shutdown()
+        assert task.done()
+        assert not engine._pending_tasks
+        assert engine.storage.get_image(hashlib.sha256(screenshot).hexdigest()) is None
+        assert update["latest_screenshot"] == str(
+            engine.get_image_path(hashlib.sha256(screenshot).hexdigest())
+        )
+        if cancelled:
+            assert task.cancelled()
+            save.assert_not_called()
+            log_error.assert_not_called()
+        else:
+            assert task.exception() is failure
+            save.assert_called_once()
+            log_error.assert_called_once()
+            assert log_error.call_args.kwargs["exc_info"] is failure
 
 
 @pytest.mark.asyncio

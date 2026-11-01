@@ -56,6 +56,11 @@ _CODES = {
     2066: (FailureCategory.PROVIDER_UNAVAILABLE, True),
 }
 _TYPES = {
+    "bad_request_error": FailureCategory.BAD_REQUEST,
+    "authorized_error": FailureCategory.AUTHENTICATION,
+    "insufficient_balance_error": FailureCategory.BALANCE,
+    "unprocessable_entity_error": FailureCategory.CONTENT_REFUSAL,
+    "server_error": FailureCategory.PROVIDER_UNAVAILABLE,
     "authentication_error": FailureCategory.AUTHENTICATION,
     "permission_error": FailureCategory.PERMISSION,
     "invalid_request_error": FailureCategory.BAD_REQUEST,
@@ -95,28 +100,48 @@ def normalize_minimax_error(
         numeric = int(code) if code is not None else None
     except (ValueError, TypeError):
         numeric = None
+    status_categories = {
+        401: FailureCategory.AUTHENTICATION,
+        403: FailureCategory.PERMISSION,
+        402: FailureCategory.BALANCE,
+        422: FailureCategory.CONTENT_REFUSAL,
+        429: FailureCategory.RATE_LIMIT,
+    }
+    http_category = status_categories.get(
+        status_code,
+        FailureCategory.PROVIDER_UNAVAILABLE
+        if status_code is not None and status_code >= 500
+        else FailureCategory.BAD_REQUEST,
+    )
     if numeric not in (None, 0):
-        category, retryable = _CODES.get(numeric, (FailureCategory.UNKNOWN, True))
+        if numeric in _CODES:
+            category, retryable = _CODES[numeric]
+        else:
+            category = _TYPES.get(
+                details.get("type"),
+                http_category
+                if status_code is not None and status_code >= 400
+                else FailureCategory.UNKNOWN,
+            )
+            retryable = category in {
+                FailureCategory.RATE_LIMIT,
+                FailureCategory.PROVIDER_UNAVAILABLE,
+                FailureCategory.UNKNOWN,
+            }
     elif data.get("type") == "error" or data.get("error"):
-        category = _TYPES.get(details.get("type"), FailureCategory.UNKNOWN)
+        category = _TYPES.get(
+            details.get("type"),
+            http_category
+            if status_code is not None and status_code >= 400
+            else FailureCategory.UNKNOWN,
+        )
         retryable = category in {
             FailureCategory.RATE_LIMIT,
             FailureCategory.PROVIDER_UNAVAILABLE,
             FailureCategory.UNKNOWN,
         }
     elif status_code is not None and status_code >= 400:
-        status_categories = {
-            401: FailureCategory.AUTHENTICATION,
-            403: FailureCategory.PERMISSION,
-            402: FailureCategory.BALANCE,
-            429: FailureCategory.RATE_LIMIT,
-        }
-        category = status_categories.get(
-            status_code,
-            FailureCategory.PROVIDER_UNAVAILABLE
-            if status_code >= 500
-            else FailureCategory.BAD_REQUEST,
-        )
+        category = http_category
         retryable = category in {FailureCategory.PROVIDER_UNAVAILABLE, FailureCategory.RATE_LIMIT}
     elif error is not None:
         failure = classify_failure(error)

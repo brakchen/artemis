@@ -144,16 +144,17 @@ class ReadinessEngine:
         device check.
         """
         cacheable = categories is None
-        request_started = time.monotonic()
+        report_at_entry = self._report_cache
         if cacheable and not force_refresh:
             cached = self._cached_report(self._REPORT_CACHE_TTL_SECONDS)
             if cached is not None:
                 return cached
 
         async with self._report_lock:
-            # A refresh that completed while this caller waited satisfies even a
-            # forced request that began before it, coalescing concurrent clicks.
-            if cacheable and self._report_cache_time >= request_started:
+            # Each published scan has a fresh snapshot identity. Only a scan
+            # completed after entry satisfies a waiting forced request; clock
+            # ticks may be identical for separate sequential refreshes.
+            if cacheable and self._report_cache is not report_at_entry:
                 cached = self._cached_report(float("inf"))
                 if cached is not None:
                     return cached

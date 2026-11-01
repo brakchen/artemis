@@ -45,6 +45,16 @@ class VideoAnalyzerConfig(BaseModel):
             "are enabled. If None, auto-detected based on scrcpy & ffmpeg availability."
         ),
     )
+    max_job_attempts: int = Field(
+        default=64,
+        ge=1,
+        le=256,
+        description="Shared finite MiniMax media-job wire attempt budget, including coordinator, subclips and ASR.",
+    )
+    job_timeout_seconds: float = Field(default=900.0, ge=15.0, le=3600.0)
+    speech_language: str | None = Field(
+        default=None, description="Optional native ASR language header."
+    )
     enable_ledger: bool = Field(
         default=True,
         description="Whether to enable video action ledger state tracking.",
