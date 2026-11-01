@@ -14,10 +14,13 @@
 
 """Concrete Android Device Driver implementation using ADB and UIAutomator2."""
 
+from __future__ import annotations
+
 import asyncio
 import base64
 from io import BytesIO
 from pathlib import Path
+import re
 from typing import Any, Literal
 
 from adbutils import AdbClient, AdbDevice
@@ -124,6 +127,11 @@ class AndroidAdbDriver(BaseDeviceDriver):
             await asyncio.sleep(0.3)
 
         # 1. Capture raw screenshot
+        capture_valid = True
+        invalid_reason = None
+        reported_display_size = None
+        rotation = None
+        display_id = "0"
         screenshot_bytes: bytes = b""
         screenshot_base64: str = ""
         ui_hierarchy_xml: str | None = None
@@ -133,6 +141,10 @@ class AndroidAdbDriver(BaseDeviceDriver):
         if self._ui_adb_client and hasattr(self._ui_adb_client, "get_screen_data"):
             try:
                 raw_ui_data = self._ui_adb_client.get_screen_data()
+                raw_rotation = getattr(raw_ui_data, "rotation", None)
+                rotation = raw_rotation if type(raw_rotation) is int else None
+                raw_display = getattr(raw_ui_data, "display_id", None)
+                display_id = str(raw_display) if isinstance(raw_display, (str, int)) else "0"
                 if (
                     hasattr(raw_ui_data, "base64")
                     and isinstance(raw_ui_data.base64, str)
@@ -170,9 +182,28 @@ class AndroidAdbDriver(BaseDeviceDriver):
                 logger.warning(f"Device screenshot capture failed on {self._device_id}: {e}")
 
         if not screenshot_base64 or not isinstance(screenshot_base64, str):
+            capture_valid = False
             # Fallback for headless testing environments
             screenshot_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
             screenshot_bytes = base64.b64decode(screenshot_base64)
+
+        try:
+            display_text = await asyncio.to_thread(
+                self.device.shell, "dumpsys window displays", timeout=3
+            )
+            if isinstance(display_text, str):
+                rotation_match = re.search(r"\bmRotation=(\d+)", display_text)
+                size_match = re.search(r"\bcur=(\d+)x(\d+)", display_text)
+                if rotation_match:
+                    current_rotation = int(rotation_match.group(1))
+                    if rotation is not None and rotation != current_rotation:
+                        capture_valid = False
+                        invalid_reason = "rotation_changed_during_capture"
+                    rotation = current_rotation
+                if size_match:
+                    reported_display_size = tuple(int(value) for value in size_match.groups())
+        except Exception as error:
+            logger.debug(f"Display metadata unavailable: {type(error).__name__}")
 
         # 2. Capture UI Hierarchy via UIAutomator
         if self._ui_adb_client and not ui_elements:
@@ -200,11 +231,6 @@ class AndroidAdbDriver(BaseDeviceDriver):
 
         w = self._width if isinstance(self._width, int) else 1080
         h = self._height if isinstance(self._height, int) else 2400
-        clean_ui_elements = filter_ui_hierarchy(
-            clean_ui_elements,
-            screen_width=w,
-            screen_height=h,
-        )
         clean_b64 = (
             screenshot_base64
             if isinstance(screenshot_base64, str) and screenshot_base64
@@ -216,6 +242,36 @@ class AndroidAdbDriver(BaseDeviceDriver):
             else base64.b64decode(clean_b64)
         )
 
+        declared_filter_size = (w, h)
+        from artemis.utils.vision import image_size
+
+        try:
+            actual_width, actual_height = image_size(clean_bytes)
+            w, h = actual_width, actual_height
+            self._width, self._height = w, h
+            capture_valid = capture_valid and w > 1 and h > 1
+            if reported_display_size is not None and reported_display_size != (w, h):
+                capture_valid = False
+                invalid_reason = "display_capture_size_mismatch"
+        except (ValueError, OSError):
+            capture_valid = False
+
+        filter_width, filter_height = (w, h) if capture_valid else declared_filter_size
+        clean_ui_elements = filter_ui_hierarchy(
+            clean_ui_elements,
+            screen_width=filter_width,
+            screen_height=filter_height,
+        )
+
+        capture_device_id = (
+            self._device_id
+            if isinstance(self._device_id, str) and self._device_id.strip()
+            else None
+        )
+        if capture_device_id is None:
+            capture_valid = False
+            invalid_reason = invalid_reason or "unknown_device_id"
+
         return ScreenData(
             screenshot_bytes=clean_bytes,
             screenshot_base64=clean_b64,
@@ -224,6 +280,13 @@ class AndroidAdbDriver(BaseDeviceDriver):
             width=w,
             height=h,
             platform="android",
+            device_id=capture_device_id,
+            display_id=display_id,
+            rotation=rotation,
+            capture_valid=capture_valid,
+            invalid_reason=None
+            if capture_valid
+            else invalid_reason or "synthetic_or_failed_capture",
         )
 
     async def tap(

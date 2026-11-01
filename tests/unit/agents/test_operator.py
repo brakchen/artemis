@@ -1405,7 +1405,7 @@ async def test_operator_fallback_function_call_parsing():
         decisions = json.loads(update_dict["structured_decisions"])
         assert len(decisions) == 1
         assert decisions[0]["action"] == "tap"
-        assert decisions[0]["coordinates"] == [132, 1094]
+        assert decisions[0]["coordinates"] == [133, 1094]
 
 
 @pytest.mark.asyncio

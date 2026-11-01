@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import json
 from typing import Any
 from uuid import uuid4
@@ -52,6 +54,8 @@ from artemis.utils.plan_grammar import parse_plan
 from artemis.memory.context_policy import build_history_for
 from artemis.utils.task_tree import get_active_subgoal_hashes
 from artemis.utils.visualization import format_minimal_list_with_elements
+from artemis.utils.vision import SnapshotRef, stamp_elements, copy_provenance, uses_minimax
+from artemis.utils.coordinates import denormalize_point, normalize_point
 from third_party.mobile_use.utils.decorators import agent_lifecycle_logging
 from third_party.mobile_use.utils.logger import get_logger
 
@@ -898,6 +902,11 @@ class OperatorNode:
             except (AttributeError, TypeError):
                 pass
         minimal_list, elements, labels = format_minimal_list_with_elements(fused_xml, width, height)
+        raw_snapshot = operator_raw_data.get("snapshot")
+        if isinstance(raw_snapshot, dict):
+            snapshot = SnapshotRef.model_validate(raw_snapshot)
+            if snapshot.width > 0 and snapshot.height > 0:
+                stamp_elements(elements, snapshot)
 
         # Save transient indexed_points and indexed_elements on the state instance
         state.indexed_points = [el["center"] for el in elements]
@@ -1115,6 +1124,14 @@ class OperatorNode:
             except (AttributeError, TypeError):
                 pass
 
+        if tool_name in {"click", "long_press", "input_text", "swipe"} and uses_minimax(self.ctx):
+            from artemis.agents.explorer.geometry import resolve_screen_size
+
+            try:
+                width, height = resolve_screen_size(self.ctx, state)
+            except ValueError as error:
+                return [], f"Error: {error}"
+
         def resolve_target_element(target: Any, description: Any) -> tuple[dict | None, str | None]:
             """Resolves a target to ``{"center": [x, y], **semantics}``.
 
@@ -1136,6 +1153,7 @@ class OperatorNode:
                         "target_bounds": el.get("bounds"),
                         "target_resource_id": el.get("resource_id"),
                         "target_class": el.get("class"),
+                        **{k: v for k, v in copy_provenance(el).items() if k != "coordinate_space"},
                     }, None
                 return (
                     None,
@@ -1156,9 +1174,7 @@ class OperatorNode:
                         ),
                     )
                 try:
-                    nx, ny = map(float, target)
-                    x = int(max(0, min(width - 1, nx * width / 1000)))
-                    y = int(max(0, min(height - 1, ny * height / 1000)))
+                    x, y = denormalize_point(target[0], target[1], width, height)
                     return {"center": [x, y], "target_description": described}, None
                 except (ValueError, TypeError):
                     return (
@@ -1184,10 +1200,7 @@ class OperatorNode:
             el, err = resolve_target_element(target, args.get("target_description"))
             if err:
                 return [], err
-            norm_c = [
-                int(round(el["center"][0] * 1000.0 / width)),
-                int(round(el["center"][1] * 1000.0 / height)),
-            ]
+            norm_c = normalize_point(*el["center"], width, height)
             return [
                 {
                     "action": "tap",
@@ -1206,10 +1219,7 @@ class OperatorNode:
             el, err = resolve_target_element(target, args.get("target_description"))
             if err:
                 return [], err
-            norm_c = [
-                int(round(el["center"][0] * 1000.0 / width)),
-                int(round(el["center"][1] * 1000.0 / height)),
-            ]
+            norm_c = normalize_point(*el["center"], width, height)
             return [
                 {
                     "action": "long_press_on",
@@ -1238,10 +1248,7 @@ class OperatorNode:
             if err:
                 return [], err
 
-            norm_c = [
-                int(round(el["center"][0] * 1000.0 / width)),
-                int(round(el["center"][1] * 1000.0 / height)),
-            ]
+            norm_c = normalize_point(*el["center"], width, height)
             actions = []
             actions.append(
                 {
@@ -1302,10 +1309,8 @@ class OperatorNode:
                     )
                 try:
                     nx1, ny1, nx2, ny2 = map(float, target)
-                    x1 = int(max(0, min(width - 1, nx1 * width / 1000)))
-                    y1 = int(max(0, min(height - 1, ny1 * height / 1000)))
-                    x2 = int(max(0, min(width - 1, nx2 * width / 1000)))
-                    y2 = int(max(0, min(height - 1, ny2 * height / 1000)))
+                    x1, y1 = denormalize_point(nx1, ny1, width, height)
+                    x2, y2 = denormalize_point(nx2, ny2, width, height)
                 except (ValueError, TypeError):
                     return (
                         [],
@@ -1332,8 +1337,8 @@ class OperatorNode:
                 else:
                     duration = 900
 
-            nx1, ny1 = int(round(x1 * 1000.0 / width)), int(round(y1 * 1000.0 / height))
-            nx2, ny2 = int(round(x2 * 1000.0 / width)), int(round(y2 * 1000.0 / height))
+            nx1, ny1 = normalize_point(x1, y1, width, height)
+            nx2, ny2 = normalize_point(x2, y2, width, height)
             return [
                 {
                     "action": "swipe",

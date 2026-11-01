@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 from typing import Literal
 
 from artemis.config import (
@@ -21,6 +23,7 @@ from artemis.config import (
     ProProfileConfig,
     VideoAnalyzerConfig,
 )
+from artemis.config.agent import OCRConfig
 from artemis.context import DevicePlatform
 from artemis.utils.video import detect_video_tools_enabled
 from third_party.mobile_use.sdk.types.agent import (
@@ -63,6 +66,7 @@ class AgentConfig(AgentConfigBase):
     flash: FlashProfileConfig = Field(default_factory=FlashProfileConfig)
     pro: ProProfileConfig = Field(default_factory=ProProfileConfig)
     explorer: ExplorerConfig = Field(default_factory=ExplorerConfig)
+    ocr: OCRConfig = Field(default_factory=OCRConfig)
     # Advanced per-agent tier override; empty so the per-profile knobs
     # (``explorer.flash_mode`` / ``explorer.pro_mode``) decide by default.
     explorer_versions: dict[str, Literal["flash", "pro", "ultra"]] = Field(default_factory=dict)

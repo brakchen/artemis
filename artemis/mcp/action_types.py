@@ -20,10 +20,13 @@ historical wording. Kept dependency-free (pydantic only) so servers, adapters, a
 tests can all import it cheaply.
 """
 
+from __future__ import annotations
+
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+from artemis.utils.vision import SnapshotRef
 
 __all__ = ["ActionCode", "ActionResult", "ObserveResult"]
 
@@ -54,7 +57,7 @@ class ActionResult(BaseModel):
     duration_ms: int | None = None
 
     @classmethod
-    def success(cls, action: str, message: str, **kwargs: Any) -> "ActionResult":
+    def success(cls, action: str, message: str, **kwargs: Any) -> ActionResult:
         return cls(ok=True, code=ActionCode.OK, action=action, message=message, **kwargs)
 
     @classmethod
@@ -64,7 +67,7 @@ class ActionResult(BaseModel):
         message: str,
         code: ActionCode = ActionCode.DEVICE_ERROR,
         **kwargs: Any,
-    ) -> "ActionResult":
+    ) -> ActionResult:
         return cls(ok=False, code=code, action=action, message=message, **kwargs)
 
 
@@ -74,6 +77,7 @@ class ObserveResult(BaseModel):
     ok: bool
     code: ActionCode = ActionCode.OK
     message: str = ""
+    snapshot: SnapshotRef | None = None
     screenshot_path: str | None = None
     image_name: str | None = None
     """Stem of ``screenshot_path``; stable key used by trace/replay consumers."""
@@ -81,6 +85,10 @@ class ObserveResult(BaseModel):
     height: int | None = None
     elements_text: str | None = None
     elements: list[dict[str, Any]] = Field(default_factory=list)
+    xml_hierarchy: list[dict[str, Any]] | None = None
+    """Unfused accessibility nodes from this capture, never a historical OCR derivative."""
+    ocr_results: list[dict[str, Any]] = Field(default_factory=list)
+    ocr_outcome: dict[str, Any] = Field(default_factory=dict)
     hierarchy_ok: bool = True
     """False when the screenshot succeeded but the UI hierarchy parse failed; callers
     must then keep their previous element index rather than clobbering it."""

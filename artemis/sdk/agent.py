@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import asyncio
 import inspect
 import os
@@ -313,6 +315,7 @@ class Agent(AgentBase):
             disable_outputter=self._config.disable_outputter,
             outputter=self._config.outputter,
             explorer=self._config.explorer,
+            ocr=self._config.ocr,
             explorer_versions=self._config.explorer_versions,
         )
 

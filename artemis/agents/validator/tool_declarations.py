@@ -19,6 +19,8 @@ Execution itself lives in :class:`artemis.mcp.action_executor.McpActionExecutor`
 result envelope, the observation helpers both use, and the tool declarations.
 """
 
+from __future__ import annotations
+
 import base64
 import json
 from typing import Any, Literal
@@ -37,7 +39,7 @@ from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.core.tool_declaration import ToolDeclaration
 from artemis.mcp.action_specs import tool_declaration
-from artemis.mcp.observation import observe
+from artemis.mcp.observation import observe, apply_observation_to_state
 from artemis.graph.state import State
 from artemis.utils.notes import (
     LIST_NOTES_DOCSTRING,
@@ -179,9 +181,7 @@ async def capture_screenshot_and_parse_ui(
     if not obs.ok:
         return None, None, None
 
-    if obs.hierarchy_ok:
-        state.indexed_points = [el["center"] for el in obs.elements]
-        state.indexed_elements = obs.elements
+    apply_observation_to_state(state, obs, screenshot_bytes)
 
     return obs.screenshot_path, screenshot_bytes, obs.elements_text
 

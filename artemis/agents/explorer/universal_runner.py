@@ -18,6 +18,8 @@ Split out of ``artemis.agents.explorer.explorer``: the ``_run_universal``
 reasoning loop, packaged as a mixin consumed by ``Explorer``.
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import json
@@ -35,6 +37,8 @@ from artemis.agents.explorer.tiers import SUBMIT_TOOL
 from artemis.agents.explorer.tool_declarations import UNIVERSAL_EXPLORER_TOOLS
 from artemis.graph.state import State
 from artemis.services.llm import get_llm
+from artemis.llm.reliability import LLMInvalidOutputError
+from artemis.utils.vision import uses_minimax
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -191,6 +195,18 @@ class UniversalRunnerMixin:
         args = submit_call.get("args", {})
         candidates = args.get("candidates", [])
         fallback_message = args.get("fallback_message", "")
+
+        if uses_minimax(self.ctx, "explorer") and (
+            not isinstance(candidates, list)
+            or any(
+                not isinstance(candidate, dict)
+                or not is_valid_norm_point(candidate.get("coords"), strict=True)
+                for candidate in candidates
+            )
+        ):
+            raise LLMInvalidOutputError(
+                "MiniMax Explorer candidates require finite normalized xy points"
+            )
 
         valid_candidates = self._enrich_candidates(
             [

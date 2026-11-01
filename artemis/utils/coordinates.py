@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import copy
+import math
+from numbers import Real
 import json
 import re
 from typing import Any
@@ -312,20 +316,63 @@ def compute_smart_swipe_coordinates(
     return sx, sy, ex, ey, duration_ms
 
 
-def normalize_point(x: int, y: int, width: int, height: int) -> list[int]:
+def _finite_number(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
+        raise ValueError("Coordinates must be finite numbers, excluding bool")
+    return float(value)
+
+
+def validate_size(width: int, height: int) -> None:
+    if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
+        raise ValueError("Actual positive integer image dimensions are required")
+
+
+def normalize_point(x: float, y: float, width: int, height: int) -> list[int]:
     """Convert physical pixels to normalized 0-1000 coordinates."""
-    nx = int(round(x * 1000.0 / width))
-    ny = int(round(y * 1000.0 / height))
-    # Clamp to [0, 1000] to be safe
-    return [max(0, min(1000, nx)), max(0, min(1000, ny))]
+    validate_size(width, height)
+    return [
+        max(0, min(1000, round(_finite_number(x) * 1000 / width))),
+        max(0, min(1000, round(_finite_number(y) * 1000 / height))),
+    ]
 
 
-def denormalize_point(nx: int, ny: int, width: int, height: int) -> list[int]:
-    """Convert normalized 0-1000 coordinates to physical pixels."""
-    x = int(round(nx * width / 1000.0))
-    y = int(round(ny * height / 1000.0))
-    # Clamp to device bounds
-    return [max(0, min(width - 1, x)), max(0, min(height - 1, y))]
+def denormalize_point(nx: float, ny: float, width: int, height: int) -> list[int]:
+    """Convert a point with shared rounding and valid pixel endpoint clamping."""
+    validate_size(width, height)
+    return [
+        max(0, min(width - 1, round(_finite_number(nx) * width / 1000))),
+        max(0, min(height - 1, round(_finite_number(ny) * height / 1000))),
+    ]
+
+
+def validate_bbox(bbox: Any) -> list[float]:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        raise ValueError("bbox must be [left, top, right, bottom]")
+    left, t, r, b = [_finite_number(v) for v in bbox]
+    if not 0 <= left < r <= 1000 or not 0 <= t < b <= 1000:
+        raise ValueError("bbox must have positive area inside 0..1000")
+    return [left, t, r, b]
+
+
+def denormalize_bbox(bbox, width: int, height: int) -> list[float]:
+    """Rectangle edges may reach width/height, unlike point coordinates."""
+    validate_size(width, height)
+    left, t, r, b = validate_bbox(bbox)
+    return [left * width / 1000, t * height / 1000, r * width / 1000, b * height / 1000]
+
+
+def normalize_bbox(bbox, width: int, height: int) -> list[float]:
+    validate_size(width, height)
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        raise ValueError("bbox must have four pixel edges")
+    left, t, r, b = [_finite_number(v) for v in bbox]
+    values = [
+        max(0, min(1000, left * 1000 / width)),
+        max(0, min(1000, t * 1000 / height)),
+        max(0, min(1000, r * 1000 / width)),
+        max(0, min(1000, b * 1000 / height)),
+    ]
+    return validate_bbox(values)
 
 
 #: Pro records physical pixels; Flash records normalized 0–1000 coordinates.

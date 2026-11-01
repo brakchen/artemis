@@ -37,6 +37,8 @@ The verbatim body of a user instruction is the exception: it stays in the
 active window until its turn is chunked, whose user lines then carry it on.
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 from dataclasses import dataclass, field
@@ -79,7 +81,7 @@ from artemis.graph.state import State
 from artemis.llm.reliability import LLMCallError
 from artemis.llm.structured import ParseFailure, parse_structured
 from artemis.mcp.action_executor import McpActionExecutor
-from artemis.mcp.observation import observe
+from artemis.mcp.observation import observe, apply_observation_to_state
 from artemis.memory.transcript import PRO_UI_LIST_MARKER, TranscriptLedger, mark_ephemeral
 from artemis.services.llm import (
     RobustChatModelWrapper,
@@ -615,11 +617,7 @@ class FlashRunner:
         if not exec_result.screenshot_path and obs.screenshot_path:
             exec_result.screenshot_path = obs.screenshot_path
         if state is not None:
-            if obs.hierarchy_ok:
-                state.indexed_points = [el["center"] for el in obs.elements]
-                state.indexed_elements = obs.elements
-            if obs.screenshot_path:
-                state.latest_screenshot = obs.screenshot_path
+            apply_observation_to_state(state, obs, screenshot_bytes)
         return post_img_bytes
 
     def _extract_normalized_coordinates(self, name: str, args: dict, resolved=None):

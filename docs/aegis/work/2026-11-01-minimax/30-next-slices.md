@@ -8,7 +8,7 @@
 - tools/object_detection_tool.py、Explorer run_setup._run_flash / perception_tools.exec_detect_objects / tools/explorer_tool.py 候选解析与 register_candidates 会丢 bbox、status 和 provenance；所有模式与裁剪/缩放逆变换都要保留。不要让 ambiguous 候选成为可直接派发的 detected。
 - Explorer._resolve_model_name/_detect_native_engine 目前按 raw Gemini 名、残留 Key/shared Google Client 选引擎；MiniMax 必须按 pinned actual vendor 走 universal。
 - utils/ocr_api.py 增加 typed MiniMax 入口，默认角色为 default。PIL 取得输入实际尺寸；转换为旧 pixel position 多边形，不加状态栏偏移。图像分区需要去重/映射，unknown 字符不推断补字。
-- OCR 全部调用点：graph/perception.py、Checker._capture_final_screen、Explorer.run_setup._build_fused_hierarchy / exec_get_ocr_list、tools/mobile/ocr.py、artemis/mcp_server/tools/device_state.py。传真实任务上下文；周期自动 OCR 在 MiniMax 默认 off，显式工具/Explorer lazy request 仍能用；legacy 默认不变。
+- OCR 全部调用点：graph/perception.py、Checker._capture_final_screen、Explorer.run_setup._build_fused_hierarchy / exec_get_ocr_list、tools/mobile/ocr.py、mcp_server/tools/device_state.py。传真实任务上下文；周期自动 OCR 在 MiniMax 默认 off，显式工具/Explorer lazy request 仍能用；legacy 默认不变。
 - DataEngine.get_or_create_image 只按 hash 且只填 None，Storage.create_image 会把 [] 写 NULL，update_image_data 仅 COALESCE。复用 extra_metadata['ocr_cache'] 存按 endpoint/vendor/model/prompt/schema/coords/transform 限定的结果，原子合并；旧无版本/Google 结果不可命中，失败 [] 不缓存；同图并发请求合并。Explorer 不能绕过新版本缓存读取旧 ocr_result。
 - 复用截图/ObserveResult/ScreenIndex 与 operator_raw_data 传小型 immutable SnapshotRef，包含 capture id/hash、device/display、尺寸/rotation、state version、capture validity。hash 不是唯一有效性依据；验证截图采集本身不应使决策版本失效，派发屏幕变化才失效。
 - drivers/base.py ScreenData、controllers/device_controller.py ScreenDataResponse、vendored unified_controller、Android fallback1×1 必须携带真实/无效采集信息。geometry 当前 norm1000 可得到 width 越界；统一 public coordinates 的 round + width-1 点边界，bbox edge 单列，有限数字与真实尺寸严格。原几何测试断言的越界是待修契约，不能保留错误；其他 legacy/副作用测试不随意放宽。
@@ -20,6 +20,11 @@
 - 同快照 UI 树验证可操作节点/最近可点击父级/可见交集；不能机械用跨多个子项父容器的中心。XML 证据充分时无需付费验证；缺乏证据才局部视觉验证；仍不能确认则 unknown。旋转/设备/显示/尺寸/版本不符要求重新观察。
 - Operator target translation、McpActionExecutor._resolve_index 保留所有 provenance。首个改变屏幕动作后，Pro burst 与 Flash 剩余旧 index 动作停止；非派发 web_search/getstate 不作为改变屏幕动作。
 - 设备结果 not_dispatched/dispatched/unknown；旧 Pro loop 捕获全部异常重发可重复副作用，只有确定未执行可有界重发；命令可能生效再 timeout 只派发一次、记录 unknown 并观察。保留 legacy 多动作测试，新增 MiniMax strict 模式测试。
+- B1 约定新 helper 位于 utils/vision.py：SnapshotRef(capture_id,image_hash,device_id,display_id,width,height,rotation,state_version,capture_valid,invalid_reason,coordinate_version)，create_snapshot(ctx,bytes,metadata=None,bind=True) 不增版本；snapshot_for_image 同当前图/状态复用capture；invalidate_snapshot 递增 ctx._screen_state_version 并清_current_snapshot。候选保存完整snapshot dict + snapshot_id/bbox/source/transform/evidence。B1完成后以实际源码再次核对。
+- B1 spec修正此契约：snapshot_for_image只有明确originref且capture_id/version/hash/device/display/dims/rot均符合才复用；metadata=None始终unbound，旧origin不能仅因同像素升级当前。真实freshcapture用create_snapshot；verification的底层controller bind=False，不应换decisioncapture。ObserveResult新增pure xml_hierarchy/ocr_outcome，apply_observation_to_state接Flash startup capture/helper、actionexecutor观察和Flashfallback，同步最新rawsnapshot/XML，避免从旧同hashrecord恢复当前来源。
+- B2 接线补充：ActionSession._serve 串行真正call_tool，caller在入队前验证存在并发排队race；必须在实际派发前再检查版本且在命令可能已发送后及时失效（含caller取消，不能等上层成功返回）。复用现有session/ctx lock或小型pre-dispatch校验，不另造scheduler。Actuator._to_px 仍独立int截断，需要接公共round；模型click_sequence多坐标不能成为跳过逐次观察的后门。public用户明确坐标调用契约保持。
+- B2 StateView权限：apply_observation_to_state 在B1的实际3处均为plainFlash State；若B2在strict_state('validator')复用更新，graph/visibility.py validator.writes目前无operator_raw_data/latest_ui_hierarchy，须随实际Pro capture恢复路径声明，不能吞VisibilityError放行或使恢复失效。
+- B1 quality的不可见行方案：保留ui_filter刻意保留的出屏语义行和编号，但stamp无效bbox置None、visible=False/actionable=False/evidence=unverified/actionable_bounds=None；B2必须直接阻断此类不可见index，不可让视觉兜底把它又提升allow。正常可见行不能被一个zero-area条目拖垮。
 
 ## C 视频与原生语音
 
@@ -29,15 +34,26 @@
 - 官方 ASR：POST https://api.minimax.cn/v1/speech_to_text，Bearer，model asr-1.0，multipart，verbose_json + stream=false 返回 segments；单片 <=500秒/50MB，偏移加原录屏时间，必要重叠去重。自定义网关无已核实 native base 不把 Key 发往官方主机。
 - 首版关键帧，必要时本地片段内联 video（source.type=url/base64，媒体限制50MB/总body64MB含base64膨胀，图像10MB）；不启用 Files 上传。官方 video_understanding 文件最长7天，删除 purpose 尚未核实，不能承诺主动清理；Files 保持可选后续升级。
 - 资源清理仅本任务创建临时文件/客户端，保留原始录屏；取消/失败也清理，不掩盖原错误。ASR 业务错误复用 A2 normalizer，不能凭 HTTP200 报成功；不要伪造 text token 用量。
+- C 只读独立准备确认：MiniMax ASR 的 error.type 包含 authorized_error/insufficient_balance_error/unprocessable_entity_error/server_error/bad_request_error，与Messages不同，C须补 canonical normalizer，未知error.type不能盖住HTTP401/402/422/400永久分类；视频分类器强转 VideoFailureCategory 会因A2新增BALANCE/PERMISSION/CONTENT_REFUSAL/QUOTA_EXHAUSTED/INVALID_OUTPUT抛ValueError，需相同所有者局部扩展。ASR 413官方示例limit=52428800bytes，multipart开销须预留。
+- 实际锁定SDK MockTransport确认native Anthropic video/image source块保留输入字段，LC standardized video块会报unsupported；C使用native source形状。已文档化thinking.signature及嵌套search content/page_age保留，不声称SDK对任意未来top-level extra字段逐字无损，不为未知扩展复制SDK。ASR仅speech，不得将转写称为非语音声学分析。
+- C准备具体复用/风险：utils/video.py extract_frames_at_timestamps；旧1fps/max30会让60秒片只看前30秒，有限帧须分布全区间并含尾部。vendored utils/video.py compress_video_for_api可能2倍slowdown、保音轨且不保证大小，MiniMax不要直接复用为已达预算证明；ASR时钟按原速与actual_start+子片offset+segment秒数，跨片S1不能当全局speaker。
+- controller unified_controller.extract_segment_metadata 当前会命中共享trim缓存，output_path参数未用；VideoAnalyzer.cleanup 仅排除系统路径，不能保护原录屏/共享缓存，禁止盲收returned_path.parent。C可在现controller实现本任务独占导出、run独占scratch；默认借用controller返回源，只删除明确新建派生资源，不另造refcount库。对应controller及vendored视频utils已加入lane。
+- ASR language为可选header，verbose_json/stream=false/timestamp_level=sentence为multipart字段；httpx自行boundary。完整body限额与50MB文件区别，重叠仅按时间和相同文本去重，不删不同时间重复说话。可用Blackboard modality='speech'隔离旧audio，旧model/source_generation只存储未参与success命中，应校验来源。
+- C消费者实际接线：tools/video_tool.py Pro/pure仅判failed（漏error/partial），mcp/action_executor._video_analyzer仅failed/error失败，Outputter按ToolFailure；必须统一只有complete→旧tuple success，其他→error+结构事实/ToolFailure。universal._clean_text不能str(thinkinglist)当回答。
+- 音频建议不是新增验收：复用既有VideoAnalyzerArgs和工具字段声明requested modalities，默认视觉、未请求音频公开；audio-only天生required_speech，显式required_acoustic unsupported；optional speech失败可视觉完成但公开未分析事实，required speech无轨/拒绝/错误阻止complete。主Agent按tool schema选择，主Checker核对原goal，不能把省略新字段一律降partial破坏既有视觉调用。
 
 ## D 入口与配置体验（可按 D1/D2/D3 串行拆分）
 
 - apps/admin_console/routers/system.py Provider Request/Test/Models + CLI commands/providers.py + credentials_validator：共用完整待保存 candidate；kind/vendor/base 从草稿优先，空 Key 编辑复用/首次拒绝/clear 冲突一致。A1 registry 除 Key/enabled 外 metadata 为全量 replacement，D 必须发送完整候选。目录查询不是图片/工具能力认证，未知 vendor 明确 unsupported。
 - Angular 首页/Service/types/HTML/zh.ts：协议/厂商与 MiniMax preset、manual model entry、编辑保留 Key、保存后清空输入；去掉 currentApiKey/apiKeysMap/savedGemini/OCR 从诊断回填秘密。所有新字符串 t pipe，完成 npm run build。
 - CLI init：显式手动/环境导入 MINIMAX_API_KEY/MINIMAX_BASE_URL（bootstrap-only），已有 Key 非显式 replacement 不覆盖；不整体覆盖 .env、不写 Gemini ARTEMIS_DEFAULT_MODEL。规范化选中主配置全部主备与 utility、Flash summarizer/memory chunking 显式模型/旧参数，保留无关配置；先验证 candidate 再受保护备份/发布，失败恢复本次写入，不声称多文件原子。
+- D配置来源实际剩余：config/agent.load_agent_config 仍依次get_config_path(jsonc,json,agent_config)，显式ARTEMIS_ARTEMIS_JSON会被常规jsonc抢先，显式缺失jsonc还会被catch继续fallback。A1只统一LLM loader，D须让AgentGlobal/UI/init/diagnose共享同一选中主文件helper，保留旧独立agent_config兼容并让显式错路径失败；不能让OCR/视频/辅助参数与模型读不同文件。SDK AgentConfig与builder的OCR字段在B1补了，memory/aux字段D1还需按真实数据链核对。
 - credentials_probe metadata 目前包含 raw_key/key/current_key/api_keys；保留旧 probe IDs、公开仅布尔/掩码/来源；readiness/doctor/设备选择/嵌套缓存全检查。MiniMax OCR 不要求独立 Google Key。MCP diagnose._verify_credentials 改内部 resolver 取真实注册凭据，脱敏后不能返回 [] 假装验证；更新 Gemini .env 专用修复建议。
 - SDK._prewarm_llm_connections 在任务 ctx 前被调用，当前残留 Google Key 会初始化两个 Google client+付费 ping；先 resolve selected config，非 Google 不预热。FlashRunner._init_llm catch-all Google fallback 不适用 MiniMax。
 - VisualStepSummarizer 显式 model_name 强制 Google，且 get_llm summarizer 错用 is_utils=True；StepCapsuleLens._get_llm/_get_fallback_llm 与 HistoryChunkManager 同样 raw Google。全部从同任务 pinned summarizer endpoint 获取；显式 auxiliary 模型覆盖须迁移/校验，不能偷偷忽略或产生 Google fallback；后台 retry 也尊重 canonical 永久错误/预算。
+- D1独立只读fixture已证：SDK AgentConfig/builder缺typed memory，ensure_step_memory会在同task重新load第二份agentconfig；必须typed透传task副本。Pydantic fields_set能区别未显式旧Gemini默认与显式aux模型，直接typed builder/model_copy保留；model_dump→model_validate默认会洗成全explicit，exclude_unset才保留。合法显式MiniMax-M3不能被默认registry替换成Flash：resolve_model_config('google',M3)会替成registry.model，故从同次pin的summarizer endpoint派生，不再按builtin重新resolve。
+- D1 aux最小建议：在现resolution._snapshot发布前从同registry快照的summarizer主备预计算visual/chunk辅助端点；同model保留已pin参数，不同显式合法MM model仅继承vendor/provider/registry/base/key/共同预算，重新ModelEndpoint验证生成该model的thinking/effort默认，防model_copy把Flash medium/adaptive带到M3。现aux配置无typed effort字段，显式extra调参应校验/诊断而非吞掉。不另建resolver/cache。
+- D1 init真实时序：vendored AgentBase._init_internal先warmup(:195)，task.request.profile在_run_task(:397)后才选；init无法知道未来namedprofile。最小优选取消非必需init付费ping/Googleclient预热，保留startup进度与首次实际调用懒初始化；若延后warmup也须用actualtaskctx，不复制选profile规则。只看global/default后声称all profiles安全不成立。
 - ModelService 去 raw Operator/10s 旧缓存，SDK._prepare_tracing 将 public 实际模型快照放 Session.device_info；tasks/sessions 读取历史快照，不用当前全局模型污染历史。
 - ReplayManager.create_ctx 不能吞无效 config→None；replay_step_tool 仅真实 Google 路径 patch AsyncModels，MiniMax 走标准 trace，不创建 Google client。
 - docker_service/Compose：最小选定 provider secret JSON 与角色配置文件 readonly mount，APP_DIR runtime其他子目录仍可写；统一显式配置路径。禁止整个host用户目录/全部hostKey环境转发。缺注入明确错误，容器存在 ≠已配置。源码/wheel/非repo cwd验证，wheel携带新UI build产物。

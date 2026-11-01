@@ -14,6 +14,8 @@
 
 """Universal Multi-Model Object Detector for Artemis."""
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import json
@@ -25,6 +27,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from artemis.llm.structured import ParseFailure, parse_structured
 from artemis.services.llm import get_llm
+from artemis.utils.vision import uses_minimax
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -116,6 +119,9 @@ async def _run_object_detection(
     mime_type: str = "image/jpeg",
     global_timeout: float = 30.0,
     image_path: str | Path | None = None,
+    *,
+    snapshot=None,
+    transform=None,
 ) -> dict:
     target_img = image_bytes if image_bytes is not None else image_path
     if target_img is None:
@@ -129,6 +135,19 @@ async def _run_object_detection(
 
     queries = queries or []
     templates = templates or ["Point to the following objects: {labels_str}"]
+    if uses_minimax(ctx, "object_detector", is_utils=True):
+        from artemis.agents.object_detector.minimax import run_minimax_detection
+
+        return await run_minimax_detection(
+            ctx,
+            image_data,
+            queries,
+            global_timeout=global_timeout,
+            snapshot=snapshot,
+            transform=transform,
+        )
+    if not queries:
+        return {"detected": [], "failed": []}
     try:
         llm = get_llm(ctx, name="object_detector")
     except Exception:

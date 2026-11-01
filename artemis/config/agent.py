@@ -14,6 +14,8 @@
 
 """Agent tools, sub-agent capabilities, and explorer settings configuration."""
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -278,7 +280,7 @@ def checker_overrides_for_level(level: str | None) -> dict[str, Any]:
     return dict(preset)
 
 
-def verification_level_for_checker(checker: "CheckerConfig") -> VerificationLevel:
+def verification_level_for_checker(checker: CheckerConfig) -> VerificationLevel:
     """Classify an effective :class:`CheckerConfig` back onto the coarse ladder.
 
     Used by launcher UIs to show where the configured defaults sit; the inverse of
@@ -294,8 +296,8 @@ def verification_level_for_checker(checker: "CheckerConfig") -> VerificationLeve
 def run_tuning_for_profile(
     profile: str | None,
     *,
-    checker: "CheckerConfig",
-    explorer: "ExplorerConfig",
+    checker: CheckerConfig,
+    explorer: ExplorerConfig,
     explorer_versions: dict[str, str] | None = None,
 ) -> dict[str, str] | None:
     """Return Pro verification and explorer settings for session metadata.
@@ -579,7 +581,7 @@ class MemoryTranscriptConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     @model_validator(mode="after")
-    def _ratios_are_ordered(self) -> "MemoryTranscriptConfig":
+    def _ratios_are_ordered(self) -> MemoryTranscriptConfig:
         """The three thresholds form a ladder against the same budget."""
         if not (0.0 <= self.start_ratio <= self.soft_ratio <= self.hard_ratio <= 1.0):
             raise ValueError(
@@ -711,7 +713,7 @@ class MemoryChunkingConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _min_steps_within_cap(self) -> "MemoryChunkingConfig":
+    def _min_steps_within_cap(self) -> MemoryChunkingConfig:
         if self.min_steps > self.max_steps:
             raise ValueError(
                 "memory.chunking.min_steps must not exceed max_steps"
@@ -854,6 +856,15 @@ class ProProfileConfig(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class OCRConfig(BaseModel):
+    """Automatic OCR is opt-in for MiniMax; explicit recognition is independent."""
+
+    automatic: bool | None = Field(
+        default=None,
+        description="None preserves legacy automatic OCR and disables MiniMax automatic OCR.",
+    )
+
+
 class AgentGlobalConfig(BaseModel):
     """Global configuration parsed from artemis.jsonc / agent_config.json."""
 
@@ -866,6 +877,8 @@ class AgentGlobalConfig(BaseModel):
         default_factory=ProProfileConfig,
         description="Options for 🚀 Pro multi-agent graph execution.",
     )
+
+    ocr: OCRConfig = Field(default_factory=OCRConfig)
 
     # 🌐 Core Component Configurations
     explorer: ExplorerConfig = Field(

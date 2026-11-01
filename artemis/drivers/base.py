@@ -19,6 +19,8 @@ abstracting low-level protocols (ADB, UIAutomator2, WebDriver, Cloud RPC)
 behind a clean, unified async interface.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 import asyncio
 from enum import Enum
@@ -60,6 +62,11 @@ class ScreenData(BaseModel):
     )
     width: int = Field(default=1080, description="Device screen width in pixels")
     height: int = Field(default=2400, description="Device screen height in pixels")
+    device_id: str | None = None
+    display_id: str = "0"
+    rotation: int | None = None
+    capture_valid: bool = True
+    invalid_reason: str | None = None
     timestamp: float = Field(default_factory=time.time, description="Capture timestamp")
     platform: str = Field(default="android", description="Platform identifier")
 

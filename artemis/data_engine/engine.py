@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Callable
 import functools
@@ -845,6 +847,9 @@ class DataEngine:
         self.storage.create_image(new_record)
 
         return image_name
+
+    def merge_image_metadata(self, image_name: str, metadata: dict[str, Any]) -> None:
+        self.storage.merge_image_metadata(image_name, metadata)
 
     def get_image_path(self, image_name: str) -> Path:
         """Get the absolute file path of an image by its name/hash."""

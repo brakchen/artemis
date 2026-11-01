@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import hashlib
@@ -23,12 +25,14 @@ from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.data_engine.trace import trace
 from artemis.graph.state import State
 from artemis.graph.visibility import strict_state
-from artemis.utils.ocr_api import is_ocr_configured, perform_ocr
+from artemis.utils.ocr_api import is_ocr_configured, perform_ocr, automatic_ocr_enabled, ocr_outcome
+from artemis.utils.vision import SnapshotRef, ImageTransform, create_snapshot, uses_minimax
 from artemis.utils.ocr_xml_fusion import (
     _crop_image_remove_status_bar,
     _detect_status_bar_height,
     _map_coordinates_back,
     fuse_ocr_with_xml,
+    pure_xml_hierarchy,
 )
 from third_party.mobile_use.utils.logger import get_logger
 
@@ -162,17 +166,26 @@ async def perception_node(state: State, ctx: ArtemisContext) -> dict:
         xml_hierarchy = device_data.elements
 
     latest_screenshot_bytes = base64.b64decode(latest_screenshot_b64)
+    snapshot = getattr(device_data, "snapshot", None)
+    if not isinstance(snapshot, SnapshotRef):
+        snapshot = create_snapshot(ctx, latest_screenshot_bytes, device_data, bind=False)
+    if uses_minimax(ctx) and not snapshot.capture_valid:
+        raise ValueError(f"Invalid capture: {snapshot.invalid_reason}")
+    ctx._current_snapshot = snapshot
+    if uses_minimax(ctx):
+        xml_hierarchy = pure_xml_hierarchy(xml_hierarchy)
 
     # Update context device dimensions dynamically
     if ctx.device:
-        ctx.device.device_width = device_data.width
-        ctx.device.device_height = device_data.height
+        ctx.device.device_width = snapshot.width or device_data.width
+        ctx.device.device_height = snapshot.height or device_data.height
         logger.info(f"Updated context device dimensions: {device_data.width}x{device_data.height}")
 
     # 3. Perform OCR (if configured, else fallback to pure XML layout)
     ocr_results = []
-    if is_ocr_configured():
-        screen_height = device_data.height
+    ocr_status = {"status": "disabled", "reason": "automatic_ocr_disabled_or_unconfigured"}
+    if automatic_ocr_enabled(ctx) and is_ocr_configured(ctx):
+        screen_height = snapshot.height or device_data.height
         status_bar_height = _detect_status_bar_height(xml_hierarchy, screen_height)
         try:
             if status_bar_height > 0:
@@ -184,16 +197,31 @@ async def perception_node(state: State, ctx: ArtemisContext) -> dict:
                     latest_screenshot_b64,
                     status_bar_height,
                 )
-                raw_ocr_results = await perform_ocr(cropped_b64)
-                ocr_results = _map_coordinates_back(raw_ocr_results, status_bar_height)
+                applied_offset = status_bar_height if cropped_b64 != latest_screenshot_b64 else 0
+                raw_ocr_results = await perform_ocr(
+                    cropped_b64,
+                    ctx=ctx,
+                    snapshot=snapshot,
+                    transform=ImageTransform(offset_y=applied_offset),
+                )
+                ocr_results = (
+                    _map_coordinates_back(raw_ocr_results, applied_offset)
+                    if applied_offset
+                    else raw_ocr_results
+                )
             else:
                 logger.info("No status bar detected. Performing OCR on full screenshot.")
-                ocr_results = await perform_ocr(latest_screenshot_b64)
+                ocr_results = await perform_ocr(latest_screenshot_b64, ctx=ctx, snapshot=snapshot)
+            ocr_status = ocr_outcome(ctx) or {
+                "status": "complete" if ocr_results else "empty",
+                "source": "google",
+            }
         except Exception as ocr_err:
             logger.warning(
                 f"Perception OCR execution encountered error: {ocr_err}. Proceeding with XML-only layout."
             )
             ocr_results = []
+            ocr_status = {"status": "error", "reason": type(ocr_err).__name__}
     else:
         logger.debug("OCR is not configured. Proceeding with XML-only layout.")
 
@@ -211,7 +239,9 @@ async def perception_node(state: State, ctx: ArtemisContext) -> dict:
                 ctx.data_engine.get_or_create_image,
                 latest_screenshot_bytes,
                 ui_tree=xml_hierarchy,
-                ocr_result=ocr_results,
+                ocr_result=ocr_results
+                if ocr_status.get("status") in {"complete", "empty"}
+                else None,
             )
         )
         logger.info(f"Offloaded perception data saving to background with image_name: {image_name}")
@@ -224,8 +254,10 @@ async def perception_node(state: State, ctx: ArtemisContext) -> dict:
             "screenshot_b64": latest_screenshot_b64,
             "xml_hierarchy": xml_hierarchy if xml_hierarchy is not None else [],
             "ocr_results": ocr_results,
-            "width": device_data.width,
-            "height": device_data.height,
+            "ocr_outcome": ocr_status,
+            "snapshot": snapshot.model_dump(mode="json"),
+            "width": snapshot.width or device_data.width,
+            "height": snapshot.height or device_data.height,
         },
         "injected_instruction": injected_instruction,
         # sticky_or reducer: once latched True, later False updates keep it True

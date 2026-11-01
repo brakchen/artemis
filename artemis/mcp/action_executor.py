@@ -30,6 +30,8 @@ Device action status comes from ``ActionResult.ok``; helper tools report failure
 through ``ToolFailure`` or an explicit status.
 """
 
+from __future__ import annotations
+
 import ast
 import hashlib
 import json
@@ -44,6 +46,7 @@ from artemis.mcp.action_manifest import OPTIONAL_ACTIONS, REQUIRED_ACTIONS
 from artemis.mcp.action_specs import exception_prefix
 from artemis.mcp.action_session import ActionSession, get_action_session
 from artemis.mcp.action_types import ActionCode, ActionResult
+from artemis.mcp.observation import apply_observation_to_state
 from artemis.mcp.actuators.adb import AdbActuator
 from artemis.agents.validator.tool_declarations import (
     ToolExecutionResult,
@@ -201,14 +204,12 @@ class McpActionExecutor:
                     if obs.ok:
                         shot_path = obs.screenshot_path
                         xml_list = obs.elements_text
-                        if obs.hierarchy_ok:
-                            state.indexed_points = [el["center"] for el in obs.elements]
-                            state.indexed_elements = obs.elements
                         if shot_path:
                             try:
                                 img_bytes = Path(shot_path).read_bytes()
                             except Exception as read_err:
                                 logger.warning(f"Failed to read observed screenshot: {read_err}")
+                        apply_observation_to_state(state, obs, img_bytes)
             except _ArgError as e:
                 res = ActionResult.failure(raw_name, str(e), code=ActionCode.INVALID_ARGS)
                 message = str(e)

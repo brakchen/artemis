@@ -1,7 +1,7 @@
 # Artemis 全 MiniMax 技术方案
 
 - 日期：2026-11-01（Asia/Shanghai）。
-- 版本：1.2，用户已批准实施；基础配置、协议与搜索链已完成，其余阶段实施中，本文不表示完整功能或精度已经验证。
+- 版本：1.2，用户已批准实施；基础配置、协议、搜索及定位/OCR来源链已完成，其余阶段实施中，本文不表示完整功能或精度已经验证。
 - 代码基线：`e7cbe5950fba16b7d31c852aa1e92309d7d6405c`，分支 `feat/model-config`。
 - 适用范围：主 Agent 推理、视频分析、Explorer 屏幕探索、联网检索、OCR、目标坐标定位。
 - 依据：本次会话已确认的需求、基线代码、MiniMax 官方文档及官方文档 MCP。
@@ -523,6 +523,14 @@ Google 路径核查除六模块外，还包括 `artemis/constants.py`、`artemis
 ## 14. Changelog
 
 本节记录技术方案的变更，不代表对应功能已经实现。后续修订本文时须同步更新本节，按版本倒序记录日期、变更内容及验证范围。
+
+### 实施进度：B1 定位与 OCR — 2026-11-01
+
+- 已加入 MiniMax utility 定位、严格 xy/LTRB/cardinality、一次局部裁剪复核；OCR 使用全局 MiniMax、分区合并、类型化状态及版本化持久缓存，全部原调用方传任务上下文。
+- 截图来源和变换信息贯穿 driver/controller、感知、Explorer 各模式、索引与 Operator；周期自动 OCR 默认关闭，显式 OCR 与按需 Explorer 保留。旧无来源、NULL/坏元数据不冒充可用缓存，模型自报来源不能变为本地可操作证据。
+- 公共点转换统一 round/有效像素夹取；有意修正 Explorer 1000 端点越界和 Operator 截断差一像素的历史测试预期，保留无关 legacy 显示约定。
+- 独立规格/质量审查发现并修复旧来源同像素洗新、历史融合 OCR 绕缓存、partial 状态丢失、SDK OCR 配置丢失、出屏零面积节点、共享请求取消及状态栏偏移。未知设备 ID 保留 invalid，不伪造身份；observe_screen 固定输出 schema 增加 snapshot/xml_hierarchy/ocr_results/ocr_outcome 及 SnapshotRef，其余工具契约保持。
+- 最终 root 全量 unit：2802 passed、8 skipped、89 上游警告，158.23 秒；Ruff、format 和 diff 检查通过。首次全量发现的两项兼容回归已修复，原测试保持。执行前门禁/派发失效属于后续 B2；未调用真实模型或设备。
 
 ### 实施进度：A2 协议与搜索 — 2026-11-01
 

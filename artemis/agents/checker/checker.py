@@ -58,12 +58,20 @@ from artemis.tools.tool_wrapper import (
     tool_result_messages,
 )
 from artemis.utils.task_tree import format_actions_clean
-from artemis.utils.ocr_api import is_ocr_configured, perform_ocr
+from artemis.utils.ocr_api import (
+    is_ocr_configured,
+    perform_ocr,
+    automatic_ocr_enabled,
+    ocr_outcome,
+    ocr_status_text,
+)
+from artemis.utils.vision import SnapshotRef, ImageTransform, create_snapshot, uses_minimax
 from artemis.utils.ocr_xml_fusion import (
     _crop_image_remove_status_bar,
     _detect_status_bar_height,
     _map_coordinates_back,
     fuse_ocr_with_xml,
+    pure_xml_hierarchy,
 )
 from artemis.utils.visualization import format_minimal_list_with_elements
 from third_party.mobile_use.utils.logger import get_logger
@@ -757,27 +765,63 @@ async def _capture_final_screen(ctx: ArtemisContext) -> tuple[str | None, str]:
         device_data = await controller.get_screen_data()
         screenshot_b64 = device_data.base64
         xml_hierarchy = device_data.elements
+        if uses_minimax(ctx):
+            xml_hierarchy = pure_xml_hierarchy(xml_hierarchy)
         width = device_data.width
         height = device_data.height
 
+        import base64
+
+        snapshot = getattr(device_data, "snapshot", None)
+        if not isinstance(snapshot, SnapshotRef):
+            snapshot = create_snapshot(
+                ctx, base64.b64decode(screenshot_b64), device_data, bind=False
+            )
+        width, height = snapshot.width or width, snapshot.height or height
         ocr_results = []
-        if is_ocr_configured():
+        request_outcome = {
+            "status": "disabled",
+            "reason": "automatic_ocr_disabled_or_unconfigured",
+            "source": "minimax",
+            "snapshot_id": snapshot.capture_id,
+        }
+        ctx._ocr_last_outcome = dict(request_outcome)
+        if automatic_ocr_enabled(ctx) and is_ocr_configured(ctx):
             try:
                 status_bar_height = _detect_status_bar_height(xml_hierarchy, height)
                 if status_bar_height > 0:
                     cropped_b64, _, _ = _crop_image_remove_status_bar(
                         screenshot_b64, status_bar_height
                     )
-                    raw_ocr = await perform_ocr(cropped_b64)
-                    ocr_results = _map_coordinates_back(raw_ocr, status_bar_height)
+                    applied_offset = status_bar_height if cropped_b64 != screenshot_b64 else 0
+                    raw_ocr = await perform_ocr(
+                        cropped_b64,
+                        ctx=ctx,
+                        snapshot=snapshot,
+                        transform=ImageTransform(offset_y=applied_offset),
+                    )
+                    ocr_results = (
+                        _map_coordinates_back(raw_ocr, applied_offset)
+                        if applied_offset
+                        else raw_ocr
+                    )
                 else:
-                    ocr_results = await perform_ocr(screenshot_b64)
+                    ocr_results = await perform_ocr(screenshot_b64, ctx=ctx, snapshot=snapshot)
+                request_outcome = ocr_outcome(ctx)
             except Exception as e:
                 logger.warning(f"Final check OCR failed, proceeding without OCR: {e}")
+                request_outcome = {
+                    "status": "error",
+                    "reason": type(e).__name__,
+                    "source": "minimax",
+                    "snapshot_id": snapshot.capture_id,
+                }
+                ctx._ocr_last_outcome = dict(request_outcome)
 
         fused_xml = fuse_ocr_with_xml(xml_hierarchy, ocr_results)
         minimal_list, _, _ = format_minimal_list_with_elements(fused_xml, width, height)
-        return screenshot_b64, minimal_list
+        status_text = ocr_status_text(ctx, request_outcome)
+        return screenshot_b64, "\n".join(part for part in (minimal_list, status_text) if part)
     except Exception as e:
         logger.warning(f"Failed to capture final screen state: {e}")
         return None, "Final screen state unavailable."
