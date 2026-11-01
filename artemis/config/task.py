@@ -69,7 +69,7 @@ def explicit_aux_model(config: BaseModel) -> str | None:
 
 
 def prepare_selected_task_config(
-    config: BaseModel, selected: Any, requested: str | None = None
+    config: BaseModel, selected: Any, requested: str | None = None, *, registry: Any = None
 ) -> SimpleNamespace:
     """Prepare an already selected profile without any runtime side effects."""
     from artemis.llm.resolution import context_uses_minimax, public_model_snapshot
@@ -79,6 +79,8 @@ def prepare_selected_task_config(
         llm_config=selected.llm_config.model_copy(deep=True),
         selected_llm_profile=selected.name,
     )
+    if registry is not None:
+        prepared._llm_provider_registry = registry
     context_uses_minimax(prepared)
     prepared.model_snapshot = public_model_snapshot(prepared, requested_profile=requested)
     return prepared

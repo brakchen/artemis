@@ -14,11 +14,11 @@
  * limitations under the License.
  */
 
-import { Component, signal, computed, effect, inject, OnInit, OnDestroy, ChangeDetectionStrategy } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, OnDestroy, ChangeDetectionStrategy } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 import { AgentService } from '../../services/agent.service';
-import { SystemService, LlmModelInfo } from '../../services/system.service';
+import { SystemService, LlmModelInfo, LlmProviderInfo, LlmProviderPayload } from '../../services/system.service';
 import {
   AdbServerConnectionResult,
   AdbServerDevice,
@@ -133,12 +133,20 @@ export class HomeComponent implements OnInit, OnDestroy {
   public llmProviders = computed(() => this.systemService.llmProviders());
   public llmDefaultProvider = computed(() => this.systemService.llmDefaultProvider());
   public llmRegistryPath = computed(() => this.systemService.llmRegistryPath());
+  public editingProvider = signal<string | null>(null);
+  public newProviderKind = signal<string>('openai');
+  public newProviderVendor = signal<string>('');
+  public providerBusy = computed(() => this.isSavingProvider() || this.isTestingProvider() || this.isDiscoveringModels());
+  public canUseProviderKey = computed(() => !!this.newProviderApiKey().trim() || !!this.editingProvider());
+  public savedProviderName = signal<string>('minimax');
+  public minimaxMigrationCommand = computed(() => `artemis init --provider minimax --name ${this.newProviderName().trim() || this.savedProviderName()}`);
   public newProviderName = signal<string>('');
   public newProviderBaseUrl = signal<string>('');
   public newProviderModel = signal<string>('');
   public newProviderFallbackModel = signal<string>('');
   public newProviderApiKey = signal<string>('');
   public newProviderMakeDefault = signal<boolean>(true);
+  public verifyProviderCatalog = signal<boolean>(true);
   public showNewProviderKey = signal<boolean>(false);
   public isSavingProvider = signal<boolean>(false);
   public isTestingProvider = signal<boolean>(false);
@@ -169,7 +177,8 @@ export class HomeComponent implements OnInit, OnDestroy {
   /** What config/artemis.jsonc says, for the "resolved via ..." hint. */
   public configuredDefaultLabel = computed(() => {
     const d = this.modelConfigEnv()?.default_model;
-    return `${d?.provider || 'google'}/${d?.model || 'gemini-3.8-flash'}`;
+    const unavailable = this.i18n.t('Unavailable');
+    return `${d?.provider || unavailable}/${d?.model || unavailable}`;
   });
 
   /** True when a registered provider takes over from the file's provider. */
@@ -526,26 +535,8 @@ export class HomeComponent implements OnInit, OnDestroy {
     return meta?.['configured'] === true;
   });
 
-  public currentApiKey = computed<string>(() => this.systemService.currentApiKey());
-  public apiKeysMap = computed<Record<string, string>>(() => this.systemService.apiKeysMap());
-
-  public savedGeminiKey = computed<string>(() => {
-    const keys = this.apiKeysMap();
-    return keys['google'] || this.currentApiKey() || '';
-  });
-
-  public isGeminiModified = computed<boolean>(() => {
-    return this.geminiKeyInput().trim() !== this.savedGeminiKey().trim();
-  });
-
-  public savedOcrKey = computed<string>(() => {
-    const keys = this.apiKeysMap();
-    return keys['ocr'] || '';
-  });
-
-  public isOcrModified = computed<boolean>(() => {
-    return this.ocrKeyInput().trim() !== this.savedOcrKey().trim();
-  });
+  public isGeminiModified = computed(() => this.isGeminiKeyEdited() && !!this.geminiKeyInput().trim());
+  public isOcrModified = computed(() => this.isOcrKeyEdited() && !!this.ocrKeyInput().trim());
 
   // Rich Smart Suggestions Library (Device-Aware, Flash vs Pro Tailored)
   public readonly allSuggestions = this.taskRecService.allTasks;
@@ -579,21 +570,6 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.systemService.fetchReadiness().subscribe();
     this.systemService.fetchEmulatorStatus().subscribe({ error: () => {} });
   };
-
-  constructor() {
-    effect(() => {
-      const keys = this.systemService.apiKeysMap();
-      const current = this.systemService.currentApiKey();
-      const googleKey = keys['google'] || current || '';
-      const ocrKey = keys['ocr'] || '';
-      if (!this.isGeminiKeyEdited()) {
-        this.geminiKeyInput.set(googleKey);
-      }
-      if (!this.isOcrKeyEdited()) {
-        this.ocrKeyInput.set(ocrKey);
-      }
-    });
-  }
 
   ngOnInit(): void {
 
@@ -647,10 +623,7 @@ export class HomeComponent implements OnInit, OnDestroy {
   public setModelSetupMode(mode: 'gemini' | 'custom'): void {
     this.modelSetupMode.set(mode);
     if (mode === 'custom') {
-      this.systemService.setSkipCredentialsCheck(true);
       this.systemService.fetchModelConfigEnv().subscribe();
-    } else {
-      this.systemService.setSkipCredentialsCheck(false);
     }
   }
 
@@ -696,7 +669,12 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.showNewProviderKey.update((v) => !v);
   }
 
-  private resetProviderForm(): void {
+  public resetProviderForm(): void {
+    if (this.providerBusy()) return;
+    this.editingProvider.set(null);
+    this.newProviderKind.set('openai');
+    this.newProviderVendor.set('');
+    this.verifyProviderCatalog.set(true);
     this.newProviderName.set('');
     this.newProviderBaseUrl.set('');
     this.newProviderModel.set('');
@@ -707,6 +685,63 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.discoveryEndpoint.set('');
     this.modelPickerOpen.set(null);
     this.modelPickerQuery.set('');
+  }
+
+  public useMiniMaxPreset(): void {
+    if (this.providerBusy()) return;
+    this.resetProviderForm();
+    this.newProviderName.set('minimax');
+    this.newProviderKind.set('anthropic');
+    this.newProviderVendor.set('minimax');
+    this.newProviderBaseUrl.set('https://api.minimax.cn/anthropic');
+    this.newProviderModel.set('MiniMax-M3.1-Flash');
+    this.newProviderFallbackModel.set('MiniMax-M3.1-Flash');
+    // A matching stored provider keeps its key server-side.
+    const saved = this.llmProviders().find(p => p.name === 'minimax');
+    if (saved) this.editingProvider.set(saved.name);
+  }
+
+  public editLlmProvider(provider: LlmProviderInfo): void {
+    if (this.providerBusy()) return;
+    this.resetProviderForm();
+    this.editingProvider.set(provider.name);
+    this.newProviderName.set(provider.name);
+    this.newProviderKind.set(provider.kind);
+    this.newProviderVendor.set(provider.vendor || '');
+    this.newProviderBaseUrl.set(provider.api_base || '');
+    this.newProviderModel.set(provider.model || '');
+    this.newProviderFallbackModel.set(provider.fallback_model || '');
+    this.newProviderMakeDefault.set(provider.name === this.llmDefaultProvider());
+  }
+
+  private providerDraft(): LlmProviderPayload {
+    return {
+      name: this.newProviderName().trim(), kind: this.newProviderKind(),
+      vendor: this.newProviderVendor() || null,
+      api_key: this.newProviderApiKey().trim(),
+      api_base: this.newProviderBaseUrl().trim() || null,
+      model: this.newProviderModel().trim() || null,
+      fallback_model: this.newProviderFallbackModel().trim() || null
+    };
+  }
+
+  public clearAndDisableProvider(): void {
+    if (!this.editingProvider() || this.providerBusy()) return;
+    if (!window.confirm(this.i18n.t('Clear the stored API key and disable this provider?'))) return;
+    this.isSavingProvider.set(true);
+    this.providerSaveError.set(null);
+    this.systemService.saveLlmProvider({ name: this.editingProvider()!, clear_api_key: true,
+      confirm_clear: true, enabled: false, verify: false }).subscribe({
+      next: () => {
+        this.isSavingProvider.set(false);
+        this.resetProviderForm();
+        this.providerSaveMessage.set(this.i18n.t('Provider key cleared and provider disabled.'));
+      },
+      error: err => {
+        this.isSavingProvider.set(false);
+        this.providerSaveError.set(err?.error?.detail || this.i18n.t('Failed to save provider.'));
+      }
+    });
   }
 
   /** Open/close the inline model picker for the default or fallback field. */
@@ -733,10 +768,11 @@ export class HomeComponent implements OnInit, OnDestroy {
       this.providerSaveError.set(this.i18n.t('Enter the Base URL first to fetch its model list.'));
       return;
     }
+    if (this.providerBusy()) return;
     this.isDiscoveringModels.set(true);
     this.providerSaveError.set(null);
     this.providerSaveMessage.set(null);
-    this.systemService.discoverLlmModels({ api_base: apiBase, api_key: apiKey }).subscribe({
+    this.systemService.discoverLlmModels(this.providerDraft()).subscribe({
       next: (res) => {
         this.isDiscoveringModels.set(false);
         this.discoveredModels.set(res?.models ?? []);
@@ -759,15 +795,15 @@ export class HomeComponent implements OnInit, OnDestroy {
 
   /** Verify the key against the endpoint without saving anything. */
   public testLlmProviderKey(): void {
-    const apiKey = this.newProviderApiKey().trim();
-    if (!apiKey) {
+    if (this.providerBusy()) return;
+    if (!this.canUseProviderKey()) {
       this.providerSaveError.set(this.i18n.t('Enter an API key to test.'));
       return;
     }
     this.isTestingProvider.set(true);
     this.providerSaveError.set(null);
     this.providerSaveMessage.set(null);
-    this.systemService.testLlmProvider(apiKey, this.newProviderBaseUrl().trim() || undefined).subscribe({
+    this.systemService.testLlmProvider(this.providerDraft()).subscribe({
       next: (res) => {
         this.isTestingProvider.set(false);
         this.providerSaveMessage.set(`✓ ${res?.message || this.i18n.t('Endpoint reachable and key accepted.')}`);
@@ -780,30 +816,27 @@ export class HomeComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** Register (or update) the provider after verifying the key. */
+  /** Save the complete draft with the user's explicit catalog-check choice. */
   public saveLlmProvider(): void {
+    if (this.providerBusy()) return;
     const name = this.newProviderName().trim();
-    const apiKey = this.newProviderApiKey().trim();
-    if (!name || !apiKey) {
-      this.providerSaveError.set(this.i18n.t('Provider name and API key are required.'));
+    if (!name || !this.canUseProviderKey()) {
+      this.providerSaveError.set(this.i18n.t('Provider name and API key are required for a new provider.'));
       return;
     }
     this.isSavingProvider.set(true);
     this.providerSaveError.set(null);
     this.providerSaveMessage.set(null);
-    this.systemService.saveLlmProvider({
-      name,
-      api_key: apiKey,
-      api_base: this.newProviderBaseUrl().trim() || null,
-      model: this.newProviderModel().trim() || null,
-      fallback_model: this.newProviderFallbackModel().trim() || null,
-      kind: 'openai',
-      make_default: this.newProviderMakeDefault(),
-      verify: true
+    const verify = this.verifyProviderCatalog();
+    this.systemService.saveLlmProvider({ ...this.providerDraft(),
+      make_default: this.newProviderMakeDefault(), verify
     }).subscribe({
       next: () => {
         this.isSavingProvider.set(false);
-        this.providerSaveMessage.set(`✓ Provider '${name}' verified & saved.`);
+        this.savedProviderName.set(name);
+        this.providerSaveMessage.set(this.i18n.t(verify
+          ? 'Provider saved. Complete the role migration before starting MiniMax tasks.'
+          : 'Provider saved without catalog verification. Credentials and model access remain unverified. Complete the role migration before starting MiniMax tasks.'));
         this.resetProviderForm();
         setTimeout(() => this.providerSaveMessage.set(null), 6000);
       },
@@ -848,6 +881,7 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.systemService.updateApiKey('google', key, true).subscribe({
       next: (res) => {
         this.isSavingGeminiKey.set(false);
+        this.geminiKeyInput.set('');
         this.isGeminiKeyEdited.set(false);
         this.geminiSaveMessage.set(res?.message || this.i18n.t('✓ Gemini API key verified & saved successfully.'));
         setTimeout(() => this.geminiSaveMessage.set(null), 5000);
@@ -865,9 +899,9 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.geminiSaveError.set(null);
     this.geminiSaveMessage.set(null);
 
-    if (this.savedGeminiKey().trim()) {
+    if (window.confirm(this.i18n.t('Clear the stored Google API key?'))) {
       this.isSavingGeminiKey.set(true);
-      this.systemService.updateApiKey('google', '', true).subscribe({
+      this.systemService.updateApiKey('google', '', true, true).subscribe({
         next: (res) => {
           this.isSavingGeminiKey.set(false);
           this.geminiSaveMessage.set(res?.message || this.i18n.t('✓ Gemini API key cleared.'));
@@ -879,7 +913,7 @@ export class HomeComponent implements OnInit, OnDestroy {
         }
       });
     } else {
-      this.geminiSaveMessage.set(this.i18n.t('✓ Gemini API key cleared.'));
+      this.geminiSaveMessage.set(this.i18n.t('Cancelled.'));
       setTimeout(() => this.geminiSaveMessage.set(null), 3000);
     }
   }
@@ -894,6 +928,7 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.systemService.updateApiKey('ocr', key, true).subscribe({
       next: (res) => {
         this.isSavingOcrKey.set(false);
+        this.ocrKeyInput.set('');
         this.isOcrKeyEdited.set(false);
         this.ocrSaveMessage.set(res?.message || this.i18n.t('✓ Vision OCR API key verified & saved.'));
         setTimeout(() => this.ocrSaveMessage.set(null), 5000);
@@ -911,9 +946,9 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.ocrSaveError.set(null);
     this.ocrSaveMessage.set(null);
 
-    if (this.savedOcrKey().trim()) {
+    if (window.confirm(this.i18n.t('Clear the stored Vision OCR key?'))) {
       this.isSavingOcrKey.set(true);
-      this.systemService.updateApiKey('ocr', '', true).subscribe({
+      this.systemService.updateApiKey('ocr', '', true, true).subscribe({
         next: (res) => {
           this.isSavingOcrKey.set(false);
           this.ocrSaveMessage.set(res?.message || this.i18n.t('✓ Vision OCR API key cleared.'));
@@ -925,7 +960,7 @@ export class HomeComponent implements OnInit, OnDestroy {
         }
       });
     } else {
-      this.ocrSaveMessage.set(this.i18n.t('✓ Vision OCR API key cleared.'));
+      this.ocrSaveMessage.set(this.i18n.t('Cancelled.'));
       setTimeout(() => this.ocrSaveMessage.set(null), 3000);
     }
   }

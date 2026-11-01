@@ -519,14 +519,6 @@ export class SystemService {
     );
   }
 
-  public currentApiKey = computed<string>(() => {
-    return (this.llmProbe()?.metadata?.['current_key'] as string) || '';
-  });
-
-  public apiKeysMap = computed<Record<string, string>>(() => {
-    return (this.llmProbe()?.metadata?.['api_keys'] as Record<string, string>) || {};
-  });
-
   public modelConfigEnv = signal<ModelConfigEnvResponse | null>(null);
 
   /**
@@ -539,6 +531,7 @@ export class SystemService {
           this.modelConfigEnv.set(data);
         },
         error: (err) => {
+          this.modelConfigEnv.set(null);
           console.error('Failed to fetch model config and env:', err);
         }
       })
@@ -559,11 +552,13 @@ export class SystemService {
   /**
    * Update, verify, and configure API key for an LLM provider or Vision OCR
    */
-  public updateApiKey(provider: string, apiKey: string, persistToEnv: boolean = true): Observable<any> {
+  public updateApiKey(provider: string, apiKey: string, persistToEnv: boolean = true, clearApiKey: boolean = false): Observable<any> {
     return this.http.post<any>('/api/system/credentials', {
       provider,
       api_key: apiKey,
-      persist_to_env: persistToEnv
+      persist_to_env: persistToEnv,
+      clear_api_key: clearApiKey,
+      confirm_clear: clearApiKey
     }).pipe(
       tap({
         next: (res) => {
@@ -611,11 +606,8 @@ export class SystemService {
   }
 
   /** Validate an endpoint + key without saving. */
-  public testLlmProvider(apiKey: string, apiBase?: string): Observable<{ valid: boolean; message: string }> {
-    return this.http.post<{ valid: boolean; message: string }>('/api/system/llm-providers/test', {
-      api_key: apiKey,
-      api_base: apiBase || null
-    });
+  public testLlmProvider(payload: Partial<LlmProviderPayload>): Observable<{ valid: boolean; message: string }> {
+    return this.http.post<{ valid: boolean; message: string }>('/api/system/llm-providers/test', payload);
   }
 
   /** List the models an OpenAI-compatible endpoint exposes (GET {base}/models). */
@@ -624,6 +616,7 @@ export class SystemService {
     api_base?: string | null;
     api_key?: string | null;
     kind?: string;
+    vendor?: string | null;
   }): Observable<LlmModelsResponse> {
     return this.http.post<LlmModelsResponse>('/api/system/llm-providers/models', payload);
   }
@@ -692,6 +685,7 @@ export interface ModelConfigEnvResponse {
 
 export interface LlmProviderInfo {
   name: string;
+  vendor: string | null;
   kind: string;
   api_base: string | null;
   model: string | null;
@@ -722,7 +716,11 @@ export interface LlmProvidersResponse {
 
 export interface LlmProviderPayload {
   name: string;
-  api_key: string;
+  api_key?: string;
+  vendor?: string | null;
+  enabled?: boolean;
+  clear_api_key?: boolean;
+  confirm_clear?: boolean;
   api_base?: string | null;
   model?: string | null;
   fallback_model?: string | null;

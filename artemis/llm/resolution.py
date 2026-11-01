@@ -108,7 +108,8 @@ def _snapshot(ctx: Any, role: str, is_utils: bool) -> dict[tuple[str, bool, bool
 
         config = get_default_llm_config()
         ctx.llm_config = config
-    registry = providers.provider_registry.snapshot()
+    registry = getattr(ctx, "_llm_provider_registry", None)
+    registry = (registry if registry is not None else providers.provider_registry).snapshot()
     if isinstance(config, LLMConfig):
         config = config.model_copy(deep=True)
         global_config = config.default or config.operator

@@ -14,6 +14,8 @@
 
 """Validation utility to verify LLM and Vision API keys against live provider endpoints."""
 
+from __future__ import annotations
+
 import httpx
 
 from artemis.llm.google.provider import is_google_family_provider
@@ -26,7 +28,7 @@ logger = get_logger(__name__)
 _TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 
 
-def _extract_error_message(resp: httpx.Response) -> str:
+def _extract_error_message(resp: httpx.Response, api_key: str = "") -> str:
     """Extract a human-friendly error message from a provider HTTP response."""
     try:
         data = resp.json()
@@ -36,15 +38,23 @@ def _extract_error_message(resp: httpx.Response) -> str:
             if isinstance(err_obj, dict):
                 msg = err_obj.get("message")
                 if msg:
-                    return str(msg)
+                    return str(msg).replace(api_key, "[redacted]")[:200] if api_key else str(msg)
             elif isinstance(err_obj, str):
-                return err_obj
+                return err_obj.replace(api_key, "[redacted]")[:200] if api_key else err_obj
 
             # OpenAI / Anthropic / OpenRouter style
             if "message" in data:
-                return str(data["message"])
+                return (
+                    str(data["message"]).replace(api_key, "[redacted]")[:200]
+                    if api_key
+                    else str(data["message"])
+                )
             if "detail" in data:
-                return str(data["detail"])
+                return (
+                    str(data["detail"]).replace(api_key, "[redacted]")[:200]
+                    if api_key
+                    else str(data["detail"])
+                )
     except ValueError:
         # Response body is not valid JSON; fall through to the text fallback.
         pass
@@ -52,7 +62,7 @@ def _extract_error_message(resp: httpx.Response) -> str:
     # Fallback to response text or HTTP status
     text = resp.text.strip()
     if text and len(text) < 200:
-        return text
+        return text.replace(api_key, "[redacted]") if api_key else text
     return f"HTTP {resp.status_code}: {resp.reason_phrase}"
 
 
@@ -61,6 +71,8 @@ async def validate_api_key(
     api_key: str,
     base_url: str | None = None,
     timeout: float = 12.0,
+    *,
+    vendor: str | None = None,
 ) -> tuple[bool, str]:
     """Tests if the provided API key is valid and usable with the corresponding provider.
 
@@ -89,6 +101,11 @@ async def validate_api_key(
     ):
         return False, "Please enter a real API key instead of the placeholder."
 
+    if vendor not in (None, "minimax") or (vendor == "minimax" and clean_provider != "anthropic"):
+        return False, "Unsupported provider protocol/vendor combination."
+    if vendor == "minimax" and not base_url:
+        return False, "MiniMax requires an explicit Messages base URL."
+
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             if is_google_family_provider(clean_provider):
@@ -99,7 +116,7 @@ async def validate_api_key(
                 resp = await client.get(url, headers={"x-goog-api-key": clean_key})
                 if resp.status_code == 200:
                     return True, "Google Gemini API key verified successfully."
-                err_msg = _extract_error_message(resp)
+                err_msg = _extract_error_message(resp, clean_key)
                 return False, f"Gemini API verification failed ({resp.status_code}): {err_msg}"
 
             elif clean_provider in ("ocr", "vision", "google_vision"):
@@ -120,23 +137,28 @@ async def validate_api_key(
                 )
                 if resp.status_code == 200:
                     return True, "Google Cloud Vision OCR API key verified successfully."
-                err_msg = _extract_error_message(resp)
+                err_msg = _extract_error_message(resp, clean_key)
                 return False, f"Vision OCR API verification failed ({resp.status_code}): {err_msg}"
 
             elif clean_provider == "openai":
-                endpoint = (
-                    f"{base_url.rstrip('/')}/models"
-                    if base_url
-                    else "https://api.openai.com/v1/models"
-                )
+                from artemis.llm.providers import build_models_list_url
+
+                endpoint = build_models_list_url(base_url or "https://api.openai.com/v1")
                 resp = await client.get(endpoint, headers={"Authorization": f"Bearer {clean_key}"})
                 if resp.status_code == 200:
-                    return True, "OpenAI API key verified successfully."
-                err_msg = _extract_error_message(resp)
+                    return (
+                        True,
+                        "Catalog authentication verified successfully; model capabilities are not tested.",
+                    )
+                err_msg = _extract_error_message(resp, clean_key)
                 return False, f"OpenAI API verification failed ({resp.status_code}): {err_msg}"
 
             elif clean_provider in ("anthropic", "claude"):
-                url = "https://api.anthropic.com/v1/models"
+                from artemis.llm.providers import build_models_list_url
+
+                url = build_models_list_url(
+                    base_url or "https://api.anthropic.com", kind="anthropic", vendor=vendor
+                )
                 resp = await client.get(
                     url,
                     headers={
@@ -145,8 +167,11 @@ async def validate_api_key(
                     },
                 )
                 if resp.status_code == 200:
-                    return True, "Anthropic Claude API key verified successfully."
-                err_msg = _extract_error_message(resp)
+                    return (
+                        True,
+                        "Catalog authentication verified successfully; image, tools and search permissions are not tested.",
+                    )
+                err_msg = _extract_error_message(resp, clean_key)
                 return False, f"Anthropic API verification failed ({resp.status_code}): {err_msg}"
 
             elif clean_provider == "openrouter":
@@ -154,7 +179,7 @@ async def validate_api_key(
                 resp = await client.get(url, headers={"Authorization": f"Bearer {clean_key}"})
                 if resp.status_code == 200:
                     return True, "OpenRouter API key verified successfully."
-                err_msg = _extract_error_message(resp)
+                err_msg = _extract_error_message(resp, clean_key)
                 return False, f"OpenRouter API verification failed ({resp.status_code}): {err_msg}"
 
             elif clean_provider in ("xai", "grok"):
@@ -162,7 +187,7 @@ async def validate_api_key(
                 resp = await client.get(url, headers={"Authorization": f"Bearer {clean_key}"})
                 if resp.status_code == 200:
                     return True, "xAI API key verified successfully."
-                err_msg = _extract_error_message(resp)
+                err_msg = _extract_error_message(resp, clean_key)
                 return False, f"xAI API verification failed ({resp.status_code}): {err_msg}"
 
             elif clean_provider in ("ollama", "vllm", "custom"):
@@ -174,7 +199,7 @@ async def validate_api_key(
                     resp = await client.get(endpoint, headers=headers)
                     if resp.status_code == 200:
                         return True, f"Custom endpoint ({base_url}) verified successfully."
-                    err_msg = _extract_error_message(resp)
+                    err_msg = _extract_error_message(resp, clean_key)
                     return (
                         False,
                         f"Custom endpoint verification failed ({resp.status_code}): {err_msg}",
@@ -182,10 +207,7 @@ async def validate_api_key(
                 return True, "Custom endpoint configured."
 
             else:
-                # Unknown provider - fallback to basic length check
-                if len(clean_key) >= 8:
-                    return True, f"Credentials for {provider} configured."
-                return False, f"Invalid API key format for {provider}."
+                return False, "Unsupported provider. Choose a supported protocol and endpoint."
 
     except httpx.TimeoutException:
         logger.warning(f"Timeout verifying API key for {provider}")
@@ -193,9 +215,9 @@ async def validate_api_key(
             False,
             f"Connection to {provider.capitalize()} API timed out. Please check network/proxy settings.",
         )
-    except httpx.RequestError as exc:
-        logger.warning(f"Network error verifying API key for {provider}: {exc}")
-        return False, f"Network error connecting to {provider.capitalize()} API: {exc}"
-    except Exception as exc:
-        logger.error(f"Unexpected error validating API key for {provider}: {exc}")
-        return False, f"Validation error: {exc}"
+    except httpx.RequestError:
+        logger.warning("Network error verifying API key")
+        return False, "Network error connecting to the provider API. Check the endpoint and retry."
+    except Exception:
+        logger.error("Unexpected error validating API key")
+        return False, "Validation failed. Check the provider protocol and endpoint."

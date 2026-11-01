@@ -106,6 +106,30 @@ cd artemis
 
 > **提示**：启动后将自动在默认浏览器中打开 Web 控制台（`http://localhost:8000`），提供设备连接向导、实时投屏、任务演练与状态回放面板。你也可以通过命令行直接运行：`uv run artemis run "打开系统设置，找到电池选项并告诉我当前电量" --profile flash`。
 
+### 配置 MiniMax
+
+MiniMax 实现目前位于本 fork 的 [feat/model-config 分支](https://github.com/brakchen/artemis/tree/feat/model-config)。
+
+通过 Anthropic Messages 接口迁移全部生效的模型角色：
+
+```bash
+uv run artemis init --provider minimax
+```
+
+命令会隐藏输入 Key。默认模型是 `MiniMax-M3.1-Flash`，地址为 `https://api.minimax.cn/anthropic`；可用 `--base-url` 指定其他支持的 Messages 地址。若已在当前进程中设置 `MINIMAX_API_KEY` 和可选的 `MINIMAX_BASE_URL`，加 `--import-env` 显式导入。已有注册表 Key 默认优先，只有再加 `--replace-key` 才会被环境值替换。这些变量只用于初始化导入，运行时从 Provider 注册表读取凭据。
+
+初始化会迁移生效角色的主备、utility 和辅助模型，保留无关设置及未选中的 presets。`--name` 指定注册名称，`--config` 指定主配置文件。已有条目在替换 Key 提示中留空会保留原 Key。切换 `MiniMax-M3` 时用 `--model MiniMax-M3` 同步迁移思考参数。仅在控制台保存 Provider 后，仍需完成角色迁移，才能运行全部任务。
+
+若兼容的 Messages 网关不提供模型目录，可手填模型 ID，关闭“保存前验证模型目录鉴权”，选择“跳过验证并保存”。此操作只保存配置，凭据和模型权限仍标为未验证。
+
+Key 保存在受保护的 Provider 注册表，主配置只引用别名。运行 `artemis providers list` 可查看脱敏条目和实际注册表位置。wheel 安装使用可写的应用配置，不修改随包模板。模型目录鉴权成功不代表图像、搜索或原生语音权限已验证；MiniMax OCR 使用任务模型的凭据，无需独立 Google Vision Key。
+
+CLI、控制台和 SDK 应使用一致的 `ARTEMIS_APP_DIR` 及主配置选择。修改环境变量或选中的配置路径后，重启已有控制台、MCP 和 worker 进程；SDK 应用需重新构造 Agent 配置。正在执行的任务保留自己的配置快照。
+
+已有文件会在原位置生成受保护的 `<文件名>.backup-<UTC时间戳>` 备份，命令会输出备份和原文件对应关系。回滚前停止新任务、比较当前文件；在保留后续编辑的前提下，一起恢复对应的配置、注册表和环境文件备份。发布采用逐文件原子替换和条件回滚，不是多文件原子事务。
+
+本分支的 MiniMax 验证使用合成输入和 SDK HTTP 模拟响应。账号能力、定位精度及真实设备表现仍需单独验证；本文其他位置的上游基准完成率和单步耗时不代表已实测的 MiniMax 结果。
+
 <a id="mcp-setup"></a>
 <a id="mcp"></a>
 <details>

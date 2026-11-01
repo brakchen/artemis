@@ -46,7 +46,8 @@ for _p in (str(_workspace_root), str(_apps_dir), str(_admin_console_dir), str(_c
         sys.path.insert(0, _p)
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import uvicorn
 
 from artemis.runtime import (
@@ -109,6 +110,26 @@ async def _lifespan(_app: "FastAPI"):
 
 # Initialize FastAPI application
 app = FastAPI(title="Artemis Admin & Trace Console", lifespan=_lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def safe_request_validation_error(_request, exc: RequestValidationError):
+    """FastAPI includes nested request inputs/ctx despite Pydantic hiding inputs.
+
+    Return only field locations and stable error codes. Even custom validator
+    messages and ctx exceptions may contain a submitted credential.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {"loc": list(error["loc"]), "type": error["type"], "msg": "Invalid request value"}
+                for error in exc.errors()
+            ]
+        },
+    )
+
+
 LIFECYCLE_TOKEN = os.environ.get("ARTEMIS_LIFECYCLE_TOKEN") or secrets.token_urlsafe(32)
 app.state.lifecycle_token = LIFECYCLE_TOKEN
 

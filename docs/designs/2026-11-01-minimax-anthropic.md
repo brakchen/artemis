@@ -529,6 +529,14 @@ Google 路径核查除六模块外，还包括 `artemis/constants.py`、`artemis
 
 本节记录技术方案的变更与逐阶段实施证据；标明“实施中”的条目仍未完成验收。后续修订本文时须同步更新本节，按版本倒序记录日期、变更内容及验证范围。
 
+### 实施进度：D2 配置入口与初始化迁移 — 2026-11-02
+
+- HTTP、CLI、UI共用完整Provider候选，贯穿协议/vendor/base；原写锁内合并显式字段，空白Key保留、不重放旧凭据，明确确认才能清除。目录测试按OpenAI/Anthropic实际协议请求，缺少MiniMax地址本地拒绝，实际422及传输异常不回显Key。
+- `artemis init --provider minimax`迁移全部生效主备/default/nodes/utils/aux，canonical验证未发布候选后写受保护备份。环境导入默认保留已有Key，`--import-env --replace-key`才替换；空/占位值预发布拒绝。解析与source/target比较绑定同一字节revision，保留并发编辑；逐文件原子发布配条件回滚，不冒称多文件原子事务。中文与空格路径经实际dotenv下一次加载验证。
+- MiniMax预设、协议编辑、手填ID、公开元数据编辑、Key留空、确认清除与失败重试可用；可明确选择跳过目录验证，显示未验证而非Ready。移除rawKey回填，纠正Key位置/双协议说明及无数据时虚构Gemini；配置获取失败清除旧模型，重试恢复，已知部分字段保持。CLI父入口在设备/daemon前纯预检。
+- 19路径v4通过独立规格及质量复核；root完整单测3282 passed/8 skipped/88既有warnings，384.46秒。Angular15例、生产build11.797秒、应用/测试TypeScript检查通过；root哈希/范围/Ruff/format/diff保持，隔离Chrome+假接口检查当前构建。失败历史与已关闭反例详实施记录，不以局部通过替代完整suite。
+- README/CN补实际初始化、Key存储、显式导入、保护备份、条件回滚及长期进程配置来源说明。D3诊断/MCP/API父入口/容器和E整链仍待；保留旧通用文件名占位符等UI边界，未宣称全面无障碍、真实账号权限或设备定位精度已验证。
+
 ### 实施范围补漏：Explorer 生成 Python 的动作旁路 — 2026-11-02（待 E 收口）
 
 - 静态复核确认 Explorer 可经 ImageProcessor 调用 Jupyter PythonExecutor，现 AST 校验仅禁止直接 resize，不能约束设备命令或系统副作用。此前三个 shell 导出入口的限制没有覆盖此路，不能据此宣称所有 MiniMax 动作已受门禁。

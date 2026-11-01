@@ -14,8 +14,8 @@
 
 """User-configured LLM provider registry.
 
-Lets operators register named model providers (OpenAI-compatible endpoints:
-``base_url`` + ``api_key`` + optional default ``model``), keep several of them
+Lets operators register named OpenAI-compatible or Anthropic Messages providers:
+``base_url`` + ``api_key`` + optional default ``model``. Keep several of them
 side by side, and pick one as the default provider used whenever a model config
 does not name an explicit provider.
 
@@ -49,6 +49,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from filelock import FileLock
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
@@ -178,7 +179,7 @@ class LLMProvider(BaseModel):
 
     model_config = {"extra": "forbid", "hide_input_in_errors": True}
     name: str = Field(description="Unique provider name, e.g. 'my-proxy'")
-    kind: str = Field(default="openai", description="Wire format: openai (OpenAI-compatible)")
+    kind: str = Field(default="openai", description="Wire format: openai or anthropic Messages")
     vendor: Literal["minimax"] | None = None
     api_base: str | None = Field(
         default=None,
@@ -201,6 +202,18 @@ class LLMProvider(BaseModel):
     def _validate_vendor(self) -> LLMProvider:
         if self.vendor == "minimax" and self.kind != "anthropic":
             raise ValueError("vendor=minimax requires kind=anthropic")
+        if self.kind == "anthropic" and self.api_base:
+            parts = urlsplit(self.api_base)
+            path = parts.path.rstrip("/")
+            if path.endswith("/v1"):
+                path = path[:-3]
+            if (
+                self.vendor == "minimax"
+                and parts.hostname in {"api.minimax.cn", "api.minimax.io"}
+                and not path
+            ):
+                path = "/anthropic"
+            self.api_base = urlunsplit(parts._replace(path=path))
         return self
 
     @field_validator("name")
@@ -295,7 +308,7 @@ class LLMProviderRegistry:
 
     @contextmanager
     def _locked(self):
-        # filelock 3.32.3 (Unlicense), https://py-filelock.readthedocs.io/:
+        # filelock 3.32.3 (MIT), https://py-filelock.readthedocs.io/:
         # use its maintained Windows/POSIX process lock for the whole transaction.
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(self.path) + ".lock", mode=0o600):
@@ -378,6 +391,57 @@ class LLMProviderRegistry:
 
     def names(self) -> list[str]:
         return [p.name for p in self.list()]
+
+    def candidate(self, *, name: str | None = None, **draft: Any) -> LLMProvider:
+        """Merge explicitly supplied draft fields with stored provider metadata.
+
+        HTTP fields_set and optional CLI arguments feed this same owner. Blank
+        edit keys retain the stored secret; clearing is a separate intent.
+        ``add`` remains the full-replacement storage operation.
+        """
+        existing = self.get(name) if name else None
+        data = existing.to_storage_dict() if existing else {"name": name or "draft"}
+        clear = draft.pop("clear_api_key", False)
+        key = draft.pop("api_key", None)
+        if clear and key and str(key).strip():
+            raise ValueError("api_key and clear_api_key are mutually exclusive")
+        data.update(draft)
+        if name:
+            data["name"] = name
+        if clear:
+            if existing is None:
+                raise ValueError("api_key is required for a new provider")
+            data["api_key"] = ""
+        elif key and str(key).strip():
+            data["api_key"] = str(key).strip()
+        elif not data.get("api_key"):
+            raise ValueError("api_key is required for a new provider")
+        entry = LLMProvider.model_validate(data)
+        if not clear and entry.vendor == "minimax" and not entry.api_base:
+            raise ValueError("MiniMax requires an explicit Messages base URL")
+        return entry
+
+    def with_candidate(
+        self, entry: LLMProvider, *, make_default: bool = False
+    ) -> LLMProviderRegistry:
+        """Return an unpublished registry revision for canonical endpoint preflight."""
+        registry = self.snapshot()
+        data = registry._read()
+        data["providers"] = [raw for raw in data["providers"] if raw.get("name") != entry.name] + [
+            entry.to_storage_dict()
+        ]
+        if make_default or not data.get("default_provider"):
+            data["default_provider"] = entry.name
+        registry._snapshot_data = data
+        return registry
+
+    def save_candidate(self, *, name: str, make_default: bool = False, **draft: Any) -> LLMProvider:
+        """Merge edit fields under the storage lock, preserving concurrent metadata."""
+        with self._locked():
+            entry = self.candidate(name=name, **draft)
+            data = entry.to_storage_dict()
+            data["clear_api_key"] = bool(draft.get("clear_api_key"))
+            return self._add_unlocked(**data, make_default=make_default, replace=True)
 
     # ----------------------------------------------------------------- write
     def add(
@@ -726,7 +790,7 @@ def resolve_model_config(
 
 
 # ---------------------------------------------------------------------------
-# Model auto-discovery (OpenAI-compatible `GET /models`)
+# Protocol-aware model catalog discovery (OpenAI / Anthropic Messages)
 # Mirrors pi-web's model discovery: build the protocol-correct list URL, call it
 # with the right auth header, and accept the handful of shapes upstreams return.
 # ---------------------------------------------------------------------------
@@ -744,8 +808,8 @@ class DiscoveredModel(BaseModel):
     name: str | None = None
 
 
-def build_models_list_url(api_base: str, *, kind: str = "openai") -> str:
-    """Return the model-list endpoint for an OpenAI-compatible base URL."""
+def build_models_list_url(api_base: str, *, kind: str = "openai", vendor: str | None = None) -> str:
+    """Return the protocol-correct catalog URL (not a model capability test)."""
     base = (api_base or "").strip()
     if not base:
         raise ValueError("api_base is required to discover models")
@@ -754,6 +818,14 @@ def build_models_list_url(api_base: str, *, kind: str = "openai") -> str:
     base = base.rstrip("/")
     if kind not in (*SUPPORTED_KINDS, "google"):
         raise ValueError(f"unsupported provider kind {kind!r}")
+    if vendor not in (None, "minimax"):
+        raise ValueError("unsupported provider vendor")
+    if vendor == "minimax":
+        if kind != "anthropic":
+            raise ValueError("vendor=minimax requires kind=anthropic")
+        parts = urlsplit(base)
+        if parts.hostname in {"api.minimax.cn", "api.minimax.io"} and parts.path in {"", "/v1"}:
+            base = urlunsplit(parts._replace(path="/anthropic"))
     if re.search(r"/models$", base, re.IGNORECASE):
         return base
     path = base
@@ -823,16 +895,17 @@ async def discover_models(
     api_key: str | None = None,
     *,
     kind: str = "openai",
+    vendor: str | None = None,
     timeout: float = MODELS_LIST_TIMEOUT_SECONDS,
 ) -> tuple[list[DiscoveredModel], str]:
-    """Fetch the model list an OpenAI-compatible endpoint exposes.
+    """Fetch a protocol-correct catalog without claiming model capabilities.
 
     Returns ``(models, endpoint)``. Raises ``RuntimeError`` with an
     operator-readable message on transport or upstream failures.
     """
     import httpx
 
-    endpoint = build_models_list_url(api_base, kind=kind)
+    endpoint = build_models_list_url(api_base, kind=kind, vendor=vendor)
     headers = {"Accept": "application/json"}
     if kind == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
@@ -843,6 +916,7 @@ async def discover_models(
     models: dict[str, DiscoveredModel] = {}
     cursor: str | None = None
     seen_cursors: set[str] = set()
+    failure: str | None = None
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             for _ in range(20):
@@ -851,12 +925,15 @@ async def discover_models(
                     kwargs["params"] = {"after_id": cursor}
                 response = await client.get(endpoint, **kwargs)
                 if response.status_code >= 400:
-                    detail = response.text.strip()[:300] or response.reason_phrase
-                    raise RuntimeError(f"Upstream returned HTTP {response.status_code}: {detail}")
+                    # Upstreams may echo credentials or request bodies. Status
+                    # is sufficient recovery information; never relay that body.
+                    failure = f"Upstream returned HTTP {response.status_code}"
+                    break
                 try:
                     payload = response.json()
-                except ValueError as exc:
-                    raise RuntimeError("Upstream model list was not valid JSON") from exc
+                except ValueError:
+                    failure = "Upstream model list was not valid JSON"
+                    break
                 for model in parse_discovered_models(payload):
                     models[model.id] = model
                 if (
@@ -871,15 +948,19 @@ async def discover_models(
                     or not next_cursor
                     or next_cursor in seen_cursors
                 ):
-                    raise RuntimeError("Invalid or repeated upstream models cursor")
+                    failure = "Invalid or repeated upstream models cursor"
+                    break
                 seen_cursors.add(next_cursor)
                 cursor = next_cursor
             else:
-                raise RuntimeError("Upstream models pagination exceeded 20 pages")
-    except RuntimeError:
-        raise
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        raise RuntimeError(f"Could not reach {endpoint}: {exc}") from exc
+                failure = "Upstream models pagination exceeded 20 pages"
+    except Exception:  # Transport exception text may contain headers or keys.
+        failure = "Could not reach the provider model catalog"
+
+    # Raise after the transport exception scope has ended, so even the hidden
+    # exception context cannot retain an untrusted body, header or credential.
+    if failure:
+        raise RuntimeError(failure) from None
 
     if not models:
         raise RuntimeError("No models found in the upstream response")

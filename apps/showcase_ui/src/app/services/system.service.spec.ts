@@ -3,7 +3,7 @@ import { HttpTestingController, provideHttpClientTesting } from '@angular/common
 import { TestBed } from '@angular/core/testing';
 
 import { SystemReadinessReport } from '../core/models/system.model';
-import { SystemService } from './system.service';
+import { ModelConfigEnvResponse, SystemService } from './system.service';
 
 describe('SystemService readiness polling', () => {
   let service: SystemService;
@@ -169,5 +169,33 @@ describe('SystemService readiness polling', () => {
 
     expect(service.isRemoteAdbServer()).toBeFalse();
     expect(service.adbServerStatus()?.endpoint.port).toBe(5037);
+  });
+
+  it('clears a known model configuration on fetch failure, propagates the error and recovers on retry', () => {
+    const consoleError = spyOn(console, 'error');
+    const configuration: ModelConfigEnvResponse = {
+      config_path: '/isolated/artemis.jsonc', config_filename: 'artemis.jsonc', config_content: '{}',
+      default_model: { provider: 'my-mini', model: 'MiniMax-M3.1-Flash' }, presets: {},
+      effective_default_model: {
+        provider: 'my-mini', model: 'MiniMax-M3.1-Flash', resolved_via: 'explicit',
+        fallback: { provider: 'my-mini', model: 'MiniMax-M3' }
+      },
+      env_path: '/isolated/.env', env_filename: '.env', env_vars: []
+    };
+    service.fetchModelConfigEnv().subscribe();
+    http.expectOne('/api/system/model-config-env').flush(configuration);
+    expect(service.modelConfigEnv()?.effective_default_model?.model).toBe('MiniMax-M3.1-Flash');
+
+    let errorStatus = 0;
+    service.fetchModelConfigEnv().subscribe({ error: error => errorStatus = error.status });
+    http.expectOne('/api/system/model-config-env').flush({ detail: 'Read failed' }, { status: 500, statusText: 'Server Error' });
+    expect(errorStatus).toBe(500);
+    expect(consoleError).toHaveBeenCalled();
+    expect(service.modelConfigEnv()).toBeNull();
+
+    service.fetchModelConfigEnv().subscribe();
+    http.expectOne('/api/system/model-config-env').flush(configuration);
+    expect(service.modelConfigEnv()?.effective_default_model?.provider).toBe('my-mini');
+    expect(service.modelConfigEnv()?.effective_default_model?.model).toBe('MiniMax-M3.1-Flash');
   });
 });

@@ -268,6 +268,8 @@ class UpdateCredentialsRequest(BaseModel):
         description="Provider identifier (e.g. google, gemini, openai, anthropic, openrouter, ocr)",
     )
     api_key: str = Field(description="The secret API key string to configure")
+    clear_api_key: bool = False
+    confirm_clear: bool = False
     persist_to_env: bool = Field(
         default=True, description="Whether to persist the key to .env file"
     )
@@ -338,6 +340,9 @@ async def update_credentials(request: UpdateCredentialsRequest):
     provider = request.provider.strip().lower()
     key = request.api_key.strip()
 
+    if request.clear_api_key and (key or not request.confirm_clear):
+        raise HTTPException(status_code=400, detail="Confirm clearing and leave the API key blank")
+
     # If a non-empty key is provided, verify it before saving
     if key:
         is_valid, validation_msg = await validate_api_key(provider=provider, api_key=key)
@@ -350,13 +355,16 @@ async def update_credentials(request: UpdateCredentialsRequest):
     try:
         from artemis.config import settings
 
-        settings.set_api_key(provider, key, persist_to_env=request.persist_to_env)
+        if key or request.clear_api_key:
+            settings.set_api_key(provider, key, persist_to_env=request.persist_to_env)
 
         # Re-run all diagnostic probes to build updated report
         readiness_engine.invalidate_cache()
         updated_report = await readiness_engine.run_all(force_refresh=True)
         action_desc = (
-            "successfully verified, updated, and applied" if key else "successfully cleared"
+            "successfully verified, updated, and applied"
+            if key
+            else ("successfully cleared" if request.clear_api_key else "preserved")
         )
         return {
             "status": "success",
@@ -366,61 +374,84 @@ async def update_credentials(request: UpdateCredentialsRequest):
         }
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to update credentials: {exc}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to update credentials") from None
 
 
 # ---------------------------------------------------------------------------
-# User-registered LLM providers (OpenAI-compatible endpoints)
+# User-registered LLM providers (OpenAI-compatible / Anthropic Messages)
 # ---------------------------------------------------------------------------
 
 
-class LLMProviderRequest(BaseModel):
-    """Payload to register or update a named OpenAI-compatible LLM provider."""
+class LLMProviderDraft(BaseModel):
+    """Only explicitly submitted fields replace stored provider metadata."""
 
-    name: str = Field(description="Unique provider name, e.g. 'my-proxy'")
-    api_key: str = Field(description="API key for the provider endpoint")
-    api_base: str | None = Field(
-        default=None, description="OpenAI-compatible base URL, e.g. https://api.example.com/v1"
+    model_config = {"extra": "forbid", "hide_input_in_errors": True}
+    name: str | None = None
+    api_key: str | None = None
+    api_base: str | None = None
+    model: str | None = None
+    fallback_model: str | None = None
+    kind: str = "openai"
+    vendor: str | None = None
+    temperature: float | None = None
+    timeout_seconds: float | None = None
+    is_multimodal: bool = True
+    enabled: bool | None = None
+    clear_api_key: bool = False
+    confirm_clear: bool = False
+
+
+class LLMProviderRequest(LLMProviderDraft):
+    name: str
+    make_default: bool = False
+    verify: bool = True
+
+
+class LLMProviderTestRequest(LLMProviderDraft):
+    pass
+
+
+class LLMProviderModelsRequest(LLMProviderDraft):
+    pass
+
+
+def _provider_candidate(request: LLMProviderDraft):
+    from artemis.llm.providers import provider_registry
+
+    draft = request.model_dump(
+        exclude_unset=True, exclude={"make_default", "verify", "confirm_clear"}
     )
-    model: str | None = Field(default=None, description="Default model name for this provider")
-    fallback_model: str | None = Field(
-        default=None,
-        description="Fallback model name (mirrors artemis.jsonc default.fallback.model)",
+    if request.clear_api_key and not request.confirm_clear:
+        raise HTTPException(status_code=400, detail="Confirm before clearing the stored API key")
+    try:
+        return provider_registry.candidate(**draft)
+    except ValueError:
+        # Pydantic errors may mention values in custom messages. Keep response
+        # independent of submitted credentials, including malformed nested values.
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid provider configuration. Check protocol, vendor, endpoint and key.",
+        ) from None
+
+
+async def _validate_provider_candidate(entry):
+    from artemis.utils.credentials_validator import validate_api_key
+
+    valid, message = await validate_api_key(
+        provider=entry.kind,
+        api_key=entry.api_key.get_secret_value(),
+        base_url=entry.api_base,
+        vendor=entry.vendor,
     )
-    kind: str = Field(default="openai", description="Wire format (currently 'openai' compatible)")
-    temperature: float | None = Field(default=None, description="Optional sampling temperature")
-    timeout_seconds: float | None = Field(default=None, description="Optional request timeout")
-    is_multimodal: bool = Field(default=True, description="Whether image inputs are supported")
-    make_default: bool = Field(
-        default=False, description="Set this provider as the default LLM provider"
-    )
-    verify: bool = Field(
-        default=True, description="Verify the key against the endpoint before saving"
-    )
-
-
-class LLMProviderTestRequest(BaseModel):
-    """Payload to validate a provider endpoint + key without saving."""
-
-    api_key: str = Field(description="API key to test")
-    api_base: str | None = Field(default=None, description="OpenAI-compatible base URL")
-
-
-class LLMProviderModelsRequest(BaseModel):
-    """Payload to list the models an OpenAI-compatible endpoint exposes."""
-
-    name: str | None = Field(
-        default=None, description="Registered provider name; its stored credentials are reused"
-    )
-    api_base: str | None = Field(default=None, description="OpenAI-compatible base URL")
-    api_key: str | None = Field(default=None, description="API key for the endpoint")
-    kind: str = Field(default="openai", description="Wire format (openai compatible)")
+    if not valid:
+        raise HTTPException(status_code=400, detail=message)
+    return message
 
 
 @router.get("/llm-providers")
 async def list_llm_providers():
-    """List user-registered LLM providers. Secrets are masked, never returned."""
+    """List public provider metadata; credentials stay in the registry."""
     from artemis.llm.providers import provider_registry
 
     return {
@@ -432,92 +463,55 @@ async def list_llm_providers():
 
 @router.post("/llm-providers/test")
 async def test_llm_provider(request: LLMProviderTestRequest):
-    """Verify an OpenAI-compatible endpoint + API key without persisting anything."""
-    from artemis.utils.credentials_validator import validate_api_key
-
-    key = request.api_key.strip()
-    if not key:
-        raise HTTPException(status_code=400, detail="API key cannot be empty.")
-    is_valid, message = await validate_api_key(
-        provider="openai", api_key=key, base_url=request.api_base
-    )
-    if not is_valid:
-        raise HTTPException(status_code=400, detail=message)
-    return {"valid": True, "message": message}
+    entry = _provider_candidate(request)
+    return {"valid": True, "message": await _validate_provider_candidate(entry)}
 
 
 @router.post("/llm-providers/models")
 async def discover_llm_provider_models(request: LLMProviderModelsRequest):
-    """List the models an OpenAI-compatible endpoint exposes (``GET {base}/models``).
+    from artemis.llm.providers import discover_models
 
-    Accepts either the name of a registered provider (credentials are read from
-    the registry, never echoed back) or an inline ``api_base``/``api_key`` pair
-    for a provider that is about to be saved.
-    """
-    from artemis.llm.providers import discover_models, provider_registry
-
-    api_base = (request.api_base or "").strip()
-    api_key = (request.api_key or "").strip()
-    kind = (request.kind or "openai").strip()
-
-    if request.name:
-        entry = provider_registry.get(request.name)
-        if entry is None:
-            raise HTTPException(status_code=404, detail=f"unknown provider '{request.name}'")
-        api_base = api_base or (entry.api_base or "")
-        api_key = api_key or entry.api_key.get_secret_value()
-        kind = entry.kind
-
-    if not api_base:
+    entry = _provider_candidate(request)
+    if not entry.api_base:
         raise HTTPException(status_code=400, detail="api_base is required to discover models")
-
     try:
-        models, endpoint = await discover_models(api_base, api_key or None, kind=kind)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        models, endpoint = await discover_models(
+            entry.api_base, entry.api_key.get_secret_value(), kind=entry.kind, vendor=entry.vendor
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail="Invalid provider endpoint or protocol"
+        ) from None
     except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
+        raise HTTPException(status_code=502, detail=str(exc)) from None
     return {"models": [{"id": m.id, "name": m.name} for m in models], "endpoint": endpoint}
 
 
 @router.post("/llm-providers")
 async def upsert_llm_provider(request: LLMProviderRequest):
-    """Register or update an OpenAI-compatible LLM provider (API key + base URL)."""
     from artemis.llm.providers import provider_registry
-    from artemis.utils.credentials_validator import validate_api_key
 
-    key = request.api_key.strip()
-    if not key:
-        raise HTTPException(status_code=400, detail="API key cannot be empty.")
-
-    if request.verify:
-        is_valid, message = await validate_api_key(
-            provider="openai", api_key=key, base_url=request.api_base
-        )
-        if not is_valid:
-            raise HTTPException(status_code=400, detail=f"API key verification failed: {message}")
-
+    entry = _provider_candidate(request)
+    if request.verify and not request.clear_api_key:
+        await _validate_provider_candidate(entry)
     try:
-        entry = provider_registry.add(
-            name=request.name,
-            api_key=key,
-            api_base=request.api_base,
-            model=request.model,
-            fallback_model=request.fallback_model,
-            kind=request.kind,
-            temperature=request.temperature,
-            timeout_seconds=request.timeout_seconds,
-            is_multimodal=request.is_multimodal,
-            make_default=request.make_default,
+        # Re-merge submitted fields under the write lock so simultaneous edits
+        # of hidden metadata are not overwritten after authentication.
+        draft = request.model_dump(
+            exclude_unset=True, exclude={"make_default", "verify", "confirm_clear"}
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
+        entry = provider_registry.save_candidate(**draft, make_default=request.make_default)
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail="Could not save provider configuration"
+        ) from None
     return {
         "status": "success",
         "provider": entry.to_public_dict(),
         "default_provider": provider_registry.default_provider_name,
+        "message": "Provider saved. For a complete MiniMax role migration, run artemis init --provider minimax --name "
+        + entry.name
+        + ". Saving a provider does not verify task readiness.",
     }
 
 
