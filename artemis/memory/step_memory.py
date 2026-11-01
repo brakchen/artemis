@@ -27,6 +27,8 @@ import asyncio
 from typing import Any
 
 from artemis.data_engine.trace import detached_trace
+from artemis.llm.reliability import LLMCallError, logical_call_scope
+from artemis.utils.vision import uses_minimax
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -103,6 +105,7 @@ class StepMemoryService:
         self._flush_timeout_s = max(0.0, flush_timeout_s)
         self._aliases: dict[JobKey, JobKey] = {}
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
+        self._strict = uses_minimax(ctx)
 
     # ------------------------------------------------------------------
     # Keying
@@ -125,9 +128,15 @@ class StepMemoryService:
             payload: Lens-specific input data; stored until the job resolves.
             aliases: Additional keys (e.g. tool_call_id) that resolve to ``key``.
         """
+        key = self.resolve_key(key)
         for alias in aliases:
             if alias is not None and alias != key:
                 self._aliases[alias] = key
+
+        if self._strict and key in self._step_inputs:
+            # A logical job owns its payload and budget, including while
+            # pending or terminal. A new source must have a new canonical key.
+            return
 
         self._step_inputs[key] = payload
         self._failed.discard(key)
@@ -155,7 +164,7 @@ class StepMemoryService:
         a lens records (model calls, their thinking/raw_thinking children,
         stream deltas, usage) can be attributed to the submitter's step.
         """
-        with detached_trace(self.trace_node_name):
+        with detached_trace(self.trace_node_name), logical_call_scope(independent=True):
             await self._run_attempts(key)
 
     async def _run_attempts(self, key: JobKey) -> None:
@@ -168,7 +177,12 @@ class StepMemoryService:
         """
         while key not in self._summaries:
             async with self._semaphore:
-                succeeded = await self._attempt(key)
+                try:
+                    succeeded = await self._attempt(key)
+                except LLMCallError:
+                    self._failed.add(key)
+                    self._on_status(key, "failed")
+                    return
             if succeeded:
                 return
 
@@ -208,6 +222,8 @@ class StepMemoryService:
             return False
         try:
             summary = await self._lens.render(key, payload)
+        except LLMCallError:
+            raise
         except Exception as e:
             logger.warning(f"StepMemoryService: lens '{self._lens.name}' attempt failed: {e}")
             return False

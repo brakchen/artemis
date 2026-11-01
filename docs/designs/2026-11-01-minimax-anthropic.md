@@ -374,7 +374,7 @@ flowchart LR
 
 MiniMax 任务中 Agent 发起的定位/按索引动作，无论候选来自 XML 结构预匹配、OCR 还是模型，都检查动作与快照有效性，采用严格类型化的 allow/block/unknown 判定；缺字段、低置信否定、模型/鉴权/裁剪异常不可转换为 allow。XML 证据充分时允许本地验证，不强制增加付费视觉调用。unknown 返回可恢复阻断并要求重新观察，不沿用旧像素验证的 fail-open 分支。直接按用户明确坐标执行的独立工具不因此被强制新增付费视觉判断。
 
-实现边界复核：通用 ADB shell 可以直接发送 `input tap`，仅使快照失效不足以满足上述门禁。因此 MiniMax Agent 绑定的两个任意 shell 入口及 `manage_task.send_input` 返回明确 unsupported，UI 操作使用现有受校验动作，日志使用现有读取/检索工具；后台任务查询、结束仍可用。限制放在现有 Agent 工具导出闭包，不接受模型声明的来源参数。其他厂商及用户独立命令入口保留原契约。独立脚本执行前使快照失效，其跟踪进程/线程结束后要求重新观察；任意脚本脱离的子进程属于无法仅由宿主进程结束证明的外部动态，不声称可以完全追踪。
+实现边界复核：通用 ADB shell 可以直接发送 `input tap`，仅使快照失效不足以满足上述门禁。因此 MiniMax Agent 绑定的两个任意 shell 入口及 `manage_task.send_input` 返回明确 unsupported，UI 操作使用现有受校验动作，日志使用现有读取/检索工具；后台任务查询、结束仍可用。限制放在现有 Agent 工具导出闭包，不接受模型声明的来源参数。 同一约束也覆盖 Explorer 经 [ImageProcessor](../../artemis/agents/image_processor/image_processor.py) 触发的模型生成 Python：现 [PythonExecutor](../../artemis/utils/python_executor.py) 的缩放 AST 检查不构成设备或系统隔离，MiniMax Agent 不开放这项任意代码入口，使用既有固定裁剪、缩放与定位工具；不得用新的脚本黑名单假称已隔离。其他厂商及用户独立命令入口保留原契约。独立脚本执行前使快照失效，其跟踪进程/线程结束后要求重新观察；任意脚本脱离的子进程属于无法仅由宿主进程结束证明的外部动态，不声称可以完全追踪。
 
 Pro burst、Flash 同轮多工具与 MCP 定位动作也必须检查来源有效性。首个改变屏幕的动作执行后，其余旧快照定位动作停止，重新观察/定位后再决定，不继续使用原索引。设备结果区分确定未执行、已派发和结果未知；确认命令可能已生效而响应丢失时，记录 unknown outcome 并观察，不由旧本地重试循环再次点击。“已派发”与“达到任务目标”分别记录。
 
@@ -528,6 +528,19 @@ Google 路径核查除六模块外，还包括 `artemis/constants.py`、`artemis
 ## 14. Changelog
 
 本节记录技术方案的变更与逐阶段实施证据；标明“实施中”的条目仍未完成验收。后续修订本文时须同步更新本节，按版本倒序记录日期、变更内容及验证范围。
+
+### 实施范围补漏：Explorer 生成 Python 的动作旁路 — 2026-11-02（待 E 收口）
+
+- 静态复核确认 Explorer 可经 ImageProcessor 调用 Jupyter PythonExecutor，现 AST 校验仅禁止直接 resize，不能约束设备命令或系统副作用。此前三个 shell 导出入口的限制没有覆盖此路，不能据此宣称所有 MiniMax 动作已受门禁。
+- 在第 7.4 节补入相同的任意代码限制；本轮 E 将在既有 Agent 入口阻断 MiniMax 自动生成 Python，保留固定 CPU 图像操作及 legacy/用户直接低层入口，验证零 kernel/模型/设备副作用与错误不升级为候选。尚未实施，不以静态发现当已修复。
+
+### 实施进度：D1 任务配置、辅助模型及历史回放 — 2026-11-02
+
+- 候选实现取消任务profile未知时的Google付费预热，在实际profile选定后、Task发布前复制typed配置并统一预检；保留nested fields_set和live callback身份，执行配置、memory与aux消费任务副本。无设备pure预检接口供后续CLI/MCP/控制台父入口复用。
+- 辅助主备在同registry快照中派生，区分implicit旧默认与explicit模型，按M3/Flash重建参数；后台同key去重及终止失败不复活，独立作业预算与内部重试共享。辅助usage只计一次，保留原ledger compaction base。
+- 统一显式主配置文件选择、保持独立legacy文件用途；保存非秘密实际模型快照供历史显示，MiniMax回放使用标准trace，Google patch仅有效Google路径。
+- 独立审查发现并修复两项配置所有权缺口：generic legacy结果通过context安装对象身份固定；SDK通过实际私有配置对象绑定判断准备状态，公开展示snapshot不能跳过复制或profile选择。v3相关回归446 passed/1 skipped，规格及质量复审各16例通过；root完整单测3220 passed/8 skipped，373.52秒，30源和C44物理哈希保持，Ruff/format/diff通过。旧测试有意义断言原字节保留，既有非空端点snapshot继续是单task上下文的权威，新task创建新上下文。
+- 完整测试另有一条旧视频fixture全局Path.stat模拟与日志线程目录创建的时序警告；隔离7例通过，但不据此宣称整套race已消除。E将收窄测试模拟，不屏蔽warning或修改设备行为。D2/D3/E仍待实施；未使用真实Key、模型请求或设备。
 
 ### 实施进度：C 视频、语音及回归修复 — 2026-11-01～02
 

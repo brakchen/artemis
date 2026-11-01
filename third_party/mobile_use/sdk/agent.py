@@ -390,17 +390,12 @@ class AgentBase:
             task_request.with_app_path(app_path=app_path)
         return await self._run_task(task_request.build())
 
-    async def _run_task(
-        self,
-        request: TaskRequest[TOutput],
-    ) -> str | dict | TOutput | None:
-        if not self._initialized:
-            raise AgentNotInitializedError()
-
-        if request.profile:
-            agent_profile = self._config.agent_profiles.get(request.profile)
+    def _select_agent_profile(self, profile: str | None) -> AgentProfile:
+        """Single profile selection rule, usable before SDK/device initialization."""
+        if profile:
+            agent_profile = self._config.agent_profiles.get(profile)
             if agent_profile is None:
-                if request.profile.lower() in (
+                if profile.lower() in (
                     "flash",
                     "pro",
                     "ultra",
@@ -408,9 +403,20 @@ class AgentBase:
                 ):
                     agent_profile = self._config.default_profile
                 else:
-                    raise AgentProfileNotFoundError(request.profile)
+                    raise AgentProfileNotFoundError(profile)
         else:
             agent_profile = self._config.default_profile
+
+        return agent_profile
+
+    async def _run_task(
+        self,
+        request: TaskRequest[TOutput],
+    ) -> str | dict | TOutput | None:
+        if not self._initialized:
+            raise AgentNotInitializedError()
+
+        agent_profile = self._select_agent_profile(request.profile)
 
         logger.info(str(agent_profile))
 
@@ -422,6 +428,19 @@ class AgentBase:
             or uuid.uuid4()
         )
 
+        context = ArtemisContext(
+            device=self._device_context,
+            adb_client=self._adb_client,
+            ui_adb_client=self._ui_adb_client,
+            llm_config=agent_profile.llm_config,
+        )
+
+        prepare_context = getattr(self, "_prepare_task_context", None)
+        if prepare_context is not None:
+            prepare_context(context, request, agent_profile)
+        else:
+            context.agent_config = self._config
+
         task = Task(
             id=task_id,
             device=self._device_context,
@@ -432,14 +451,6 @@ class AgentBase:
         )
         self._tasks.append(task)
         task_name = task.get_name()
-
-        context = ArtemisContext(
-            device=self._device_context,
-            adb_client=self._adb_client,
-            ui_adb_client=self._ui_adb_client,
-            llm_config=agent_profile.llm_config,
-            agent_config=self._config,
-        )
 
         output_config = None
         if request.output_description or request.output_format:
@@ -458,8 +469,8 @@ class AgentBase:
             last_state: State | None = None
             last_state_snapshot: dict | None = None
             output = None
-            effective_mode = getattr(self._config, "concurrency_mode", "per_device")
-            effective_max = getattr(self._config, "max_concurrency", None)
+            effective_mode = getattr(context.agent_config, "concurrency_mode", "per_device")
+            effective_max = getattr(context.agent_config, "max_concurrency", None)
             sess_id = (
                 self._session_id
                 or os.getenv("ARTEMIS_SESSION_ID")
@@ -530,7 +541,7 @@ class AgentBase:
                 await self._prepare_app_lock(task=task, context=context)
                 async with context:
                     recording_started = False
-                    if self._config.video_recording_tools_enabled:
+                    if context.agent_config.video_recording_tools_enabled:
                         try:
                             controller = get_controller(context)
 
@@ -600,20 +611,19 @@ class AgentBase:
                         else:
                             logger.info(f"[{task_name}] Invoking graph with input: {graph_input}")
                             await task.set_status(status="running", message="Invoking graph...")
+                            from langchain_core.runnables.config import merge_configs
+
+                            callbacks = context.agent_config.graph_config_callbacks
+                            if context.data_engine:
+                                callbacks = merge_configs(
+                                    {"callbacks": callbacks},
+                                    {"callbacks": [DataEngineCallbackHandler(context)]},
+                                )["callbacks"]
                             async for chunk in (await get_graph(context)).astream(
                                 input=graph_input,
                                 config={
                                     "recursion_limit": task.request.max_steps,
-                                    "callbacks": (
-                                        (
-                                            list(self._config.graph_config_callbacks)
-                                            if self._config.graph_config_callbacks is not None
-                                            else []
-                                        )
-                                        + [DataEngineCallbackHandler(context)]
-                                        if context.data_engine
-                                        else self._config.graph_config_callbacks
-                                    ),
+                                    "callbacks": callbacks,
                                 },
                                 stream_mode=[
                                     "messages",
@@ -705,8 +715,7 @@ class AgentBase:
                             )
                         except Exception as finalize_error:
                             logger.error(
-                                f"[{task_name}] Failed to finalize after crash:"
-                                f" {finalize_error}"
+                                f"[{task_name}] Failed to finalize after crash: {finalize_error}"
                             )
                         try:
                             if context.data_engine:

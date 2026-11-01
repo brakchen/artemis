@@ -173,8 +173,9 @@ def test_turn_limit_semantics(mock_context):
     with patch("artemis.controllers.unified_controller.get_driver"):
         assert FlashRunner(mock_context, goal="g", max_turns=0).turn_limit is None
         assert FlashRunner(mock_context, goal="g", max_turns=7).turn_limit == 7
-        with patch("artemis.agents.flash.runner.load_agent_config", side_effect=RuntimeError):
+        with patch("artemis.config.load_agent_config", side_effect=RuntimeError) as loader:
             assert FlashRunner(mock_context, goal="g").turn_limit is None
+            loader.assert_not_called()  # This context already owns its task config.
 
 
 # ---------------------------------------------------------------------------

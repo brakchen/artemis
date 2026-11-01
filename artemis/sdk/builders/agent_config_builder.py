@@ -45,7 +45,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._concurrency_mode: str = "per_device"
         self._max_concurrency: int | None = None
 
-        agent_cfg = load_agent_config()
+        agent_cfg = load_agent_config().model_copy(deep=True)
         self._ocr = agent_cfg.ocr.model_copy(deep=True)
         self._explorer = agent_cfg.explorer
         self._explorer_versions = agent_cfg.explorer_versions
@@ -73,7 +73,8 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._outputter = agent_cfg.outputter
         self._disable_outputter = not agent_cfg.outputter.enabled
         self._flash = agent_cfg.flash
-        self._pro = agent_cfg.pro
+        self._pro = agent_cfg.pro.model_copy(deep=True)
+        self._memory = agent_cfg.memory.model_copy(deep=True)
 
     def for_device_serial(self, device_serial: str) -> AgentConfigBuilder:
         """Target a specific Android device by its ADB serial number."""
@@ -447,7 +448,8 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
             "disable_outputter": self._disable_outputter,
             "outputter": self._outputter,
             "flash": self._flash,
-            "pro": self._pro,
+            "pro": self._pro.model_copy(deep=True),
+            "memory": self._memory.model_copy(deep=True),
             "explorer": self._explorer,
             "ocr": self._ocr,
             "explorer_versions": self._explorer_versions,
@@ -461,7 +463,11 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         }
 
     def build(self, validate_profiles: bool = True) -> AgentConfig:
-        return cast(AgentConfig, super().build(validate_profiles=validate_profiles))
+        from artemis.config.task import copy_task_config
+
+        return cast(
+            AgentConfig, copy_task_config(super().build(validate_profiles=validate_profiles))
+        )
 
 
 def get_default_servers():

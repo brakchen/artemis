@@ -47,23 +47,15 @@ def ensure_step_memory(ctx):
 
     from artemis.agents.flash.summarizer import VisualStepSummarizer
 
-    kwargs: dict = {}
-    model_name = None
-    try:
-        from artemis.config import load_agent_config
+    from artemis.config.task import get_task_agent_config, explicit_aux_model
 
-        cfg = load_agent_config()
-        model_name = cfg.flash.step_summarizer.model
-        kwargs = {
-            "retry_limit": cfg.memory.runtime.retry_limit,
-            "max_concurrency": cfg.memory.runtime.max_concurrency,
-            "flush_timeout_s": cfg.memory.runtime.flush_timeout_s,
-        }
-    except Exception as exc:
-        logger.debug(
-            f"Agent config unavailable; using step-memory service defaults: {exc}",
-            exc_info=True,
-        )
+    cfg = get_task_agent_config(ctx)
+    model_name = explicit_aux_model(cfg.flash.step_summarizer)
+    kwargs = {
+        "retry_limit": cfg.memory.runtime.retry_limit,
+        "max_concurrency": cfg.memory.runtime.max_concurrency,
+        "flush_timeout_s": cfg.memory.runtime.flush_timeout_s,
+    }
 
     service = VisualStepSummarizer(ctx, model_name=model_name, **kwargs)
     try:

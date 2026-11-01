@@ -19,6 +19,7 @@ from typing import Literal
 from artemis.config import (
     ExplorerConfig,
     FlashProfileConfig,
+    MemoryConfig,
     OutputterConfig,
     ProProfileConfig,
     VideoAnalyzerConfig,
@@ -63,6 +64,7 @@ class AgentConfig(AgentConfigBase):
     disable_outputter: bool = False
     outputter: OutputterConfig = Field(default_factory=OutputterConfig)
 
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     flash: FlashProfileConfig = Field(default_factory=FlashProfileConfig)
     pro: ProProfileConfig = Field(default_factory=ProProfileConfig)
     explorer: ExplorerConfig = Field(default_factory=ExplorerConfig)

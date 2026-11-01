@@ -20,7 +20,18 @@ import pytest
 from apps.admin_console.services.model_service import ModelService
 
 
-def test_get_active_model_info_pro_architecture():
+@pytest.fixture
+def legacy_without_credentials(no_default_llm_provider, monkeypatch):
+    from artemis.config import settings
+    from artemis.llm.providers import _BUILTIN_ENV_KEYS
+
+    monkeypatch.setattr(type(settings), "get_api_key", lambda self, provider: None)
+    for names in _BUILTIN_ENV_KEYS.values():
+        for name in names:
+            monkeypatch.setenv(name, "")
+
+
+def test_get_active_model_info_pro_architecture(legacy_without_credentials):
     """Verify that pro profile returns Pro architecture while keeping real LLM model."""
     info = ModelService.get_active_model_info("pro")
     assert info["name"] == "Pro"
@@ -29,7 +40,7 @@ def test_get_active_model_info_pro_architecture():
     assert "id" in info
 
 
-def test_get_active_model_info_flash_architecture():
+def test_get_active_model_info_flash_architecture(legacy_without_credentials):
     """Verify that flash profile returns Flash architecture."""
     info = ModelService.get_active_model_info("flash")
     assert info["name"] == "Flash"

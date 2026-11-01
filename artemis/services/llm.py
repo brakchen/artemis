@@ -644,12 +644,14 @@ class RobustChatModelWrapper:
         *,
         client_tools: frozenset[str] = frozenset(),
         allow_pause_turn: bool = False,
+        update_last_prompt: bool = True,
     ):
         self.base_model = base_model
         self.ctx = ctx
         self.endpoint = endpoint
         self.client_tools = client_tools
         self.allow_pause_turn = allow_pause_turn
+        self.update_last_prompt = update_last_prompt
 
     def __getattr__(self, item: str):
         return getattr(self.base_model, item)
@@ -718,6 +720,7 @@ class RobustChatModelWrapper:
             endpoint=self.endpoint,
             client_tools=names,
             allow_pause_turn=self.allow_pause_turn,
+            update_last_prompt=self.update_last_prompt,
         )
 
     def with_config(self, *args, **kwargs):
@@ -727,6 +730,18 @@ class RobustChatModelWrapper:
             endpoint=self.endpoint,
             client_tools=self.client_tools,
             allow_pause_turn=self.allow_pause_turn,
+            update_last_prompt=self.update_last_prompt,
+        )
+
+    def with_usage(self, *, update_last_prompt: bool):
+        """Keep auxiliary usage in totals without changing the live prompt base."""
+        return RobustChatModelWrapper(
+            self.base_model,
+            self.ctx,
+            endpoint=self.endpoint,
+            client_tools=self.client_tools,
+            allow_pause_turn=self.allow_pause_turn,
+            update_last_prompt=update_last_prompt,
         )
 
     def with_structured_output(self, *args, **kwargs):
@@ -743,17 +758,30 @@ class RobustChatModelWrapper:
                 self.base_model.with_structured_output(*args, **kwargs),
                 self.ctx,
                 endpoint=self.endpoint,
+                client_tools=self.client_tools,
+                allow_pause_turn=self.allow_pause_turn,
+                update_last_prompt=self.update_last_prompt,
             )
         raise AttributeError(f"{type(self.base_model)} does not support with_structured_output")
 
     def __or__(self, other):
         return RobustChatModelWrapper(
-            self.base_model.__or__(other), self.ctx, endpoint=self.endpoint
+            self.base_model.__or__(other),
+            self.ctx,
+            endpoint=self.endpoint,
+            client_tools=self.client_tools,
+            allow_pause_turn=self.allow_pause_turn,
+            update_last_prompt=self.update_last_prompt,
         )
 
     def __ror__(self, other):
         return RobustChatModelWrapper(
-            self.base_model.__ror__(other), self.ctx, endpoint=self.endpoint
+            self.base_model.__ror__(other),
+            self.ctx,
+            endpoint=self.endpoint,
+            client_tools=self.client_tools,
+            allow_pause_turn=self.allow_pause_turn,
+            update_last_prompt=self.update_last_prompt,
         )
 
     def _provider_value(self) -> str | None:
@@ -805,7 +833,12 @@ class RobustChatModelWrapper:
         engine = self.ctx.data_engine if self.ctx else None
         if engine is None:
             engine = _get_current_data_engine()
-        record_llm_usage(engine, response, source=self._endpoint_key())
+        record_llm_usage(
+            engine,
+            response,
+            source=self._endpoint_key(),
+            update_last_prompt=self.update_last_prompt,
+        )
 
     async def ainvoke(self, *args, **kwargs):
         args, kwargs, _ = self._traced_call(args, kwargs)
@@ -1217,6 +1250,22 @@ def _get_llm(
 
 
 get_llm: GetLLM = _get_llm
+
+
+def get_auxiliary_llm(
+    ctx: ArtemisContext,
+    name: str,
+    *,
+    model_name: str | None = None,
+    use_fallback: bool = False,
+) -> RobustChatModelWrapper:
+    """Construct a memory lens from its already validated task endpoint."""
+    from artemis.llm.resolution import get_auxiliary_endpoint
+
+    endpoint = get_auxiliary_endpoint(ctx, name, model_name=model_name, use_fallback=use_fallback)
+    raw_model = ModelFactory.get_model(endpoint)
+    bound = raw_model.with_config(callbacks=[DataEngineCallbackHandler(ctx)])
+    return RobustChatModelWrapper(bound, ctx, endpoint=endpoint, update_last_prompt=False)
 
 
 class _ObservedFallback(FallbackRunner):

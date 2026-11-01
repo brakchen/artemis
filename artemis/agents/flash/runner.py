@@ -67,12 +67,7 @@ from artemis.agents.validator.tool_declarations import (
     capture_screenshot_and_parse_ui,
     prune_intermediate_screenshots,
 )
-from artemis.config import (
-    MemoryRuntimeConfig,
-    MemoryTranscriptConfig,
-    StepSummarizerConfig,
-    load_agent_config,
-)
+from artemis.config.task import explicit_aux_model
 from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.data_engine.trace import trace
@@ -148,19 +143,14 @@ class FlashRunner:
     def __init__(self, ctx: ArtemisContext, goal: str, max_turns: int | None = None):
         self.ctx = ctx
         self.goal = goal
-        try:
-            cfg = load_agent_config()
-            self.max_turns = max_turns if max_turns is not None else cfg.flash.max_turns
-            self.step_summarizer_cfg = cfg.flash.step_summarizer
-            self.memory_runtime_cfg = cfg.memory.runtime
-            self.transcript_cfg = cfg.memory.transcript
-            self.chunking_cfg = cfg.memory.chunking
-        except Exception:
-            self.max_turns = max_turns if max_turns is not None else 0
-            self.step_summarizer_cfg = StepSummarizerConfig()
-            self.memory_runtime_cfg = MemoryRuntimeConfig()
-            self.transcript_cfg = MemoryTranscriptConfig()
-            self.chunking_cfg = None
+        from artemis.config.task import get_task_agent_config
+
+        cfg = get_task_agent_config(ctx)
+        self.max_turns = max_turns if max_turns is not None else cfg.flash.max_turns
+        self.step_summarizer_cfg = cfg.flash.step_summarizer
+        self.memory_runtime_cfg = cfg.memory.runtime
+        self.transcript_cfg = cfg.memory.transcript
+        self.chunking_cfg = cfg.memory.chunking
 
         self.controller = UnifiedMobileController(ctx)
         # ``agent_name="flash"`` makes ask_explorer follow ``explorer.flash_mode``
@@ -169,7 +159,7 @@ class FlashRunner:
         self.summarizer = (
             VisualStepSummarizer(
                 ctx,
-                model_name=self.step_summarizer_cfg.model,
+                model_name=explicit_aux_model(self.step_summarizer_cfg),
                 retry_limit=self.memory_runtime_cfg.retry_limit,
                 max_concurrency=self.memory_runtime_cfg.max_concurrency,
                 flush_timeout_s=self.memory_runtime_cfg.flush_timeout_s,
@@ -289,11 +279,16 @@ class FlashRunner:
 
     def _init_llm(self):
         """Initializes the Universal LLM via the Service Layer."""
+        from artemis.config.llm import LLMConfig
+
+        # Canonical configuration errors must reach the task boundary. The
+        # legacy injected context path keeps its historical recovery behavior.
+        if isinstance(getattr(self.ctx, "llm_config", None), LLMConfig):
+            return get_llm(self.ctx, name="operator")
         try:
             return get_llm(self.ctx, name="operator")
         except Exception as e:
             logger.warning(f"Failed to get operator LLM from config, using default: {e}")
-
             return RobustChatModelWrapper(get_google_llm(model_name="gemini-2.5-flash"), self.ctx)
 
     def _render_system_prompt(self, tools_declaration: list) -> str:

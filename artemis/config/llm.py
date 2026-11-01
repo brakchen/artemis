@@ -24,7 +24,7 @@ from artemis.config.constants import (
     LLM_CONFIG_FILENAME,
     AgentNode,
 )
-from artemis.config.paths import ROOT_DIR, get_config_path
+from artemis.config.paths import get_config_path, get_main_config_path
 from artemis.utils.cython_compat import CyFunctionDetector
 from third_party.mobile_use.config import llm as base_llm_config
 from third_party.mobile_use.config.llm import (
@@ -203,27 +203,7 @@ def _expand_default_into_nodes(config_dict: dict, *, partial: bool = False) -> d
 
 def parse_llm_config() -> LLMConfig:
     """Parse and instantiate LLMConfig from artemis.jsonc or llm-config.json."""
-    config_path = None
-    candidates = ("artemis.jsonc", "artemis.json", LLM_CONFIG_FILENAME)
-    # Explicit selection always precedes repository defaults, including a
-    # selected JSON/legacy filename when a normal artemis.jsonc also exists.
-    explicit = [
-        candidate
-        for candidate in candidates
-        if os.getenv(f"ARTEMIS_{candidate.upper().replace('.', '_').replace('-', '_')}")
-    ]
-    for candidate in explicit or candidates:
-        try:
-            config_path = get_config_path(candidate)
-            break
-        except FileNotFoundError:
-            env_name = f"ARTEMIS_{candidate.upper().replace('.', '_').replace('-', '_')}"
-            if os.getenv(env_name):
-                raise
-            continue
-
-    if not config_path:
-        config_path = get_config_path(LLM_CONFIG_FILENAME, ROOT_DIR / LLM_CONFIG_FILENAME)
+    config_path = get_main_config_path(LLM_CONFIG_FILENAME)
 
     try:
         with open(config_path, encoding="utf-8") as f:

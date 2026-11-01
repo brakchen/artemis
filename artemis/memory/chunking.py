@@ -299,6 +299,7 @@ class StepCapsuleLens(StepLens):
         fallback_llm: Any | None = None,
     ):
         self._model_name = model_name or "gemini-3.8-flash"
+        self._requested_model = model_name
         self._llm = llm
         self._ctx = ctx
         # Availability hardening: `chunking.model` is a dedicated model with no
@@ -310,6 +311,18 @@ class StepCapsuleLens(StepLens):
             fallback_model_name if fallback_model_name != self._model_name else None
         )
         self._fallback_llm = fallback_llm
+        from artemis.utils.vision import uses_minimax
+
+        if uses_minimax(ctx):
+            from artemis.llm.resolution import get_auxiliary_endpoint
+
+            self._model_name = get_auxiliary_endpoint(
+                ctx, "memory_chunking", model_name=model_name
+            ).model_name
+            if fallback_model_name:
+                get_auxiliary_endpoint(
+                    ctx, "memory_chunking", model_name=fallback_model_name, use_fallback=True
+                )
         try:
             self._prompt = self._PROMPT_PATH.read_text(encoding="utf-8")
         except Exception:
@@ -323,22 +336,45 @@ class StepCapsuleLens(StepLens):
 
     def _get_llm(self):
         if self._llm is None:
-            from artemis.services.llm import get_google_llm
+            from artemis.utils.vision import uses_minimax
+            from artemis.services.llm import get_auxiliary_llm, get_google_llm
 
-            self._llm = get_google_llm(model_name=self._model_name, temperature=0.0)
+            if uses_minimax(self._ctx):
+                self._llm = get_auxiliary_llm(
+                    self._ctx, "memory_chunking", model_name=self._requested_model
+                )
+                self._model_name = self._llm.endpoint.model_name
+            else:
+                self._llm = get_google_llm(model_name=self._model_name, temperature=0.0)
         return self._llm
 
     def _get_fallback_llm(self):
-        if self._fallback_llm is None and self._fallback_model_name:
-            from artemis.services.llm import get_google_llm
+        if self._fallback_llm is None:
+            from artemis.utils.vision import uses_minimax
+            from artemis.services.llm import get_auxiliary_llm, get_google_llm
 
-            self._fallback_llm = get_google_llm(
-                model_name=self._fallback_model_name, temperature=0.0
-            )
+            if uses_minimax(self._ctx):
+                if self.has_fallback:
+                    self._fallback_llm = get_auxiliary_llm(
+                        self._ctx,
+                        "memory_chunking",
+                        model_name=self._fallback_model_name,
+                        use_fallback=True,
+                    )
+            elif self._fallback_model_name:
+                self._fallback_llm = get_google_llm(
+                    model_name=self._fallback_model_name, temperature=0.0
+                )
         return self._fallback_llm
 
     @property
     def has_fallback(self) -> bool:
+        from artemis.utils.vision import uses_minimax
+
+        if uses_minimax(self._ctx):
+            from artemis.llm.resolution import _snapshot
+
+            return ("memory_chunking", False, True) in _snapshot(self._ctx, "summarizer", False)
         return self._fallback_llm is not None or bool(self._fallback_model_name)
 
     @property
@@ -503,6 +539,10 @@ class StepCapsuleLens(StepLens):
         return parsed
 
     async def _invoke(self, llm: Any, messages: list[BaseMessage], model_label: str):
+        from artemis.services.llm import RobustChatModelWrapper
+
+        if isinstance(llm, RobustChatModelWrapper):
+            llm = llm.with_usage(update_last_prompt=False)
         response = await asyncio.wait_for(llm.ainvoke(messages), timeout=90.0)
         # Raw-model bypass metering (gateway-wrapped models meter themselves);
         # capsule prompts are small and are kept out of the session meter's
@@ -891,7 +931,12 @@ class HistoryChunkManager:
         self._max_steps = int(getattr(cc, "max_steps", 12) or 12)
         self._min_steps = max(1, min(self._max_steps, int(getattr(cc, "min_steps", 3) or 3)))
         self._target_source_tokens = int(getattr(cc, "target_source_tokens", 2000) or 2000)
-        self._model_name = getattr(cc, "model", None) or "gemini-3.8-flash"
+        from artemis.config.task import explicit_aux_model
+        from pydantic import BaseModel
+
+        self._model_name = (
+            explicit_aux_model(cc) if isinstance(cc, BaseModel) else getattr(cc, "model", None)
+        )
         self._max_chunks = int(getattr(cc, "max_chunks", 8) or 8)
         # None uses max_chunks as the era cap.
         self._max_eras = int(getattr(cc, "max_eras", None) or self._max_chunks)
@@ -927,21 +972,14 @@ class HistoryChunkManager:
         self._era_counter = 0
 
     def _build_capsule_service(self, ctx: Any) -> StepMemoryService:
-        kwargs: dict[str, Any] = {}
-        try:
-            from artemis.config import load_agent_config
+        from artemis.config.task import get_task_agent_config
 
-            runtime = load_agent_config().memory.runtime
-            kwargs = {
-                "retry_limit": runtime.retry_limit,
-                "max_concurrency": runtime.max_concurrency,
-                "flush_timeout_s": runtime.flush_timeout_s,
-            }
-        except Exception as exc:
-            logger.debug(
-                f"Memory runtime config unavailable; using capsule service defaults: {exc}",
-                exc_info=True,
-            )
+        runtime = get_task_agent_config(ctx).memory.runtime
+        kwargs = {
+            "retry_limit": runtime.retry_limit,
+            "max_concurrency": runtime.max_concurrency,
+            "flush_timeout_s": runtime.flush_timeout_s,
+        }
         lens = StepCapsuleLens(
             self._model_name,
             ctx=ctx,
@@ -952,10 +990,15 @@ class HistoryChunkManager:
     def _resolve_capsule_fallback_model(self, ctx: Any) -> str | None:
         """Fallback model for capsule generation when `chunking.model` is down.
 
-        Resolved from the LLM config's summarizer role (which inherits the
-        global default fallback unless overridden). Only same-provider (google)
-        fallbacks apply — the capsule lens rides the raw google model path.
+        MiniMax uses the pinned summarizer fallback endpoint. Legacy raw
+        Google lenses retain their same-provider fallback model selection.
         """
+        from artemis.utils.vision import uses_minimax
+
+        if uses_minimax(ctx):
+            # The lens uses the pinned fallback endpoint, including its own
+            # alias credential; a string must not rerun the global resolver.
+            return None
         try:
             llm_cfg = getattr(ctx, "llm_config", None) if ctx is not None else None
             if llm_cfg is None:
@@ -1173,6 +1216,8 @@ class HistoryChunkManager:
         return True
 
     def _redispatch_failed_capsules(self) -> None:
+        if getattr(self._capsule_service, "_strict", False) is True:
+            return
         for entry in self._awaiting:
             chunk = entry["chunk"]
             if chunk is None or chunk.status != "pending":

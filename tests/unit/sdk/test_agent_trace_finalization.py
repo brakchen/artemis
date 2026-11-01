@@ -131,8 +131,13 @@ async def test_agent_inherits_session_id_from_env_and_propagates_to_tracing(monk
     task.request.task_name = "task-name"
     task.request.trace_path = "traces"
 
-    context = MagicMock()
-    context.device = None
+    from artemis.context import ArtemisContext, DeviceContext
+
+    context = ArtemisContext(
+        device=DeviceContext(device_id="offline-no-device"),
+        agent_config=agent._config,
+        llm_config=agent._config.default_profile.llm_config,
+    )
     with patch("artemis.sdk.agent.DataEngine") as mock_data_engine_cls:
         mock_data_engine = MagicMock()
         mock_data_engine_cls.return_value = mock_data_engine

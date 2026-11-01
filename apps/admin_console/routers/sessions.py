@@ -56,7 +56,6 @@ def _list_sessions_sync():
     latest_recordings = session_repo.get_latest_video_recordings_map()
     agent_names_by_session = session_repo.get_agent_trace_names_map()
     video_idx = media_service.build_video_index()
-    default_model_info = model_service.get_active_model_info()
 
     orphaned_ids = []
     unresolved_profiles = []
@@ -119,11 +118,7 @@ def _list_sessions_sync():
         sess_profile = model_service.resolve_session_profile(
             row_dict, None, state.current_profile, agent_names=agent_names
         )
-        row_dict["model_info"] = (
-            model_service.get_active_model_info(sess_profile)
-            if sess_profile
-            else default_model_info
-        )
+        row_dict["model_info"] = model_service.get_session_model_info(row_dict, sess_profile)
         if not sess_profile:
             unresolved_profiles.append(row_dict)
         result.append(row_dict)
@@ -143,7 +138,9 @@ def _list_sessions_sync():
                 row_dict, llm_traces, state.current_profile
             )
             if sess_profile:
-                row_dict["model_info"] = model_service.get_active_model_info(sess_profile)
+                row_dict["model_info"] = model_service.get_session_model_info(
+                    row_dict, sess_profile, llm_traces
+                )
 
     if orphaned_ids:
         try:
@@ -173,7 +170,10 @@ async def get_session_details(session_id: str):
     row = session_repo.get_session_by_id(session_id)
     if not row:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-    return dict(row)
+    result = dict(row)
+    profile = model_service.resolve_session_profile(result)
+    result["model_info"] = model_service.get_session_model_info(result, profile)
+    return result
 
 
 @router.get("/api/sessions/{session_id}/usage")

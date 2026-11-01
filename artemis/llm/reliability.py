@@ -183,10 +183,12 @@ _RECOVERY_BUDGET: ContextVar[RecoveryBudget | None] = ContextVar(
 
 
 @contextmanager
-def logical_call_scope(*, max_attempts: int = 8, timeout_seconds: float = 180.0):
-    """Reuse the caller's budget; only the outermost scope creates one."""
+def logical_call_scope(
+    *, max_attempts: int = 8, timeout_seconds: float = 180.0, independent: bool = False
+):
+    """Reuse the caller's budget unless beginning an independent background job."""
     existing = _RECOVERY_BUDGET.get()
-    if existing is not None:
+    if existing is not None and not independent:
         yield existing
         return
     budget = RecoveryBudget(max_attempts=max_attempts, timeout_seconds=timeout_seconds)

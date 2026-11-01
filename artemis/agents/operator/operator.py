@@ -132,9 +132,9 @@ class OperatorNode:
             self._transcript_cfg = transcript_config
         else:
             try:
-                from artemis.config import load_agent_config
+                from artemis.config.task import get_task_agent_config
 
-                self._transcript_cfg = load_agent_config().memory.transcript
+                self._transcript_cfg = get_task_agent_config(self.ctx).memory.transcript
             except Exception:
                 from artemis.config.agent import MemoryTranscriptConfig
 
@@ -323,9 +323,9 @@ class OperatorNode:
 
                 chunking_cfg = None
                 try:
-                    from artemis.config import load_agent_config
+                    from artemis.config.task import get_task_agent_config
 
-                    chunking_cfg = load_agent_config().memory.chunking
+                    chunking_cfg = get_task_agent_config(self.ctx).memory.chunking
                 except Exception as exc:
                     logger.debug(
                         "Chunking config unavailable; using chunker defaults: %s",
@@ -394,6 +394,7 @@ class OperatorNode:
                 task_plan,
                 steps,
                 self._get_active_subgoal_hash(),
+                ctx=self.ctx,
             )
             ledger.set_restored_history(
                 "[Restored history] Rebuilt from the step records of this task"
@@ -1008,9 +1009,9 @@ class OperatorNode:
 
     def _plan_ledger_gate_enabled(self) -> bool:
         try:
-            from artemis.config import load_agent_config
+            from artemis.config.task import get_task_agent_config
 
-            return bool(load_agent_config().pro.execution.plan_ledger_gate)
+            return bool(get_task_agent_config(self.ctx).pro.execution.plan_ledger_gate)
         except (AttributeError, OSError, TypeError, ValueError):
             return True
 
@@ -1038,9 +1039,9 @@ class OperatorNode:
 
     def _plan_ledger_stale_turns(self) -> int:
         try:
-            from artemis.config import load_agent_config
+            from artemis.config.task import get_task_agent_config
 
-            return int(load_agent_config().pro.execution.plan_ledger_stale_turns)
+            return int(get_task_agent_config(self.ctx).pro.execution.plan_ledger_stale_turns)
         except (AttributeError, OSError, TypeError, ValueError):
             return 4
 
@@ -1094,14 +1095,15 @@ class OperatorNode:
             steps,
             active_subgoal_hash,
             last_n_detailed=self.last_n_detailed,
+            ctx=self.ctx,
         )
 
     def _max_burst_actions(self) -> int:
         """Configured ceiling for actions in one fast-action burst (default 4)."""
         try:
-            from artemis.config import load_agent_config
+            from artemis.config.task import get_task_agent_config
 
-            return int(load_agent_config().pro.execution.max_burst_actions)
+            return int(get_task_agent_config(self.ctx).pro.execution.max_burst_actions)
         except Exception:
             return 4
 

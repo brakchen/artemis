@@ -16,6 +16,7 @@ from artemis.config import settings
 from artemis.config.llm import AGENT_ROLES, UTILITY_ROLES, LLMConfig
 from artemis.llm import providers
 from artemis.llm.router import ModelEndpoint, ModelProvider
+from artemis.llm.auxiliary import derive_auxiliary_endpoint
 
 
 def _value(config: Any, name: str, default: Any = None) -> Any:
@@ -167,9 +168,56 @@ def _snapshot(ctx: Any, role: str, is_utils: bool) -> dict[tuple[str, bool, bool
             raise ValueError(
                 f"MiniMax task has mixed effective vendors in roles: {', '.join(mixed)}"
             )
+        agent_config = getattr(ctx, "agent_config", None)
+        if agent_config is None:
+            from artemis.config.agent import AgentGlobalConfig
+
+            agent_config = AgentGlobalConfig()
+            ctx.agent_config = agent_config
+        for name, auxiliary in (
+            ("step_summarizer", agent_config.flash.step_summarizer),
+            ("memory_chunking", agent_config.memory.chunking),
+        ):
+            for fallback in (False, True):
+                parent = result.get(("summarizer", False, fallback))
+                if parent is not None:
+                    result[(name, False, fallback)] = derive_auxiliary_endpoint(parent, auxiliary)
     # Publish only after all endpoints pass, so failed preflight cannot pin half a task.
     ctx._llm_endpoint_snapshot = result
     return result
+
+
+def get_auxiliary_endpoint(
+    ctx: Any, name: str, *, model_name: str | None = None, use_fallback: bool = False
+) -> ModelEndpoint:
+    """Use the same snapshot for auxiliary construction and explicit overrides."""
+    endpoints = _snapshot(ctx, "summarizer", False)
+    endpoint = endpoints.get((name, False, use_fallback))
+    if endpoint is None:
+        endpoint = endpoints.get(("summarizer", False, use_fallback))
+    if endpoint is None:
+        raise ValueError(f"LLM configuration for '{name}' has no fallback")
+    return derive_auxiliary_endpoint(endpoint, model_name=model_name)
+
+
+def public_model_snapshot(ctx: Any, *, requested_profile: str | None = None) -> dict[str, Any]:
+    """A public, persisted allowlist; never serialize endpoint internals."""
+    endpoints = _snapshot(ctx, "operator", False)
+    return {
+        "requested_profile": requested_profile,
+        "selected_profile": getattr(ctx, "selected_llm_profile", None),
+        "roles": [
+            {
+                "role": role,
+                "fallback": fallback,
+                "model": endpoint.model_name,
+                "kind": endpoint.provider.value,
+                "vendor": endpoint.vendor,
+                "registry": endpoint.registry_name,
+            }
+            for (role, _, fallback), endpoint in sorted(endpoints.items())
+        ],
+    }
 
 
 def get_effective_endpoint(

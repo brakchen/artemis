@@ -27,7 +27,7 @@ from artemis.config.constants import (
     DEFAULT_EXPLORER_VERSION,
     ExplorerVersion,
 )
-from artemis.config.paths import ROOT_DIR, get_config_path
+from artemis.config.paths import get_main_config_path
 from artemis.llm.google import VideoProcessing
 from third_party.mobile_use.utils.file import load_jsonc
 from third_party.mobile_use.utils.logger import get_logger
@@ -1098,17 +1098,7 @@ def load_agent_config(
     Returns:
         Validated AgentGlobalConfig instance.
     """
-    resolved_path = config_path
-    if not resolved_path:
-        for candidate in ("artemis.jsonc", "artemis.json", AGENT_CONFIG_FILENAME):
-            try:
-                resolved_path = get_config_path(candidate)
-                break
-            except FileNotFoundError:
-                continue
-
-    if not resolved_path:
-        resolved_path = get_config_path(AGENT_CONFIG_FILENAME, ROOT_DIR / AGENT_CONFIG_FILENAME)
+    resolved_path = config_path or get_main_config_path(AGENT_CONFIG_FILENAME)
 
     try:
         with open(resolved_path, encoding="utf-8") as f:

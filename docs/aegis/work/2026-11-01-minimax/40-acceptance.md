@@ -26,7 +26,7 @@
 | C20 | A1 主配置/profile/旧格式/override，B1 OCR SDK 字段 | memory/aux typed 透传 D1，E |
 | C21 | A1 实际 SDK 角色预算/模型参数 | explicit auxiliary 模型默认 D1 |
 | C22 | A2 schema 首次指令/真验证/合法 null/raw gate；B2 pixel；C 视频真实 schema/区间及逐模态覆盖 | 整链 E |
-| C23 | B2 Pro单/burst/Flash/MCP strictgate；真实identity/整node消失/旧turn来源/opaqueAgent shell旁路均闭环 | E 汇总 |
+| C23 | B2 Pro单/burst/Flash/MCP strictgate；真实identity/整node消失/旧turn来源及三个opaque shell入口已覆盖；新发现ImageProcessor生成Python旁路未修 | E 必须补此旁路并验证全部消费者，不以三个shell已测替代 |
 | C24 | B2 实际Actuator副作用后timeout只发送一次，unknown记录/观察，明确未发可有界重试 | E 汇总 |
 | C25 | B1公共点/bbox；B2所有原始端点先验证、sharedround、实际wire点/bbox可表达/可见父级 | E 汇总与真实精度 |
 | C26 | B1 版本 cache、旧历史保留/并发与失败不缓存 | E 汇总 |

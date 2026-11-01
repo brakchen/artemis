@@ -164,6 +164,7 @@ async def run_async_planner_validation(
                     "",  # Pass empty string to avoid rendering the task plan in the history
                     steps,
                     "default",
+                    ctx=ctx,
                 )
 
             except Exception as e:
