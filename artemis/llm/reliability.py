@@ -28,6 +28,11 @@ just the video pipeline.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from enum import StrEnum
 import random
 import threading
@@ -44,6 +49,11 @@ class FailureCategory(StrEnum):
     BAD_REQUEST = "bad_request"
     CANCELLED = "cancelled"
     UNKNOWN = "unknown"
+    INVALID_OUTPUT = "invalid_output"
+    BALANCE = "balance"
+    PERMISSION = "permission"
+    CONTENT_REFUSAL = "content_refusal"
+    QUOTA_EXHAUSTED = "quota_exhausted"
 
 
 #: Categories that count toward circuit-breaker state: transient provider-side
@@ -86,6 +96,9 @@ def classify_failure(error: BaseException) -> Failure:
     """Convert a provider/transport exception into explicit recovery decisions."""
     if isinstance(error, KeyboardInterrupt) or type(error).__name__ == "CancelledError":
         return Failure(FailureCategory.CANCELLED, False, False)
+    typed = getattr(error, "failure", None)
+    if isinstance(typed, Failure):
+        return typed
 
     code = extract_status_code(error)
     message = str(error).lower()
@@ -130,6 +143,75 @@ class LLMPermanentError(LLMCallError):
 
 class LLMExhaustedError(LLMCallError):
     """Retryable failures exhausted every attempt and the pause deadline."""
+
+
+class LLMInvalidOutputError(LLMPermanentError):
+    """A complete provider response is unsafe to consume or execute."""
+
+    def __init__(self, message: str):
+        super().__init__(message, failure=Failure(FailureCategory.INVALID_OUTPUT, False, False))
+
+
+@dataclass
+class RecoveryBudget:
+    """One logical MiniMax call, including repair, fallback and server continuation."""
+
+    max_attempts: int = 8
+    timeout_seconds: float = 180.0
+    started_at: float = field(default_factory=time.monotonic)
+    attempts: int = 0
+    failed_targets: dict[str, LLMCallError] = field(default_factory=dict)
+
+    @property
+    def remaining_seconds(self) -> float:
+        return max(0.0, self.timeout_seconds - (time.monotonic() - self.started_at))
+
+    def consume(self, target: str) -> None:
+        if target in self.failed_targets:
+            raise self.failed_targets[target]
+        if self.attempts >= self.max_attempts or self.remaining_seconds <= 0:
+            raise LLMExhaustedError(
+                "MiniMax logical call recovery budget exhausted",
+                failure=Failure(FailureCategory.TIMEOUT, False, False),
+            )
+        self.attempts += 1
+
+
+_RECOVERY_BUDGET: ContextVar[RecoveryBudget | None] = ContextVar(
+    "llm_recovery_budget", default=None
+)
+
+
+@contextmanager
+def logical_call_scope(*, max_attempts: int = 8, timeout_seconds: float = 180.0):
+    """Reuse the caller's budget; only the outermost scope creates one."""
+    existing = _RECOVERY_BUDGET.get()
+    if existing is not None:
+        yield existing
+        return
+    budget = RecoveryBudget(max_attempts=max_attempts, timeout_seconds=timeout_seconds)
+    token = _RECOVERY_BUDGET.set(budget)
+    try:
+        yield budget
+    finally:
+        _RECOVERY_BUDGET.reset(token)
+
+
+def retry_after_seconds(error: BaseException) -> float | None:
+    """Read Retry-After without copying provider bodies or credentials into logs."""
+    headers = getattr(getattr(error, "response", None), "headers", None)
+    if headers is None:
+        headers = getattr(error, "headers", {})
+    value = headers.get("retry-after") if headers else None
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            return max(0.0, (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 # ---------------------------------------------------------------------------

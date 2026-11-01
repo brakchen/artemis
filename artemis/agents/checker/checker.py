@@ -419,6 +419,13 @@ async def _structured_report(llm, messages) -> CheckReport:
             HumanMessage(content="Now provide your structured verdict report."),
         ]
     result = await invoke_llm_with_timeout_message(structured_llm.ainvoke(messages))
+    if getattr(getattr(llm, "endpoint", None), "vendor", None) == "minimax":
+        from artemis.llm.reliability import LLMInvalidOutputError
+
+        if not isinstance(result, (CheckReport, dict)):
+            raise LLMInvalidOutputError("MiniMax checker returned no validated report")
+        if not (result.verdicts if isinstance(result, CheckReport) else result.get("verdicts")):
+            raise LLMInvalidOutputError("MiniMax checker returned an empty verdict report")
     if isinstance(result, CheckReport):
         return result
     if isinstance(result, dict):

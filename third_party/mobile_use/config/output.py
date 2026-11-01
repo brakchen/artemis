@@ -107,7 +107,7 @@ class OutputConfig(BaseModel):
             return True
         if not default_enabled:
             return False
-        return bool(self.structured_output or self.output_description)
+        return self.structured_output_schema() is not None or bool(self.output_description)
 
     def structured_output_schema(self) -> dict | type[BaseModel] | None:
         """The structured output as a schema accepted by ``with_structured_output``."""

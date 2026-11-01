@@ -312,6 +312,15 @@ class LogAnalyzerNode:
             self._wrap_with_caching(get_search_logs_tool(self.ctx)),
             self._get_spawn_log_reader_tool(),
         ]
+        from artemis.tools.web_search import get_web_search_tools
+
+        search_tools = get_web_search_tools(self.ctx, "log_analyzer")
+        all_tools.extend(search_tools)
+        if search_tools:
+            from artemis.tools.web_search import SEARCH_TOOL_GUIDANCE
+
+            system_prompt = system_prompt.replace("`google_search`", "`web_search`")
+            system_prompt += "\n\n" + SEARCH_TOOL_GUIDANCE
 
         current_messages = [
             SystemMessage(content=system_prompt),

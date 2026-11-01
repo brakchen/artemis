@@ -914,6 +914,10 @@ class OperatorNode:
         all_tools = [
             operator_shell_tool(name) for name in OPERATOR_SHELL_ORDER if name in available_actions
         ] + self.tools
+        from artemis.tools.web_search import get_web_search_tools
+
+        if not any(t.name == "web_search" for t in all_tools):
+            all_tools.extend(get_web_search_tools(self.ctx, "operator"))
 
         # 5. Mount the task-output analyzer and collect background ADB task state.
         # The analyzer is always available: the "output truncated, use

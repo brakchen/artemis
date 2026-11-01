@@ -208,6 +208,10 @@ class FlashRunner:
         # declared from the very same args schemas the LangChain tools bind
         # (same availability gates: a DataEngine session, recall config).
         tools.extend(history_tool_declarations(self.ctx))
+        from artemis.tools.web_search import WEB_SEARCH_TOOL, web_search_enabled
+
+        if web_search_enabled(self.ctx, "flash"):
+            tools.append(WEB_SEARCH_TOOL.to_tool_declaration())
         if self._video_tools_enabled():
             from artemis.tools.video_tool import VIDEO_ANALYZER_TOOL
 

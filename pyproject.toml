@@ -41,6 +41,8 @@ dependencies = [
     # Configuration, Models & Validation
     "pydantic>=2.7.0",
     "pydantic-settings>=2.10.1",
+    "jsonschema>=4.26.0,<5",
+    "referencing>=0.37.0,<1",
     "python-dotenv>=1.0.1",
     "filelock>=3.32.3,<4",
     "pywin32>=312; sys_platform == 'win32'",

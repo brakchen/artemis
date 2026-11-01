@@ -29,6 +29,13 @@ import re
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
+from jsonschema import FormatChecker
+from jsonschema.exceptions import ValidationError as JSONSchemaValidationError
+from jsonschema.validators import Draft202012Validator, validator_for
+from langchain_core.messages import SystemMessage
+from referencing import Registry, Resource
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import specification_with
 
 from artemis.llm.parser import extract_thinking_tags
 
@@ -160,7 +167,75 @@ def repair_json(text: str) -> str:
     return "".join(out)
 
 
-def parse_structured(text: Any, schema: type[BaseModel] | None = None) -> Any | ParseFailure:
+def validate_schema(schema: Any) -> dict | None:
+    """Preflight supported schemas locally; never resolve remote references."""
+    if schema is None:
+        return None
+    if isinstance(schema, type) and issubclass(schema, BaseModel):
+        rendered = schema.model_json_schema()
+    elif isinstance(schema, dict):
+        rendered = schema
+    else:
+        raise ValueError("Structured output requires a Pydantic model or JSON Schema dict")
+    json.dumps(rendered, allow_nan=False)
+    validator = validator_for(
+        rendered, default=Draft202012Validator if "$schema" not in rendered else None
+    )
+    if validator is None:
+        raise ValueError("Unsupported JSON Schema dialect")
+    validator.check_schema(rendered)
+
+    # referencing 0.37.0 (MIT), the public resolver used by jsonschema:
+    # https://referencing.readthedocs.io/en/stable/api/
+    # Resource.subresources follows schema positions for the selected dialect,
+    # preserving literal const/default values and property names such as "$ref".
+    dialect = validator.META_SCHEMA.get("$id") or validator.META_SCHEMA["id"]
+    root = Resource.from_contents(rendered, default_specification=specification_with(dialect))
+    resolver = Registry().resolver_with_root(root)  # default registry never retrieves remotely
+
+    def preflight(resource, scope):
+        value = resource.contents
+        if isinstance(value, dict):
+            if "$dynamicRef" in value or "$recursiveRef" in value:
+                raise ValueError("Dynamic and recursive JSON Schema references are not supported")
+            if "$ref" in value:
+                try:
+                    scope.lookup(value["$ref"])
+                except Unresolvable as error:
+                    raise ValueError(
+                        "JSON Schema reference is not resolvable within the supplied schema"
+                    ) from error
+        for child in resource.subresources():
+            preflight(child, scope.in_subresource(child))
+
+    preflight(root, resolver)
+    return rendered
+
+
+def structured_messages(messages: list, schema: Any) -> list:
+    """Merge JSON instructions into one system message from the first request."""
+    rendered = validate_schema(schema)
+    constraints = (
+        "Return ONLY one valid JSON value. No prose, Markdown fences or comments. "
+        "Do not use tools to submit the JSON. The JSON must satisfy this JSON Schema:\n"
+        + json.dumps(rendered or {}, ensure_ascii=False)
+    )
+    system_blocks = []
+    other = []
+    for message in messages:
+        if isinstance(message, SystemMessage):
+            system_blocks.extend(
+                message.content
+                if isinstance(message.content, list)
+                else [{"type": "text", "text": message.content}]
+            )
+        else:
+            other.append(message)
+    system_blocks.append({"type": "text", "text": constraints})
+    return [SystemMessage(content=system_blocks), *other]
+
+
+def parse_structured(text: Any, schema: Any = None, *, strict: bool = False) -> Any | ParseFailure:
     """Parse an LLM response into JSON data (optionally schema-validated).
 
     Returns the parsed object (or a validated ``schema`` instance), or a
@@ -168,27 +243,51 @@ def parse_structured(text: Any, schema: type[BaseModel] | None = None) -> Any | 
     check ``isinstance(result, ParseFailure)`` — the raw text is never
     silently passed through as a result.
     """
+    rendered = validate_schema(schema)
     if not isinstance(text, str):
         text = content_to_text(text)
     if not text or not text.strip():
         return ParseFailure(raw=text or "", error="empty response")
 
     cleaned, _ = extract_thinking_tags(text)
-    candidate = extract_json_candidate(cleaned)
+    candidate = cleaned.strip() if strict else extract_json_candidate(cleaned)
+    if not strict and candidate is None:
+        # JSON Schema also permits scalar values (including null).
+        try:
+            json.loads(cleaned.strip())
+        except (ValueError, TypeError):
+            pass
+        else:
+            candidate = cleaned.strip()
     if candidate is None:
         return ParseFailure(raw=text, error="no JSON object or array found in response")
 
     last_error = ""
-    for variant in (candidate, repair_json(candidate)):
+    for variant in (candidate,) if strict else (candidate, repair_json(candidate)):
         try:
-            data = json.loads(variant)
-        except json.JSONDecodeError as decode_error:
+
+            def reject_constant(value):
+                raise ValueError(f"Non-JSON numeric constant: {value}")
+
+            data = (
+                json.loads(variant, parse_constant=reject_constant)
+                if strict
+                else json.loads(variant)
+            )
+        except (json.JSONDecodeError, ValueError) as decode_error:
             last_error = str(decode_error)
             continue
-        if schema is not None:
+        if isinstance(schema, type) and issubclass(schema, BaseModel):
             try:
                 return schema.model_validate(data)
             except ValidationError as validation_error:
                 return ParseFailure(raw=text, error=f"schema validation failed: {validation_error}")
+        if rendered is not None:
+            try:
+                validator_for(rendered)(rendered, format_checker=FormatChecker()).validate(data)
+            except JSONSchemaValidationError as validation_error:
+                return ParseFailure(
+                    raw=text, error=f"schema validation failed: {validation_error.message}"
+                )
         return data
     return ParseFailure(raw=text, error=f"invalid JSON: {last_error}")

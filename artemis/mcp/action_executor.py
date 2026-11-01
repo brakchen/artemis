@@ -71,7 +71,8 @@ __all__ = ["McpActionExecutor"]
 
 #: Non-device tools executed agent-side (never behind the action server).
 AGENT_TOOL_NAMES: frozenset[str] = (
-    frozenset({"read_note", "list_notes", "ask_explorer", "video_analyzer"}) | HISTORY_TOOL_NAMES
+    frozenset({"read_note", "list_notes", "ask_explorer", "video_analyzer", "web_search"})
+    | HISTORY_TOOL_NAMES
 )
 
 #: Actions whose ``target`` is a single point: an element index or an [x, y] pair.
@@ -642,6 +643,19 @@ class McpActionExecutor:
                 )
             elif raw_name == "list_notes":
                 text = await self._list_notes()
+            elif raw_name == "web_search":
+                from artemis.services.web_search import web_search
+                from artemis.tools.web_search import web_search_enabled
+
+                if not web_search_enabled(self.ctx, self.agent_name):
+                    text, ok = "MiniMax web search is not enabled", False
+                else:
+                    role = (
+                        "operator" if self.agent_name in {"flash", "validator"} else self.agent_name
+                    )
+                    result = await web_search(self.ctx, args.get("query", ""), role=role)
+                    text = result.model_dump_json()
+                    ok = result.status == "complete"
             elif raw_name == "video_analyzer":
                 text, ok = await self._video_analyzer(
                     args.get("time_description") or args.get("TimeDescription") or "",

@@ -111,6 +111,9 @@ class Diagnoser:
             *get_history_tools(self.ctx),
             get_submit_answer_tool(self.ctx),
         ]
+        from artemis.tools.web_search import get_web_search_tools
+
+        all_tools.extend(get_web_search_tools(self.ctx, "diagnoser"))
         if not self.is_device_online:
             logger.info(
                 "Diagnoser running in OFFLINE environment: stripping adb short"
@@ -524,6 +527,10 @@ class Diagnoser:
         base_llm = get_llm(ctx=self.ctx, name="diagnoser")
         self._llm = base_llm
         traced_tools = self._build_traced_tools()
+        if any(t.name == "web_search" for t in traced_tools):
+            from artemis.tools.web_search import SEARCH_TOOL_GUIDANCE
+
+            system_prompt += "\n\n" + SEARCH_TOOL_GUIDANCE
 
         plan_and_history = self._build_plan_and_history()
         checker_feedback = self._collect_checker_feedback(state)

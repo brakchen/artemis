@@ -23,3 +23,5 @@ TDD Route：Mode off，Decision skipped（未要求严格 TDD）；不强制测�
 所有代码片段串行 writer，协调者唯一 Git owner；技能要求的 spec 与质量审查可以只读交接。当前缺少 tower-do，沿用已记录 Codex 环境例外，不假造 Pi UUID/任务板。外部 API Key 与真实手机均不使用，视觉精度/账号权限维持 needs-verification。
 
 Baseline read set：AGENTS、CONTRIBUTING、README、lane 注册、设计 v1.2、providers/router/services、配置模型、相关测试。既有库：锁定 Anthropic/LangChain、Pydantic、jsonschema；优先复用。源代码语义改变时更新本检查点与证据，不改变已批准的六模块方向。
+
+B 片段编辑边界（2026-11-01 准备，尚未实施）：复用 object_detector/ocr_api/ScreenIndex、现有图片记录 extra_metadata 与动作执行器。新的纯数据 SnapshotRef/定位协议只承载一次截图、坐标和来源，不另建设备或执行框架；缓存更新由既有 Storage 原子读改写，不建设第二缓存库。B1 负责类型化识别、坐标与 provenance 接线；B2 负责同一执行边界的严格 gate/失效/派发结果。现有大文件仅接线或局部修复，独立数据/验证职责可抽专用小 helper。无代码方案无法消除 yx 交换、无上下文 OCR 和 fail-open 派发，故决定 code-change；预算 at-risk，以两个串行片段和 legacy 回归控制。所有新严格行为以实际 pinned vendor=minimax 为界；旧厂商保留原测试/契约，不能用放宽测试吸收回归。

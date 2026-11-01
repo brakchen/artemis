@@ -256,6 +256,16 @@ async def _execute_committee(
             trace_langchain_tool(read_note_tool, ctx),
             trace_langchain_tool(list_notes_tool, ctx),
         ]
+        from artemis.tools.web_search import get_web_search_tools
+
+        history_analyzer_tools.extend(get_web_search_tools(ctx, "history_analyzer_expert"))
+        diagnoser_tools.extend(get_web_search_tools(ctx, "diagnoser_expert"))
+        from artemis.tools.web_search import SEARCH_TOOL_GUIDANCE
+
+        if any(t.name == "web_search" for t in history_analyzer_tools):
+            history_analyzer_prompt += "\n\n" + SEARCH_TOOL_GUIDANCE
+        if any(t.name == "web_search" for t in diagnoser_tools):
+            diagnoser_prompt += "\n\n" + SEARCH_TOOL_GUIDANCE
 
         # 5. Instantiate LLMs
         llm_pl = get_llm(ctx=ctx, name="planner_avatar")

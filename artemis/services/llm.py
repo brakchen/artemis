@@ -50,12 +50,22 @@ from artemis.llm.providers import (
 )
 from artemis.llm.reliability import (
     CircuitBreaker,
+    Failure,
     FailureCategory,
     LLMCallError,
     LLMExhaustedError,
+    LLMInvalidOutputError,
     LLMPermanentError,
     classify_failure,
     retry_policy_for,
+    logical_call_scope,
+    retry_after_seconds,
+)
+from artemis.llm.minimax import (
+    minimax_wire_target,
+    normalize_minimax_error,
+    validate_minimax_response,
+    raise_for_minimax_error,
 )
 from artemis.llm.router import ModelEndpoint, ModelFactory, ModelProvider
 from artemis.llm.resolution import (
@@ -69,6 +79,8 @@ from artemis.llm.structured import (
     StructuredOutputError,
     content_to_text,
     parse_structured,
+    structured_messages,
+    validate_schema,
 )
 from third_party.mobile_use.llm_service import FallbackRunner, GetLLM, LLMWaitNotice
 from third_party.mobile_use.utils.logger import get_logger
@@ -396,6 +408,7 @@ async def _run_with_recovery[T](
     *,
     provider: str | None = None,
     endpoint_key: str | None = None,
+    minimax_target: str | None = None,
 ) -> T:
     """Execute one LLM call under the classified retry / pause / breaker policy.
 
@@ -410,6 +423,17 @@ async def _run_with_recovery[T](
       otherwise pause the task (bounded by settings.LLM_PAUSE_TIMEOUT_SECONDS)
       and retry from scratch on resume.
     """
+    if minimax_target:
+        # Re-enter the canonical loop under one shared logical budget. The
+        # legacy pause/resume policy below remains unchanged for other vendors.
+        with logical_call_scope() as budget:
+            return await _run_bounded_minimax(
+                call_once,
+                provider=provider,
+                endpoint_key=endpoint_key,
+                target=minimax_target,
+                budget=budget,
+            )
     while True:
         request_token = _begin_llm_request(provider)
         last_error: Exception | None = None
@@ -515,6 +539,84 @@ async def _run_with_recovery[T](
             current_engine._publish("task_resumed", {})
 
 
+async def _run_bounded_minimax(call_once, *, provider, endpoint_key, target, budget):
+    """MiniMax branch of the canonical recovery owner; no pause/resume reset."""
+    request_token = _begin_llm_request(provider)
+    attempts = {}
+    try:
+        while True:
+            budget.consume(target)
+            attempt_started = False
+            try:
+                async with asyncio.timeout(budget.remaining_seconds):
+                    if endpoint_key:
+                        await _wait_for_breaker(endpoint_key)
+                    attempt_started = True
+                    result = await call_once()
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                if endpoint_key and attempt_started:
+                    _ENDPOINT_BREAKER.record_failure(
+                        endpoint_key, Failure(FailureCategory.CANCELLED, False, False)
+                    )
+                raise
+            except LLMCallError as error:
+                if endpoint_key and attempt_started:
+                    # A protocol gate can terminate after the breaker grants a
+                    # half-open trial. Release that trial even though this typed
+                    # failure must propagate without another recovery round.
+                    _ENDPOINT_BREAKER.record_failure(endpoint_key, error.failure)
+                raise
+            except Exception as original:
+                error = normalize_minimax_error(error=original) or original
+                failure = classify_failure(error)
+                if endpoint_key and attempt_started:
+                    _ENDPOINT_BREAKER.record_failure(endpoint_key, failure)
+                count = attempts.get(failure.category, 0) + 1
+                attempts[failure.category] = count
+                policy = retry_policy_for(failure.category)
+                if not failure.retryable:
+                    terminal = LLMPermanentError(str(error), failure=failure, cause=error)
+                elif (
+                    count >= policy.max_attempts
+                    or budget.attempts >= budget.max_attempts
+                    or budget.remaining_seconds <= 0
+                ):
+                    terminal = LLMExhaustedError(str(error), failure=failure, cause=error)
+                else:
+                    delay = retry_after_seconds(error)
+                    if delay is None:
+                        delay = policy.delay_for(count)
+                    if delay >= budget.remaining_seconds:
+                        terminal = LLMExhaustedError(str(error), failure=failure, cause=error)
+                    else:
+                        _record_llm_retry(
+                            str(error),
+                            delay,
+                            attempt=count,
+                            max_retries=policy.max_attempts,
+                            provider=provider,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                budget.failed_targets[target] = terminal
+                _record_llm_event(
+                    "llm_gave_up",
+                    {
+                        "error": str(terminal),
+                        "category": failure.category.value,
+                        "retryable": failure.retryable,
+                    },
+                    status="failed",
+                )
+                raise terminal from error
+            else:
+                if endpoint_key:
+                    _ENDPOINT_BREAKER.record_success(endpoint_key)
+                return result
+    finally:
+        _ACTIVE_LLM_REQUEST.reset(request_token)
+
+
 def _inject_parent_trace_id(trace_id, *args, **kwargs):
     config = kwargs.get("config") or {}
     if not kwargs.get("config") and len(args) > 1:
@@ -539,10 +641,15 @@ class RobustChatModelWrapper:
         base_model: BaseChatModel,
         ctx: ArtemisContext = None,
         endpoint: ModelEndpoint | None = None,
+        *,
+        client_tools: frozenset[str] = frozenset(),
+        allow_pause_turn: bool = False,
     ):
         self.base_model = base_model
         self.ctx = ctx
         self.endpoint = endpoint
+        self.client_tools = client_tools
+        self.allow_pause_turn = allow_pause_turn
 
     def __getattr__(self, item: str):
         return getattr(self.base_model, item)
@@ -594,16 +701,43 @@ class RobustChatModelWrapper:
             ]
 
         bound = self.base_model.bind_tools(processed_tools, *other_args, **kwargs)
-        return RobustChatModelWrapper(bound, self.ctx, endpoint=self.endpoint)
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+
+        names = (
+            frozenset(
+                convert_to_openai_tool(t)["function"]["name"]
+                for t in processed_tools
+                if not (isinstance(t, dict) and t.get("type", "").startswith("web_search_"))
+            )
+            if self._is_minimax()
+            else self.client_tools
+        )
+        return RobustChatModelWrapper(
+            bound,
+            self.ctx,
+            endpoint=self.endpoint,
+            client_tools=names,
+            allow_pause_turn=self.allow_pause_turn,
+        )
 
     def with_config(self, *args, **kwargs):
         return RobustChatModelWrapper(
             self.base_model.with_config(*args, **kwargs),
             self.ctx,
             endpoint=self.endpoint,
+            client_tools=self.client_tools,
+            allow_pause_turn=self.allow_pause_turn,
         )
 
     def with_structured_output(self, *args, **kwargs):
+        if self._is_minimax():
+            schema = args[0] if args else kwargs.pop("schema", None)
+            validate_schema(schema)
+            include_raw = kwargs.pop("include_raw", False)
+            method = kwargs.pop("method", "json_mode")
+            if kwargs or method not in {"json_mode", "json_schema"}:
+                raise ValueError("MiniMax structured output supports schema-guided JSON only")
+            return _MiniMaxStructuredOutput(self, schema, include_raw=include_raw)
         if hasattr(self.base_model, "with_structured_output"):
             return RobustChatModelWrapper(
                 self.base_model.with_structured_output(*args, **kwargs),
@@ -628,6 +762,31 @@ class RobustChatModelWrapper:
             return None
         return str(getattr(provider, "value", provider))
 
+    def _is_minimax(self) -> bool:
+        return getattr(self.endpoint, "vendor", None) == "minimax"
+
+    def _validated(self, response):
+        # Meter the paid raw response even when validation rejects it.
+        self._meter_usage(response)
+        if self._is_minimax():
+            raise_for_minimax_error(getattr(response, "response_metadata", {}))
+            validate_minimax_response(
+                response, client_tools=self.client_tools, allow_pause_turn=self.allow_pause_turn
+            )
+        return response
+
+    async def _invoke_attempt(self, *args, **kwargs):
+        return self._validated(await self.base_model.ainvoke(*args, **kwargs))
+
+    async def _validated_complete_attempt(self, *args, **kwargs):
+        return self._validated(await self._complete_attempt(*args, **kwargs))
+
+    async def _invoke_after_stream(self, *args, **kwargs):
+        if self._is_minimax():
+            with logical_call_scope() as budget:
+                budget.consume(minimax_wire_target(self.endpoint))
+        return await self.base_model.ainvoke(*args, **kwargs)
+
     def _endpoint_key(self) -> str:
         if self.endpoint is not None:
             return self.endpoint.identity_key()
@@ -651,11 +810,11 @@ class RobustChatModelWrapper:
     async def ainvoke(self, *args, **kwargs):
         args, kwargs, _ = self._traced_call(args, kwargs)
         response = await _run_with_recovery(
-            functools.partial(self.base_model.ainvoke, *args, **kwargs),
+            functools.partial(self._invoke_attempt, *args, **kwargs),
             provider=self._provider_value(),
             endpoint_key=self._endpoint_key(),
+            minimax_target=minimax_wire_target(self.endpoint) if self._is_minimax() else None,
         )
-        self._meter_usage(response)
         return response
 
     async def complete(self, *args, **kwargs):
@@ -671,11 +830,11 @@ class RobustChatModelWrapper:
         args, kwargs, _ = self._traced_call(args, kwargs)
         emit_deltas = bool(self.ctx and self.ctx.data_engine)
         response = await _run_with_recovery(
-            functools.partial(self._complete_attempt, emit_deltas, *args, **kwargs),
+            functools.partial(self._validated_complete_attempt, emit_deltas, *args, **kwargs),
             provider=self._provider_value(),
             endpoint_key=self._endpoint_key(),
+            minimax_target=minimax_wire_target(self.endpoint) if self._is_minimax() else None,
         )
-        self._meter_usage(response)
         return response
 
     def _emit_stream_delta(self, stream_exec_id, chunk) -> None:
@@ -716,12 +875,18 @@ class RobustChatModelWrapper:
         except (KeyboardInterrupt, asyncio.CancelledError):
             raise
         except Exception as stream_error:
+            observed_error = (
+                normalize_minimax_error(error=stream_error) or stream_error
+                if self._is_minimax()
+                else stream_error
+            )
             if full_response is not None:
+                self._meter_usage(full_response)
                 # Mid-stream failure: the partial output must never reach
                 # message history. Tell the UI to discard it, then let the
                 # recovery policy retry the whole call with a fresh stream id.
                 llm_logger.warning(
-                    f"LLM stream broke mid-response ({stream_error}); discarding partial output."
+                    f"LLM stream broke mid-response ({observed_error}); discarding partial output."
                 )
                 _record_llm_event(
                     "llm_stream_reset",
@@ -729,29 +894,31 @@ class RobustChatModelWrapper:
                         "stream_exec_id": str(stream_exec_id),
                         "action": "discard",
                         "reason": "mid_stream_failure",
-                        "error": str(stream_error)[:500],
-                        "category": classify_failure(stream_error).category.value,
+                        "error": str(observed_error)[:500],
+                        "category": classify_failure(observed_error).category.value,
                         "message": (
                             "A request error occurred during output generation, typically caused by lower API priority. Retrying automatically..."
                         ),
                     },
                 )
+                if observed_error is not stream_error:
+                    raise observed_error from stream_error
                 raise
             if _is_stream_unsupported_error(stream_error):
                 _NON_STREAMING_ENDPOINTS.add(endpoint_key)
                 llm_logger.warning(
                     f"Endpoint {endpoint_key} does not support streaming"
-                    f" ({stream_error}); switching to non-streaming calls."
+                    f" ({observed_error}); switching to non-streaming calls."
                 )
                 _record_llm_event(
                     "llm_stream_downgrade",
-                    {"endpoint": endpoint_key, "error": str(stream_error)[:500]},
+                    {"endpoint": endpoint_key, "error": str(observed_error)[:500]},
                 )
-                return await self.base_model.ainvoke(*args, **kwargs)
+                return await self._invoke_after_stream(*args, **kwargs)
             raise
         if full_response is None:
             llm_logger.warning("LLM stream yielded no chunks; using non-streaming call.")
-            return await self.base_model.ainvoke(*args, **kwargs)
+            return await self._invoke_after_stream(*args, **kwargs)
         return full_response
 
     async def astream(self, *args, **kwargs):
@@ -818,6 +985,8 @@ async def acomplete_structured(
     *,
     schema=None,
     correction_attempts: int = 1,
+    include_raw: bool = False,
+    **kwargs,
 ):
     """Complete and parse a JSON response, with one corrective re-ask.
 
@@ -828,9 +997,29 @@ async def acomplete_structured(
     returns raw text masquerading as parsed data). Each repair round emits an
     llm_parse_repair telemetry event.
     """
-    response = await acomplete(llm, messages)
+    validate_schema(schema)
+    with logical_call_scope():
+        return await _complete_structured(
+            llm,
+            messages,
+            schema=schema,
+            correction_attempts=min(1, max(0, correction_attempts))
+            if isinstance(llm, RobustChatModelWrapper) and llm._is_minimax()
+            else correction_attempts,
+            include_raw=include_raw,
+            **kwargs,
+        )
+
+
+async def _complete_structured(
+    llm, messages, *, schema, correction_attempts, include_raw, **kwargs
+):
+    minimax = isinstance(llm, RobustChatModelWrapper) and llm._is_minimax()
+    if minimax:
+        messages = structured_messages(messages, schema)
+    response = await acomplete(llm, messages, **kwargs)
     text = content_to_text(getattr(response, "content", ""))
-    parsed = parse_structured(text, schema=schema)
+    parsed = parse_structured(text, schema=schema, strict=minimax)
     attempt = 0
     while isinstance(parsed, ParseFailure) and attempt < correction_attempts:
         attempt += 1
@@ -853,9 +1042,9 @@ async def acomplete_structured(
                 )
             ),
         ]
-        response = await acomplete(llm, correction_messages)
+        response = await acomplete(llm, correction_messages, **kwargs)
         text = content_to_text(getattr(response, "content", ""))
-        parsed = parse_structured(text, schema=schema)
+        parsed = parse_structured(text, schema=schema, strict=minimax)
     if isinstance(parsed, ParseFailure):
         _record_llm_event(
             "llm_gave_up",
@@ -866,8 +1055,43 @@ async def acomplete_structured(
             },
             status="failed",
         )
+        if include_raw:
+            return {"raw": response, "parsed": None, "parsing_error": StructuredOutputError(parsed)}
+        if minimax:
+            with logical_call_scope() as budget:
+                budget.failed_targets[minimax_wire_target(llm.endpoint)] = LLMInvalidOutputError(
+                    "MiniMax structured output did not satisfy the required schema"
+                )
         raise StructuredOutputError(parsed)
-    return parsed
+    return {"raw": response, "parsed": parsed, "parsing_error": None} if include_raw else parsed
+
+
+class _MiniMaxStructuredOutput:
+    """Schema JSON adapter that retains raw Messages until protocol validation."""
+
+    def __init__(self, llm, schema, *, include_raw=False):
+        self.llm, self.schema, self.include_raw = llm, schema, include_raw
+        self.endpoint = llm.endpoint
+
+    async def ainvoke(self, messages, config=None, **kwargs):
+        if hasattr(messages, "to_messages"):
+            messages = messages.to_messages()
+        if config is not None:
+            kwargs["config"] = config
+        return await acomplete_structured(
+            self.llm, messages, schema=self.schema, include_raw=self.include_raw, **kwargs
+        )
+
+    async def complete(self, *args, **kwargs):
+        return await self.ainvoke(*args, **kwargs)
+
+    async def astream(self, *args, **kwargs):
+        yield await self.ainvoke(*args, **kwargs)
+
+    def with_config(self, *args, **kwargs):
+        return _MiniMaxStructuredOutput(
+            self.llm.with_config(*args, **kwargs), self.schema, include_raw=self.include_raw
+        )
 
 
 # Wraps every LLM call: tells the user when a call is slow and enforces a hard
@@ -1014,6 +1238,10 @@ class _ObservedFallback(FallbackRunner):
             yield
         finally:
             _FALLBACK_AVAILABLE.reset(token)
+
+    async def run(self, main_call, fallback_call, none_should_fallback=True):
+        with logical_call_scope():
+            return await super().run(main_call, fallback_call, none_should_fallback)
 
     def fallback_reason(self, error: Exception) -> tuple[str, str | None] | None:
         if isinstance(error, LLMCallError):
