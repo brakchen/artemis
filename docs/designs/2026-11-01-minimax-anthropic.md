@@ -1,7 +1,7 @@
 # Artemis 全 MiniMax 技术方案
 
 - 日期：2026-11-01（Asia/Shanghai）。
-- 版本：1.1，已按调用链复核补充修改范围，完整方案待评审；本文不表示功能已实现或精度已验证。
+- 版本：1.2，完成设计与调用链交叉复核，完整方案待评审；本文不表示功能已实现或精度已验证。
 - 代码基线：`e7cbe5950fba16b7d31c852aa1e92309d7d6405c`，分支 `feat/model-config`。
 - 适用范围：主 Agent 推理、视频分析、Explorer 屏幕探索、联网检索、OCR、目标坐标定位。
 - 依据：本次会话已确认的需求、基线代码、MiniMax 官方文档及官方文档 MCP。
@@ -20,6 +20,8 @@
 本文提出的工程设计：复用现有 Provider 注册表、模型工厂、LangChain/LangGraph 编排与工具；默认候选为 `MiniMax-M3.1-Flash`；各角色通过提示词、思考深度、超时和媒体输入配置区分。模型可用性与实际定位、OCR 效果需要接入后验证，不能由文档能力声明推导为成功率保证。[S1][S2]
 
 不在本轮范围内：实施代码、真实手机自动化测试、购买服务、部署本地模型、生成视频或替换 Android 设备层。视频模块处理的是视频理解，不是调用 Hailuo/H3 生成视频。
+
+本次迁移的硬边界是“不需要 Google Key、不向 Google 模型/媒体/OCR 服务发请求”。保留已经安装的 Google SDK 以兼容原厂商不违反此目标；移除这些依赖和实现完全无 Google SDK 的发行包属于可选后续工作，不作为六模块迁移的前置条件。
 
 ## 2. 当前代码与差距
 
@@ -54,11 +56,31 @@
 | R07 | [日志分析提示词](../../artemis/agents/log_analyzer/log_analyzer.md) 要求 `google_search`；日志分析、[诊断 Agent](../../artemis/agents/diagnoser/diagnoser.py) 和委员会工具存在 Google 搜索专用过滤 | 角色提示词、工具注册、工具允许列表、执行器和 `enable_grounding` 语义一起接入 `web_search`，不能只新增服务函数 |
 | R08 | [可靠性包装](../../artemis/services/llm.py) 的端点标识只有 `provider:model`；相同协议/模型但不同地址会共享熔断、非流式回退等状态 | 端点身份包含注册条目、厂商、地址、模型及非秘密配置版本；MiniMax 与其他 Anthropic 服务隔离 |
 | R09 | [会话模型服务](../../apps/admin_console/services/model_service.py) 缓存原始 Operator 配置并有 Gemini 默认值，会话/任务路由依赖它 | 新任务使用统一解析后的实际模型快照，历史任务保持原实际模型；更新配置后不继续显示旧缓存 |
-| R10 | [实时回放](../../apps/admin_console/replay_manager.py) 无条件导入并 patch Google `AsyncModels.generate_content` | MiniMax 回放使用现有统一 trace/模型调用入口，覆盖不安装 Google SDK 的导入与回放，不用 Google hook 捕获 MiniMax |
+| R10 | [实时回放](../../apps/admin_console/replay_manager.py) 无条件导入并 patch Google `AsyncModels.generate_content` | MiniMax 回放使用现有统一 trace/模型调用入口，不创建/调用 Google Client、不依赖 Google 专用 patch，保留 SDK 兼容 |
 | R11 | [容器管理](../../playground/backend_manager/app/services/docker_service.py) 与 [Compose](../../playground/artemis_container/docker-compose.yml) 只转发旧厂商环境变量，没有挂载宿主 Provider 注册表 | 明确容器的应用目录、角色配置和选定 Provider 的秘密注入；宿主机保存成功不代表容器已经可用 |
 | R12 | [打包流程](../../setup.py) 复制配置与 UI 构建产物，源码启动和 wheel/容器读取位置不同 | 验证已安装包、非仓库工作目录和容器入口；重新生成 UI 构建产物，不手改带哈希的压缩 JS |
 
 复核也确认两处已有行为可复用：Flash 运行器已将完整响应追加到消息历史；ModelFactory 的模型缓存键已包含地址和 Key 摘要。不能把展示用文字提取误判为所有消息被截断，也无需重复建设客户端缓存；R08 针对的是可靠性状态的端点标识。
+
+### 2.2 v1.2 深度复核：必须补齐的契约
+
+本轮审查对象为文档修订前的 `0280dde` 及其未改变的实现基线。下面记录旧代码在 MiniMax 迁移中必须处理的问题；P1 表示会阻断配置/调用或违背动作执行要求，P2 表示分支正确性或可观测性缺口。它们不是本轮文档修改已经修复的运行时缺陷。
+
+| 编号 / 优先级 | 证据与后果 | 本次必须纳入的修改 |
+| --- | --- | --- |
+| R13 / P1 | [Provider 类型](../../artemis/config/constants.py) 固定 Literal，[LLM schema](../../third_party/mobile_use/config/llm.py) 用它校验；`minimax` 和自定义别名在 resolver 前即被拒绝。resolved/endpoint 也未携带 vendor | 内置名与受约束注册名均可进入统一解析；厂商贯穿注册表、任务快照、端点、工厂和缓存；未知名字不得预检通过 |
+| R14 / P1 | [配置展开](../../artemis/config/llm.py) 丢掉四个可选角色；[MCP profile 选择](../../mcp_server/background/task_runner.py) 优先旧 override 文件，而 profile 合并不展开 default/nodes，失败可恢复默认 | 主配置与 SDK/MCP profile 共用规范化/校验；覆盖可选角色和辅助摘要模型；显式无效配置报错，不静默丢键或恢复另一模型 |
+| R15 / P1 | LLM schema 未定义 max_tokens，输入可被静默忽略；[_resolve_endpoint](../../artemis/services/llm.py) 未传预算，[Anthropic 工厂](../../artemis/llm/router.py) 也未使用 endpoint.max_tokens | 输出上限与角色超时形成配置→合并→端点→SDK 的可验证链；参数必须实际进入请求，不能仅在文档中声明预算 |
+| R16 / P1 | [with_structured_output 包装](../../artemis/services/llm.py) 在可靠性层前已返回 parsed-only；[Planner](../../artemis/agents/planner/planner.py)、[Checker](../../artemis/agents/checker/checker.py)、[Outputter](../../artemis/agents/outputter/outputter.py) 使用该分支 | 首版 MiniMax 使用保留 raw 的 JSON/Pydantic 路径，先检查终止状态再消费结果；不能丢失 thinking、stop_reason、usage 或靠关闭 thinking 修复解析 |
+| R17 / P1 | [像素验证](../../artemis/agents/validator/precondition_pixel.py) 缺字段、低置信否定和异常可放行；[Pro burst](../../artemis/agents/validator/execution_loop.py) 跳过检查，[Flash](../../artemis/agents/flash/runner.py)/[MCP 动作](../../artemis/mcp/action_executor.py) 走其他执行路径；候选适配会丢来源 | 模型定位动作经过同一有效性门禁；候选元数据传到执行边界；不确定不得变通过；屏幕变化后停止旧快照的剩余动作 |
+| R18 / P1 | Pro 执行循环捕获所有设备异常后可再执行一次；命令已生效但响应丢失时可能重复点击 | 设备结果区分确定未执行、已派发和结果未知；只有确定未执行可重发，未知结果先观察，不重放副作用 |
+| R19 / P2 | [公共坐标](../../artemis/utils/coordinates.py) 使用 round/width−1，[Explorer geometry](../../artemis/agents/explorer/geometry.py) 使用截断/width，[Operator](../../artemis/agents/operator/operator.py) 又有独立转换 | 收敛点的换算与有限数校验；bbox 边缘单列；截图尺寸缺失不使用猜测尺寸执行定位动作 |
+| R20 / P1 | [DataEngine](../../artemis/data_engine/engine.py) 只按截图 hash 命中既有 OCR，[Explorer](../../artemis/agents/explorer/run_setup.py) 直接信任；[感知](../../artemis/graph/perception.py) 还会保存失败产生的空列表 | 持久 OCR 缓存加入来源、版本、状态与坐标空间；旧无来源结果不命中新 MiniMax 请求，失败不持久化为已确认 empty |
+| R21 / P1/P2 | [视频 universal 循环](../../artemis/agents/video_analyzer/universal_engine.py) 耗尽仍可 success，子工具错误转字符串，音频失败可静默删除；[模式选择](../../artemis/agents/video_analyzer/video_analyzer.py) 对非 Gemini 无条件 static | 明确视频完成状态、必需分段/音频、processing 模式与媒体生命周期；关键帧复用不等于可直接继承旧成功判定 |
+| R22 / P1 | [MCP 鉴权验证](../../mcp_server/tools/diagnose.py) 读取 probe 中的原始 Key；注册默认 Provider 元数据没有这些验证目标，删除秘密字段后也会直接返回空列表 | 脱敏与内部验证同时修改：验证从统一 resolver/注册表取得受控凭据，不依赖公开诊断 metadata；空列表不得冒充已验证 |
+| R23 / P1/P2 | [可靠性分类](../../artemis/llm/reliability.py) 主要看 HTTP/异常文字，原生 Files 另有业务状态；原生适配如直接放 usage，现有 [meter](../../artemis/services/token_meter.py) 不一定识别 | 薄适配负责业务错误与 usage 规范化，复用既有恢复/计量；永久业务错误不重试成临时故障，不重复计入 thinking |
+
+已做的隔离复现：提取真实类型和函数后，不导入应用、不读取凭据，验证了注册别名校验失败、max_tokens 被丢弃、可选角色被丢弃，以及默认注册表/已脱敏探针的 MCP 验证返回空列表。协议审查还按锁文件 URL 与 SHA256 核对了 `langchain-anthropic==1.5.6` wheel 源码：支持 base_url/output_config 和搜索内容块，默认结构化输出不保留 raw。未安装依赖或调用真实模型。上述事实支持复用 SDK 并补契约，不支持重写全部 Agent 的结论。
 
 ## 3. 方案选择与架构
 
@@ -109,6 +131,8 @@ Provider 存储字段继续使用既有格式：`name`、`kind`、`api_base`、`
 - 保存采用进程间锁、唯一临时文件和原子替换，避免 CLI/API 并发读改写覆盖。写盘失败必须返回错误；持久化成功后才更新生效状态。
 - 本方案使用注册表中的 Key，不依赖把 MiniMax Key 写成全局 `ANTHROPIC_API_KEY`，避免影响其他客户端。
 
+注册名必须穿过 LLM 配置类型校验：用受约束字符串支持内置名与注册名，不能只向 Literal 增加一个 `minimax` 而继续拒绝 `minimax-prod`。统一解析后携带 vendor、kind、注册名、地址、模型与非秘密配置版本到 ModelEndpoint；工厂与客户端缓存都按这些影响请求的字段区分。未知/缺失/禁用注册名在新任务启动前失败，不能被当成无需凭据的内置服务。
+
 ### 4.2 角色配置
 
 `artemis.jsonc` 继续保存角色与参数；以下是需要适配完成后的目标示例，不是当前即可使用的配置。
@@ -139,7 +163,9 @@ Provider 存储字段继续使用既有格式：`name`、`kind`、`api_base`、`
 
 示例保留相同主备模型是为了兼容基线必填 fallback；解析后若主备端点与模型相同，可靠性层必须合并为同一请求重试预算，不再执行第二轮“模型降级”。首版不自动退回 Google 或其他厂商；如以后增加 MiniMax 备用模型，先验证其多模态与工具能力。
 
-`reasoning_effort` 在 MiniMax 请求中映射到 `output_config.effort`。新增允许 xhigh/max；MiniMax 拒绝 none。不把它换算为 token budget，不把被官方忽略的 temperature/top_p 显示为有效调优项。[S1]
+`reasoning_effort` 按“厂商＋模型”校验：M3.1-Flash 的 low/medium/high/xhigh/max 映射到 `output_config.effort`，拒绝 none，保留强制 thinking；M3 的 thinking 默认关闭，可配置 adaptive/disabled，不假定支持 Flash 的 effort。未核实的其他模型不因 vendor 相同就继承这些能力。不把 effort 换算为 token budget，不把被官方忽略的 temperature/top_p 显示为有效调优项。[S1]
+
+在角色 schema 中明确加入 `max_tokens` 和 `timeout_seconds`，输出上限为正整数、超时为有限正数；兼容历史 timeout 别名时明确冲突报错。max_tokens 优先级为角色覆盖→全局 default 显式预算→厂商/模型初值；timeout_seconds 为角色覆盖→全局 default 显式值→注册表已有默认→厂商/模型初值，不新增第二份注册表 token 预算。不得用布尔 or 吞掉非法零值或静默丢弃额外参数。主备分别合并，最终 SDK 请求必须携带已解析预算。媒体输入与输出上限分别检查，不能把 max_tokens 当输入容量。
 
 OCR 和搜索是现有工具的新后端，不虚构不存在的 `nodes.ocr` 或 `nodes.search`。两者默认继承已解析的全局 MiniMax 配置；如需要独立开关，扩展现有类型化 Agent 工具配置，通过同一配置加载入口读取，不再增加凭据文件。
 
@@ -162,6 +188,16 @@ OCR 和搜索是现有工具的新后端，不虚构不存在的 `nodes.ocr` 或
 
 复用角色配置解析入口，并将实际选中的文件路径提供给配置界面和诊断；初始化、运行时和控制台不能各读不同文件。源码 `.env`、用户目录 `.env` 和工作目录 `.env` 当前存在多个加载入口，实施中不得假定修改一个就会全部生效。涉及旧变量的编辑须保留无关条目，避免初始化整文件覆盖。同步 `.env.example`、安装脚本和使用说明，明确环境导入是一次性操作，并且仍需选择角色模型。
 
+### 4.4 主配置、profile 与全 MiniMax 工作配置
+
+复用一个规范化入口处理统一 default/nodes 格式与旧扁平格式。主配置先展开；profile 仅展开其显式给出的覆盖，不凭空填入另一套 Gemini 默认，再按角色深合并并严格验证。已支持角色清单由类型定义与展开器保持一致，包含 history_analyzer、validator_pixel_safety_net、planner_validation、output_analyzer 和 utility 角色。未知角色名/模型参数报错，保留 agent/device 等不属于 LLM 的用户配置。
+
+SDK `AgentProfile(from_file=...)`、MCP 的旧 override 查找与 CLI/Web 使用相同加载规则。显式选中的 profile 缺失或无效即失败；发现旧 override 时显示实际路径与覆盖内容，不能静默优先于用户选择的主配置。现有 presets 目前没有通用运行时选择链，本次不新增一套预设系统或声称写入 presets 即生效；MiniMax 向导写入明确 default/nodes。
+
+迁移须覆盖所选工作配置中的显式模型覆盖，包括 object_detector、hopper 的主备、Flash step_summarizer 和 memory chunking 模型；只修改 default 不够。将旧 thinking_level/thinking_budget 等参数按模型能力清理/转换，而不是把 Google 参数原样发送给 MiniMax。先生成不生效的候选、完整解析全部角色与主备，再发布；写入失败返回失败并按备份恢复本次修改，不声称多文件具备原子事务。
+
+任务启动时对这份 MiniMax 工作配置预解析全部会用到的角色和工具后端，要求实际 vendor 均为 minimax；未满足即不开始任务。其他 legacy 工作配置保留既有“移除默认后恢复内置”的行为，避免改变无关用户。普通编辑/禁用/删除影响后续任务，当前任务保持启动快照；立即停止当前任务继续请求使用现有取消操作。不能把 C01 的新解析禁用检查与 C16 的已启动任务快照混为一谈。
+
 ## 5. 消息与调用生命周期
 
 统一生命周期为：解析本任务配置快照 → 组装消息 → 调用 SDK → 完整收集内容块 → 执行本地工具或消费结果 → 回传完整消息 → 继续任务。
@@ -178,6 +214,16 @@ OCR 和搜索是现有工具的新后端，不虚构不存在的 `nodes.ocr` 或
 
 完整消息回传、思考参数和多模态输入规则均以官方 Messages 文档为准。工具 schema 由应用验证，不能假设模型输出或 SDK 参数开启后即可保证语义正确。[S1][S2]
 
+### 5.1 结构化输出与原始响应
+
+首版 MiniMax 的 Planner、Checker、Outputter、像素判定及定位/OCR 结构化调用，统一扩展 `acomplete_structured()`：首次请求显式加入 schema 与 JSON 输出约束，先检查原始终止状态及业务错误，再解析/验证/修正。现函数仅解析已有 messages，不会自动注入首次 schema，这部分属于必改。即使截断内容恰好包含可解析 JSON，也不得作为完整判定或动作。只有 thinking、缺必填项、未知终止原因均有明确失败，不从缺失字段推导成功。
+
+保留 OutputConfig 已支持的两类 schema：Pydantic 模型按其类型验证，JSON Schema dict 使用标准验证器验证，不能仅 json.loads；锁文件已有 jsonschema==4.26.0，实施时复用并声明直接依赖，不另写校验器。不支持/无效的 schema 在请求前报错。返回值保持各调用方的 BaseModel/dict 契约。Outputter 的结构化输出失败不能退回未验证字典/原文冒充满足 schema；普通未要求结构化的回答仍可返回文本。
+
+现有 parsed-only `with_structured_output()` 不能直接沿用到 MiniMax；首版不依赖尚未核实的 output_config.format，也不关闭 Flash thinking 来强迫 schema 工具调用。未来采用工具 schema 模式时必须保留 raw，并验证 thinking 下未调用 schema 工具的分支。最多一次格式修正纳入同一个任务预算，原始消息保留在本任务历史，不把展示文本当回传历史。
+
+薄适配器若启用，仍实现现有 ChatModel 的绑定工具、完整响应/流式、回调、取消和关闭契约；原生 `usage` 规范化为现有 AIMessage.usage_metadata 后进入 meter，保留缓存/思考细项且不重复计数。标准 LangChain 路径已做的转换继续复用，不新建 token 账本。
+
 ## 6. 六模块实现
 
 ### 6.1 主 Agent 推理
@@ -190,9 +236,21 @@ OCR 和搜索是现有工具的新后端，不虚构不存在的 `nodes.ocr` 或
 
 首版复用 [universal_engine.py](../../artemis/agents/video_analyzer/universal_engine.py) 的分段、关键帧与动作窗口加密采样。每帧带原录屏时间戳，结果包含观察时段、事件、证据帧和无法判断的部分。
 
-长片段或时序细节不足时使用同一 Messages 入口的视频内容块；大文件按官方 Files 接口上传并引用 `mm_file://`。本地处理分段和媒体尺寸，保存分段偏移，不能把片段内时间误作整段录屏时间。原生视频接口与关键帧方法是同一 MiniMax 能力的不同输入策略，不是跨厂商降级。[S1][S4]
+长片段或时序细节不足时使用同一 Messages 入口的视频内容块，优先本地分段后内联输入。Files 上传并引用 `mm_file://` 作为验证后的可选升级。本地保存分段偏移，不能把片段内时间误作整段录屏时间。原生视频接口与关键帧方法是同一 MiniMax 能力的不同输入策略，不是跨厂商降级。[S1][S4]
 
 需要声音时，单独提取音轨并调用 MiniMax `speech_to_text`，合并带时间戳的转写与画面结果；没有权限时明确说明音频未分析，不能宣称已理解声音。非语音声音识别不由转写功能保证。[S3]
+
+MiniMax 首版 processing=auto 选择关键帧/static；显式 static 支持，显式选择仅 Gemini 支持的 agentic 返回 unsupported，不静默改 static。时序细节不足后的 MiniMax 视频输入仍是本方案自己的输入升级，不冒充 Gemini Interactions 模式。旧 universal 自动附加原始音频并在失败后删除重试的分支改为上述 ASR 流程；将用户要求的音频与可选音频区分。
+
+视频内部结果使用 complete/partial/incomplete/failed，按已分析时段、必需模态和有效最终回答决定状态。循环耗尽不是 complete；子工具错误必须可识别，不能仅返回字符串后报成功。适配现有 `(outcome,status)` 时，只有 complete 可标 success，其余保留明确的未完成/错误事实并同步调用方，不能把 partial 映射为完整成功。
+
+音轨分片同时满足官方 500 秒/50 MB 限制，采用 `response_format=verbose_json`、`stream=false` 获取 segments；普通 json 即使传 timestamp_level 也没有对齐时间。记录片段起点，把 ASR 相对时间和视频时间映射到整段录屏，处理边界重叠；无音轨与转写失败分别记录。[S3]
+
+官方 MiniMax 预设显式关联 Messages 基址与原生 API 基址：Files/ASR 发往 `https://api.minimax.cn/v1/...`，不能把原生路径接在 `/anthropic` 下。自定义网关未配置/核实对应媒体端点时禁用这项能力并报错，不能将其 Key 自动发往另一个官方主机。媒体鉴权沿用该任务选定的受控凭据，不读取全局其他 Key。
+
+上传文件记录任务所有权、内容 hash、用途、端点/账号、file_id 与失效时间；video_understanding 最长保存 7 天，过期不能原样复用。复用本任务仍有效文件以免每次重试重复上传。成功、失败、取消均释放本地临时文件及 SDK/HTTP 资源；仅对本任务创建且无引用、并经验证支持删除的云文件执行清理，外部文件不擅自删除。清理失败单独记录，不能覆盖原异常或假报已清理。[S4][S9]
+
+官方当前删除接口的 purpose 列表未列 video_understanding，主动删除该用途尚不能由文档证明。Files 升级启用前必须验证上传、引用、失效与清理/实际保留行为；未验证时继续使用关键帧或本地分片内联，不承诺视频上传后可立即删除。内联视频、图片、总请求与上传大小按官方各自限制检查，不能只看本地文件大小而漏算 base64 膨胀。[S1][S4][S9]
 
 ### 6.3 Explorer 屏幕探索
 
@@ -202,7 +260,7 @@ OCR 和搜索是现有工具的新后端，不虚构不存在的 `nodes.ocr` 或
 
 ### 6.4 联网检索
 
-保留普通 Agent 工具 `web_search` 的形态；其内部开启独立的 MiniMax Messages 搜索会话，只携带检索问题和服务端搜索工具，避免将整段手机截图历史发送给搜索过程。
+新增普通 Agent 工具 `web_search`，复用现有工具注册与执行链；其内部开启独立的 MiniMax Messages 搜索会话，只携带检索问题和服务端搜索工具，避免将整段手机截图历史发送给搜索过程。当前代码没有可以直接沿用的通用 web_search 实现。
 
 请求声明 `type="web_search_20250305"`、`name="web_search"`。适配器消费 `server_tool_use`、`web_search_tool_result` 和最终文字，向主 Agent 返回答案、实际来源 URL、标题及检索状态；不得补造不存在的来源。[S2]
 
@@ -231,9 +289,11 @@ OCR 状态为 complete/partial/empty；调用异常、输出截断和格式错�
 
 密集文字采用分区裁剪识别，映射回原图后合并重叠结果。复用当前截图识别结果；缓存键至少包括截图内容、裁剪区域、Provider/模型、提示词版本及相关参数。不能单凭应用名缓存，模型自报置信度不用于确定性裁决。
 
+该缓存契约同时覆盖 DataEngine 持久化结果，不仅是内存缓存。复用 ImageRecord.extra_metadata 保存 OCR 来源、模型/配置/提示版本、状态与坐标空间；保留旧历史但无来源/旧 Google 结果不能命中新 MiniMax 识别。失败的 `[]` 不标记为完成的 empty；既有同 hash 记录允许按来源版本更新 OCR。Explorer 读取旧图片记录时同样校验元数据，不能绕过新缓存规则。
+
 旧 `perform_ocr()` 返回 `[{text, position: [{x, y}, ...]}]`，position 是像素顶点；主感知、Checker 和 Explorer 的 XML 融合均依赖它。首版保留新类型化结果，并在调用方进入 XML 融合前使用公共转换函数，将归一化 bbox 转为本次输入图的像素顶点。公共转换函数不加截图裁剪偏移；原有调用方的 `_map_coordinates_back()` 负责状态栏偏移，且只执行一次。全图输入不加偏移；后续分区裁剪先合并到该次 OCR 输入图坐标，再进入此转换，避免两层重复加偏移。新状态与来源信息随结果保留，不丢失失败原因。
 
-旧函数只有图片和可选 HTTP client，没有任务上下文；增加上下文或已解析调用配置，并更新全部调用点。保留可测试的调用注入边界，不沿用 Google HTTP client 作为 MiniMax SDK client。OCR 已配置不等于应在每个感知周期发起付费请求：用既有工具配置明确自动识别开关，UI 树文字足够时可跳过，对相同截图合并并发识别。旧的宽泛异常降级须记录明确原因；允许继续使用 XML 时标记降级，鉴权失败不能报告成“识别为空”。
+旧函数只有图片和可选 HTTP client，没有任务上下文；增加上下文或已解析调用配置，并更新全部调用点。保留可测试的调用注入边界，不沿用 Google HTTP client 作为 MiniMax SDK client。OCR 已配置不等于应在每个感知周期发起付费请求：MiniMax 首版的周期性自动 OCR 默认关闭，显式 OCR 工具和 Explorer 按需识别可用，自动开关纳入类型化配置且不由保存 Key 自动打开。UI 树文字足够时可跳过，对相同截图合并并发识别。旧的宽泛异常降级须记录明确原因；允许继续使用 XML 时标记降级，鉴权失败不能报告成“识别为空”。
 
 将 [is_ocr_configured](../../artemis/utils/ocr_api.py) 的就绪条件改为 MiniMax 视觉配置状态，并更新 Explorer 工具可用性、诊断与前端提示。UI 树直接提供的文字仍可使用，这属于本地结构信息，不是另一个 OCR 后端。
 
@@ -274,11 +334,15 @@ OCR 状态为 complete/partial/empty；调用异常、输出截断和格式错�
 }
 ```
 
-其中模型提供 status、label 和 bbox；point 由程序取合法边界中心，snapshotId/source 由程序赋值。found 必须只有一个可选候选；ambiguous 至少两个，not_found 为空。数据格式无效使用独立的 invalid_output 错误，不假装目标不存在。
+其中模型提供 status、label 和 bbox；point 首先由程序取合法边界中心作为候选，snapshotId/source 由程序赋值。found 必须只有一个可选候选；ambiguous 至少两个，not_found 为空。数据格式无效使用独立的 invalid_output 错误，不假装目标不存在。
+
+bbox 与文字唯一匹配只构成定位证据，不等于可以点击。结构匹配需用同快照 UI 树确定可操作元素/父级及屏幕可见交集；完整容器中心落在另一个子项、部分出屏或存在覆盖层时不能机械使用中心。缺乏可操作证据时进入局部复核；多个候选无法区分才返回 ambiguous，单候选无法验证则由动作门禁返回 unknown/block，不虚构候选满足数量。当前尚无证据证明非矩形目标中心一定错误，相关精度通过分场景样本验证。
 
 ### 7.2 换算与快照有效性
 
 对整图，`xPixel = round(xNorm * width / 1000)`、`yPixel = round(yNorm * height / 1000)`，最终限制在有效像素范围 `[0,width-1]`、`[0,height-1]`。
+
+复用并收敛至公共 coordinates 点转换，统一有限数、合法尺寸和舍入；Explorer/Operator 不再自行截断或夹到 width。bbox 的 right/bottom 是边缘，可到 width/height，使用独立边界转换，不能套点的 width−1 限制。定位执行必须使用实际截图/显示尺寸，缺失时阻断，1080×2400 等展示 fallback 不得用于派发动作。
 
 对裁剪区域 `(offsetX,offsetY,cropWidth,cropHeight)`，先在裁剪图中换算，再加偏移映射到原截图，最后转成现有内部坐标。若存在留白填充或额外缩放，应用完整逆变换；不得直接把裁剪图的归一化点当作整屏点。
 
@@ -301,6 +365,14 @@ flowchart LR
 
 点击后的页面、控件状态或输入焦点等证据用于判断动作结果。未观察到预期变化时，按有限恢复流程重新判断，不连续重放相同坐标。现有敏感动作确认与设备授权要求继续适用，模型定位结果不绕过它们。
 
+### 7.4 执行入口必须共同满足的条件
+
+定位候选经 Explorer Flash/Pro/Ultra、element index、动作翻译到 Pro Validator、Flash 或 MCP 执行器时，均保留 snapshotId、设备/显示标识、尺寸/旋转、bbox、坐标空间及来源证据。动作有效性由执行边界统一检查，不只修改检测工具的返回 JSON。
+
+MiniMax 任务中 Agent 发起的定位/按索引动作，无论候选来自 XML 结构预匹配、OCR 还是模型，都检查动作与快照有效性，采用严格类型化的 allow/block/unknown 判定；缺字段、低置信否定、模型/鉴权/裁剪异常不可转换为 allow。XML 证据充分时允许本地验证，不强制增加付费视觉调用。unknown 返回可恢复阻断并要求重新观察，不沿用旧像素验证的 fail-open 分支。直接按用户明确坐标执行的独立工具不因此被强制新增付费视觉判断。
+
+Pro burst、Flash 同轮多工具与 MCP 定位动作也必须检查来源有效性。首个改变屏幕的动作执行后，其余旧快照定位动作停止，重新观察/定位后再决定，不继续使用原索引。设备结果区分确定未执行、已派发和结果未知；确认命令可能已生效而响应丢失时，记录 unknown outcome 并观察，不由旧本地重试循环再次点击。“已派发”与“达到任务目标”分别记录。
+
 ## 8. 异常、预算与可观测性
 
 | 情况 | 行为 |
@@ -317,6 +389,10 @@ flowchart LR
 
 重试总预算由一个所有者管理：包括 SDK 自动重试、现有可靠性包装、主备模型和模块格式修正，避免层层倍增。实施时选择一个网络重试所有者并关闭或计入其余自动重试；具体次数通过联调确认。
 
+MiniMax 薄适配同时检查 HTTP、SSE error 和适用原生接口的业务状态，Files 的 HTTP 200 且 base_resp 非成功不算上传成功。余额、Key、模型权限、内容拒绝、参数错误进入永久/需用户处理的失败，频率或服务临时故障进入有限恢复；未知业务码有界失败，不能无限重试。不要推断所有 Messages 错误均用 HTTP 200。保留服务 trace_id 便于定位，禁止原始 Key 进入异常文本。[S7]
+
+统一预算还约束模块内部重试、搜索续传、媒体切片和格式修正的总调用数/截止时间，内部捕获异常不能把永久错误重新包装为可重试普通字符串。取消时终止后续请求并做资源清理；已执行设备动作按 7.4 单独处理，不能套网络重试策略。
+
 ## 9. 控制台、CLI 与兼容迁移
 
 复用现有 Provider 表单与 CLI 增加 Anthropic 协议选项和 MiniMax 预设。用户配置入口为服务地址、Key、模型与参数；Key 保留/替换语义在 UI、HTTP 和 CLI 中一致。用户无需维护六份 Key。
@@ -328,12 +404,16 @@ flowchart LR
 1. 保留原有 Google/OpenAI Provider 数据及其他用户配置。将用户选择的工作配置切换到 `minimax`，主备角色显式同厂商，不批量删除 `.env` 或已有凭据。
 2. 保持现有注册表字段和 version 1 格式，新程序同时支持旧 kind 与新增 anthropic。旧程序不保证识别 anthropic；回退前需恢复原 Provider/角色配置备份，不能声称旧程序无损兼容新条目。
 3. 修改运行配置前在用户目录保存备份，备份同样含秘密，不进入仓库。回退只恢复本任务修改的配置，不覆盖用户后续无关编辑。
-4. Google 原生分支保留给其他已支持的安装方式，但 MiniMax 启动路径不依赖 Google SDK 的模块级导入；调整工具声明、公共常量和可选导入边界。可选依赖拆分以启动验证结果为依据。
+4. Google 原生分支及已安装依赖保留兼容，MiniMax 不创建/预热 Google Client、不调用其服务。公共工具声明不能强迫选择 Google 执行路径；完全移除 Google 包属于可选后续瘦身，本次不以无 SDK 安装验收。
 5. 前端新字符串走现有 `t` pipe 与中文词典，不另建页面或国际化系统。
 
 Provider 新建、保存、测试和模型目录查询的 HTTP 请求/响应类型、前端 Service 和 CLI 参数必须一起扩展 kind/vendor，支持自定义注册别名。测试使用当前待保存的地址与协议，禁止固定 OpenAI、忽略自定义地址或遇到未知 vendor 后仅凭 Key 长度判成功。目录查询不支持时允许明确手填模型，不能为获得“测试通过”把秘密发往其他主机。
 
+MiniMax Anthropic 目录使用 `GET /anthropic/v1/models` 与 x-api-key，处理 has_more/last_id 分页，不能沿 OpenAI 规则得到 `/anthropic/models`。目录中的模型仍须按 Messages 接口和本项目所需图片/工具能力筛选，列表出现不等于模型适合全部六模块。[S10]
+
 诊断响应只提供布尔状态、厂商/模型、掩码和非秘密配置来源；移除凭据探针现有原始 Key metadata 及前端回填逻辑，并检查完整嵌套报告与缓存。用户输入的新 Key 仅用于本次提交，保存后清空输入；不通过读取诊断结果恢复 Key。OCR 探针沿用旧 ID 时同步调整说明和判断，改 ID 时必须同步所有消费者。
+
+同步修改 MCP `mobile_diagnose(verify_credentials=true)`：内部验证根据实际解析的注册条目取得凭据、协议、地址与模型，不再读取 probe 的 raw_key/api_keys，也不能只遍历旧内置 Key。公开报告只接收验证结论；未验证/不支持/失败分别表示，空结果不能宣称通过。保留 doctor 已省略秘密、MCP 已递归脱敏的行为，同时替换其修复建议中要求填写 Gemini `.env` 的过时引导。
 
 容器不会自动继承宿主用户目录。部署入口需将选定角色配置与最小 Provider 注册表通过受控秘密文件/挂载提供给容器，在容器内指定一致的 `ARTEMIS_APP_DIR`；校验 UID/权限和路径。不得把 Key 打入镜像、转发全部宿主厂商秘密或只新增环境变量白名单就宣称可用。配置更新后如何重载按任务快照规则处理，现有运行任务不切换凭据。
 
@@ -351,7 +431,11 @@ Provider 新建、保存、测试和模型目录查询的 HTTP 请求/响应类�
 
 新增文件只在现有模块无法承载明确的协议适配职责时建立；不另造配置注册表、任务循环、工具执行器或重试框架。若更新 vendored 配置，遵循该目录既有修改与来源记录方式。
 
-Google 可选导入核查除六模块外，还包括 `artemis/constants.py`、`artemis/tools/base.py`、SDK、validator 工具声明和 vendored 模型配置。保留旧 Google 协议的 `[y,x]` 测试与适配，MiniMax 增加独立 `[x,y]` 分支；不以全局删交换函数代替协议迁移。Android platform-tools 下载地址、Google 版权文字与 Gemini 模型调用无关，不属于本次替换对象。
+Google 路径核查除六模块外，还包括 `artemis/constants.py`、`artemis/tools/base.py`、SDK、validator 工具声明和 vendored 模型配置；这些文件中保留兼容类型导入不等于仍在调用 Google 服务。保留旧 Google 协议的 `[y,x]` 测试与适配，MiniMax 增加独立 `[x,y]` 分支；不以全局删交换函数代替协议迁移。Android platform-tools 下载地址、Google 版权文字与 Gemini 模型调用无关，不属于本次替换对象。
+
+复核补充的具体改动所有者：A 包括 constants、LLM schema、SDK profile/override loader 与 MCP task_runner；B 包括公共 coordinates、Explorer geometry/index/候选适配、Validator precondition/execution_loop、Flash/MCP 动作执行与 DataEngine OCR 记录；C 包括视频 processing、结果状态及媒体资源清理；D 包括 MCP diagnose 的内部鉴权验证。属于现有职责补齐，不新建平行框架。
+
+实施顺序按依赖推进：先完成 A 并用离线请求夹具验证配置到 SDK；再打通定位/OCR 的来源与动作门禁，完成离线标注评测；随后接入搜索/视频及全部入口；最后做无 Google Key 的混合残留配置测试和发行物验证。某阶段失败时不把后续未经验证的能力一起宣布可用。
 
 ## 11. 验收与验证计划
 
@@ -359,7 +443,7 @@ Google 可选导入核查除六模块外，还包括 `artemis/constants.py`、`a
 
 | 编号 | 必须证明的行为 |
 | --- | --- |
-| C01 | version 1 的旧 OpenAI 配置仍能读取；新增 anthropic 配置正常；禁用 Provider 在显式、默认与别名路径都不能被使用 |
+| C01 | version 1 的旧 OpenAI 配置仍能读取；新增 anthropic 配置正常；新任务/新配置解析在显式、默认与别名路径都不能使用禁用 Provider |
 | C02 | Key 省略时保留；显式清除可区分；写盘失败返回失败；并发更新不丢失；API/日志不泄漏秘密 |
 | C03 | 所有角色与控制台复用同一个实际模型解析结果，MiniMax 请求地址不落到 Anthropic 官方服务；object_detector/video_analyzer 正确使用 utility 范围配置，配置错误不静默退回 Operator |
 | C04 | thinking、工具 ID、服务端内容块、流式拼接和多轮历史能完整往返；截断不会触发动作 |
@@ -368,15 +452,29 @@ Google 可选导入核查除六模块外，还包括 `artemis/constants.py`、`a
 | C07 | OCR partial/empty/失败不混淆，裁剪结果正确合并，页面变化使缓存失效 |
 | C08 | 搜索 pause_turn 能原样续传并受限，server_tool_use 不交给本地工具执行 |
 | C09 | 同一主备模型及 SDK/包装层不会倍增重试；超时不重放已完成动作 |
-| C10 | 设置 Google Key、原始 Gemini 模型名或旧共享 Client 后，选择 MiniMax 仍只发往批准的 MiniMax 端点；无 Google SDK 环境能启动 MiniMax 路径 |
+| C10 | 无 Google Key，以及残留 Google Key/原始 Gemini 模型名/共享 Client 的场景中，选择 MiniMax 均只使用批准的 MiniMax 端点；拒绝全部 Google 模型/媒体/OCR 请求的 spy 下六模块及辅助入口可运行，不要求卸载 SDK |
 | C11 | UI/HTTP/CLI 的新增、编辑、测试和模型目录查询保留 kind/vendor/base URL；自定义别名仍应用 MiniMax 参数；Claude 分支不受影响；未知厂商不假通过 |
 | C12 | 初始化导入变量与注册表冲突按 4.3 处理；无隐藏厂商 Key fallback；缺失显式配置路径报错；初始化保留原 `.env` 无关项 |
 | C13 | readiness/doctor/设备选择返回的完整报告、错误与缓存均无原始秘密；前端不依赖 Key 回填；OCR 无独立 Google Key 也能按 MiniMax 配置判就绪 |
 | C14 | 主感知、Checker、Explorer、OCR 工具均正确消费新结果，像素多边形和状态栏偏移正确；鉴权失败可识别，自动开关与相同截图并发合并生效 |
 | C15 | 日志分析、诊断、委员会等启用搜索的角色能实际调用 web_search，提示词与执行器一致；禁用或无权限时明确返回不可用 |
 | C16 | 相同协议/模型但不同地址的熔断与流式降级互不污染；任务进行中修改/禁用注册表不改该任务快照，后续任务使用新配置 |
-| C17 | 任务与会话展示实际模型，配置更新不污染历史记录；MiniMax 实时回放不依赖 Google patch；无 Google SDK 的公共入口导入通过 |
+| C17 | 任务与会话展示实际模型，配置更新不污染历史记录；MiniMax 实时回放不依赖 Google patch，公共入口不触发 Google Client 预热/调用 |
 | C18 | wheel 安装后、非仓库 cwd 和容器中均读取预期配置与秘密挂载；UI 包含更新构建产物；仅宿主已配置但容器未注入时明确报错 |
+| C19 | 完整配置示例及合法自定义 Provider 别名可实例化；未知/删除/禁用引用启动前失败；vendor/kind 保真到工厂与缓存；legacy 移除默认行为仍可用 |
+| C20 | 主配置、SDK from_file、MCP profile 的统一/旧扁平格式等价；四个可选角色不丢失；无效 profile、拼错角色/参数报错，旧 override 不静默抢占 |
+| C21 | mock SDK 实际请求中的 max_tokens/timeout 等于角色合并结果，主备独立；零/负/非有限值报错；M3 与 Flash 的 thinking/effort 按模型能力区分 |
+| C22 | 首次请求包含 schema，Pydantic/JSON Schema 均真正验证，无效 schema 请求前报错；合法 JSON 无 tool_call 可成功，但截断、仅 thinking、解析失败或缺字段不产生成功判定/动作。未来工具 schema 模式缺对应调用才算失败；各角色先 gate raw 并保留 usage，Outputter 不以未验证结果冒充结构化成功 |
+| C23 | 空/错误像素判定、低置信否定、401、裁剪失败、超时均不放行定位动作；Pro 单动作/burst、Flash 多工具、MCP、Explorer 各模式均保留来源并阻断过期目标 |
+| C24 | 模拟设备命令已产生副作用后抛超时，断言只派发一次、记录结果未知并观察；确定未执行的失败才允许有界重发 |
+| C25 | 点 0/1000、舍入边界、NaN/Infinity、裁剪/旋转、bbox 右下边缘和真实尺寸缺失分别处理；部分出屏/覆盖层/父容器多子项不机械点击中心 |
+| C26 | 同截图 hash 的旧 Google OCR、无来源记录、Provider/提示版本切换不命中新 MiniMax 缓存；失败空列表不阻止后续成功识别，历史记录保留 |
+| C27 | 视频循环耗尽、子片段失败、空最终回答、必需音频未分析不能完整 success；不支持的显式 processing 报错，auto/static 路径清楚 |
+| C28 | ASR 使用带时间 segments 格式并正确叠加切片偏移；文件过期/取消/失败清理、重试复用、媒体大小限制与原生端点鉴权隔离可验证 |
+| C29 | MCP 显式验证实际注册 Provider，内部取 Key 不靠公开 metadata；默认条目或脱敏后不会返回空列表冒充已验证，公开输出与错误不泄漏秘密 |
+| C30 | Files HTTP 200＋非成功业务码、内容拒绝、余额/权限错误、HTTP 429 与 SSE error 进入正确分类和预算；模块内捕获不重试永久错误 |
+| C31 | 若启用原生薄适配，与标准 LangChain 路径对同一录制响应计量一致，缓存/思考字段不重复计数，取消/关闭/工具绑定契约不退化 |
+| C32 | 迁移候选覆盖所有显式 Gemini 主备/摘要模型与旧参数，保留无关配置；写盘或验证失败不发布混合配置，新任务预检不能转向剩余其他厂商 |
 
 ### 11.2 使用真实 MiniMax 的能力验证
 
@@ -390,12 +488,15 @@ Google 可选导入核查除六模块外，还包括 `artemis/constants.py`、`a
 
 最后在单个授权模拟器上验证“观察—定位—点击—复核”以及搜索、视频任务；真实手机测试另需明确授权。代码实现后按仓库要求执行窄范围测试、`uv run pytest tests/unit -q`；前端变更执行 `npm run build`。
 
+离线请求验证使用锁定 SDK 和 mock transport/录制响应，检查实际 URL、头、body、内容块、终止状态及重试次数；FakeChatModel 只能证明编排，不能替代协议兼容测试。定位评测必须覆盖最终映射和门禁，不能只统计模型原始坐标。
+
 ## 12. 风险、待验证事项与完成状态
 
 - MiniMax 对本项目手机 UI 的细粒度定位、OCR 文字边界精度尚未实测；统一厂商不等于全部任务已有精度保证。
 - 当前账号的模型、搜索、文件和语音权限尚未验证；同一个 Key 不等于所有接口都已开通。
 - 锁定版 LangChain/SDK 对厂商扩展内容块与视频格式的保真需用录制响应和小规模真实调用验证；若不满足，使用第 3 节薄适配方案。
 - 搜索为官方 Beta，输入大小与模型可用性按官方文档和实时错误更新。[S1][S2]
+- 官方 Files 删除用途清单尚未列 video_understanding；该可选升级的主动删除与实际账号行为待验证，基本视频分析使用关键帧/本地分片内联不受其阻塞。[S4][S9]
 - 本机 RTX 3050 不作为本方案依赖；普通 CPU 执行媒体预处理，模型耗时取决于云端服务与网络。
 
 本轮交付是技术文档。代码、运行配置、真实模型调用、模拟器和端到端测试均尚未实施。文档自检与未来软件验收分开；完整方案和业务阈值仍待用户评审。
@@ -410,6 +511,10 @@ Google 可选导入核查除六模块外，还包括 `artemis/constants.py`、`a
 - [S4：MiniMax 文件上传](https://platform.minimax.cn/docs/api-reference/file-management-upload)：媒体上传与用途，视频理解需使用对应 purpose。
 - [S5：MiniMax 模型调用](https://platform.minimax.cn/docs/guides/text-generation)：官方推荐接入方式与当前模型。
 - [S6：官方文档 MCP](https://platform.minimax.cn/docs/mcp)：已注册为 Codex `minimax-docs`，完成 MCP 握手与文档查询。
+- [S7：MiniMax 错误码](https://platform.minimax.cn/docs/api-reference/errorcode)：原生业务错误的分类依据，不能只凭 HTTP 200 判成功。
+- [S8：Anthropic 消息接口](https://platform.minimax.cn/docs/api-reference/text-chat-anthropic)：Messages 请求与响应接口定义。
+- [S9：MiniMax 文件删除](https://platform.minimax.cn/docs/api-reference/file-management-delete)：本任务创建媒体文件的清理接口，具体可删除用途需按接口与实际权限校验。
+- [S10：Anthropic 模型目录](https://platform.minimax.cn/docs/api-reference/models/anthropic/list-models)：目录路径、鉴权和分页，不作为多模态能力或账号权限的替代证明。
 
 ### 文档自检范围
 
@@ -418,6 +523,17 @@ Google 可选导入核查除六模块外，还包括 `artemis/constants.py`、`a
 ## 14. Changelog
 
 本节记录技术方案的变更，不代表对应功能已经实现。后续修订本文时须同步更新本节，按版本倒序记录日期、变更内容及验证范围。
+
+### v1.2 — 2026-11-01
+
+- 交叉复核整体设计、配置、协议与视觉执行链，新增 R13–R23；明确问题证据、后果及本次修改所有者，保留原 R01–R12 记录。
+- 补齐注册别名类型、vendor 元数据传递、可选角色展开、SDK/MCP profile 规范化、显式配置失败与全 MiniMax 工作配置预检；明确迁移不能只改 default。
+- 明确 max_tokens/timeout 配置通道与按模型能力校验参数，修正将 Flash 的 effort/none 行为泛化到所有 MiniMax 模型的描述。
+- 首版结构化输出采用保留原始响应的 JSON/Pydantic 路径，兼容 JSON Schema 校验及既有返回类型；首次请求注入 schema，在解析前检查终止/业务状态，补充原生适配器的 usage 与 ChatModel 契约。
+- 将不确定阻断、来源保真、过期快照及未知设备执行结果覆盖到 Pro/Flash/MCP；统一点与 bbox 边缘换算，补齐持久 OCR 缓存来源版本。
+- 明确视频未完成状态、processing、ASR 时间对齐、原生 API 基址与文件生命周期，记录 video_understanding 主动删除尚未核实；同步诊断脱敏后的内部鉴权验证，补充目录分页和业务错误映射。
+- 硬验收收敛为无 Google Key/无 Google 模型服务请求，Google SDK 依赖瘦身降为可选后续；扩展 C19–C32，并区分 SDK 请求夹具与 Fake 模型测试。
+- 验证范围：源码/锁定 SDK 源码审查、隔离类型与函数复现、官方接口核对；文档检查覆盖 61 个本地链接、3 个 JSON 示例、R01–R23/C01–C32 编号与 Git 差异格式。未实施运行代码，未验证真实模型精度、账号权限或设备闭环。
 
 ### v1.1 — 2026-11-01
 
