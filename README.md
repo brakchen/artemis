@@ -83,7 +83,7 @@ Ensure an Android device (with **USB Debugging** enabled) or emulator is connect
 
 ```bash
 # 1. Clone repo & navigate to directory
-git clone --branch feat/model-config https://github.com/brakchen/artemis.git
+git clone --branch main https://github.com/brakchen/artemis.git
 cd artemis
 
 # 2. One-click launch
@@ -94,7 +94,7 @@ cd artemis
 
 ```powershell
 # 1. Clone repo & navigate to directory
-git clone --branch feat/model-config https://github.com/brakchen/artemis.git
+git clone --branch main https://github.com/brakchen/artemis.git
 cd artemis
 
 # 2. One-click launch
@@ -107,7 +107,7 @@ cd artemis
 
 ### MiniMax setup
 
-The MiniMax implementation is currently on this fork's [feat/model-config branch](https://github.com/brakchen/artemis/tree/feat/model-config).
+The MiniMax implementation is included in this fork's [main branch](https://github.com/brakchen/artemis/tree/main).
 
 Configure every active model role with the Anthropic Messages interface:
 

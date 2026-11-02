@@ -2,7 +2,7 @@
 
 ## 交付状态与边界
 
-- 用户授权的 MiniMax v1.2 六模块代码开发与本地离线验证完成，成果在 feat/model-config；最终提交以 Git 分支最新记录为准。没有 main 合并或部署。
+- 用户授权的 MiniMax v1.2 六模块代码开发与本地离线验证完成，后续已按用户授权合入 main，保留 feat/model-config 开发历史；最终主线提交以 Git 记录为准。没有部署。
 - 验证时 HEAD 为7cc6e841ce26c3aab8d396ba002edb23a738741d，实际TaskStart8e41b19e710abb19ba0304f15ddb542f7a0f6dd7。E改动与SDK pins按物理哈希验收后提交；文档收尾不改变源码。
 - root唯一Git/docs/deps owner。所有作者、规格/质量/整体审查、Python/前端/打包/安装CLI检查进程均已结束；没有运行中的测试、浏览器预览或任务worker。没有真实Key、用户媒体、付费模型请求、SDK.initialize、真实设备或Docker运行。
 - 真实账号的图像/搜索/ASR权限、200标注目标精度、延迟/成本与设备反馈闭环未验证；本机Docker daemon Server API500，未build/start真实镜像。代码/模拟HTTP通过不表示这些业务能力已验收。
@@ -34,3 +34,9 @@
 - 复杂度收尾：既有大source/test文件局部接线与修复，协议/坐标/媒体责任用专属现有owner；没有第二注册表、执行器、重试或治理框架。复用同SDK/decoder/drain/fixture，长证据保留90，当前检查点/验收表为入口。状态exceeded-and-governed，不以删必要异常或加ignore换计数。
 - docs/current/ADR系统不存在，已批准技术方案是需求/架构owner，避免重复ADR；Aegis workspace helper未配置且未定位，结构手工核对10/20/30/40/90与文档链接/JSON，不宣称helper bundle/check已运行。详情及全部反例链见90。
 - 自动审批曾拒绝删除C:/Users/chen/AppData/Local/Temp/c-v3-spec-recheck-2eprfb6e，reason仅blocked by policy；目录保留、不重试绕过，最终答复需单独短段说明。曾误采不相关Python进程只读stack已更正，无locals/Key/修改/kill，不再查看其输入；只管理确认PID/creationTime/cmdline归属的自启进程。
+
+## 后续主线集成（2026-11-02）
+
+- 用户明确授权合并主线和推送，main实际为主分支，无master。功能tip e3ceb990c2e8f1b06c1ed9108d0a08f8dd4f5793、基线 e7cbe5950fba16b7d31c852aa1e92309d7d6405c、非FF合并 13fdd03e1d9578a9664f5949c9a9ebd75f25edd6；候选树与功能tip相同。
+- 合并后默认完整测试 3427 passed, 9 skipped, 8 deselected, 88 warnings in 385.21s (0:06:25)，threadwarning=error；UI生产build 18.754秒通过。之后仅README/方案/work/登记元数据改变，功能代码不变。
+- 桌面worktree工具拒绝嵌套仓库，已使用当前干净checkout的临时集成分支并持有本机TEMP/artemis-master-merge.lock；源分支和原main保持至验证通过。Git收尾推送main后保留源分支、清理临时分支，结果见会话回读。

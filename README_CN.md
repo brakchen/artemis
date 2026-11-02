@@ -85,7 +85,7 @@
 
 ```bash
 # 1. 克隆代码仓库并进入目录
-git clone --branch feat/model-config https://github.com/brakchen/artemis.git
+git clone --branch main https://github.com/brakchen/artemis.git
 cd artemis
 
 # 2. 一键启动
@@ -96,7 +96,7 @@ cd artemis
 
 ```powershell
 # 1. 克隆代码仓库并进入目录
-git clone --branch feat/model-config https://github.com/brakchen/artemis.git
+git clone --branch main https://github.com/brakchen/artemis.git
 cd artemis
 
 # 2. 一键启动
@@ -109,7 +109,7 @@ cd artemis
 
 ### 配置 MiniMax
 
-MiniMax 实现目前位于本 fork 的 [feat/model-config 分支](https://github.com/brakchen/artemis/tree/feat/model-config)。
+MiniMax 实现已合入本 fork 的 [main 主分支](https://github.com/brakchen/artemis/tree/main)。
 
 通过 Anthropic Messages 接口迁移全部生效的模型角色：
 
