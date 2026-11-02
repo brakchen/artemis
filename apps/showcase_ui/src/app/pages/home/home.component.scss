@@ -1287,6 +1287,39 @@ $text-light: #94a3b8;
           }
         }
 
+        &[data-testid='provider-form'] {
+          .provider-form-actions {
+            justify-content: flex-end;
+            border-top: 1px solid $card-border;
+            padding-top: 12px;
+
+            .btn-unified-test:first-child {
+              margin-right: auto;
+            }
+
+            .provider-clear-action {
+              color: $rose;
+              background: $rose-light;
+              border-color: $rose-border;
+              box-shadow: none;
+
+              &:hover:not(:disabled) {
+                color: $rose-dark;
+                background: $rose-light;
+                border-color: $rose;
+              }
+            }
+
+            @media (max-width: 640px) {
+              .btn-unified-test,
+              .btn-unified-save {
+                flex: 1 1 100%;
+                margin-right: 0;
+              }
+            }
+          }
+        }
+
         .feedback-msg {
           display: flex;
           align-items: center;
@@ -1413,6 +1446,7 @@ $text-light: #94a3b8;
         display: flex;
         flex-direction: column;
         gap: 12px;
+        min-width: 0;
         animation: fadeIn 0.15s ease-out;
 
         .inspector-card {
@@ -1435,6 +1469,8 @@ $text-light: #94a3b8;
               display: flex;
               align-items: center;
               gap: 8px;
+              flex: 1 1 240px;
+              min-width: 0;
 
               .header-icon {
                 font-size: 18px;
@@ -1444,6 +1480,7 @@ $text-light: #94a3b8;
               .inspector-header-titles {
                 display: flex;
                 flex-direction: column;
+                min-width: 0;
 
                 .inspector-title {
                   font-size: 13px;
@@ -1454,6 +1491,8 @@ $text-light: #94a3b8;
                 .inspector-subtitle {
                   font-size: 11.5px;
                   color: $text-secondary;
+                  line-height: 1.5;
+                  overflow-wrap: anywhere;
 
                   code {
                     font-family: $font-mono;
@@ -1514,6 +1553,8 @@ $text-light: #94a3b8;
               display: flex;
               flex-direction: column;
               gap: 4px;
+              min-width: 0;
+              max-width: 100%;
 
               .metric-label {
                 font-size: 10.5px;
@@ -1526,6 +1567,9 @@ $text-light: #94a3b8;
               .metric-val-pill {
                 display: inline-flex;
                 align-items: center;
+                flex-wrap: wrap;
+                max-width: 100%;
+                overflow-wrap: anywhere;
                 gap: 5px;
                 padding: 4px 10px;
                 background: #f8fafc;
@@ -1538,6 +1582,7 @@ $text-light: #94a3b8;
                 .provider-dot {
                   width: 7px;
                   height: 7px;
+                  flex: none;
                   border-radius: 50%;
                   background: $primary;
                 }
@@ -5318,12 +5363,11 @@ $text-light: #94a3b8;
    badge styling squeezed the box over the label text). */
 .provider-check-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  margin-top: 10px;
   padding: 9px 11px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: $bg-base;
+  border: 1px solid $card-border;
   border-radius: 8px;
   cursor: pointer;
   user-select: none;
@@ -5331,29 +5375,65 @@ $text-light: #94a3b8;
   input[type='checkbox'] {
     width: 15px;
     height: 15px;
-    margin: 0;
+    margin: 2px 0 0;
     flex: none;
-    accent-color: #2563eb;
+    accent-color: $primary;
     cursor: pointer;
   }
 
   .provider-check-title {
     font-size: 12px;
     font-weight: 600;
-    color: #334155;
-    white-space: nowrap;
+    color: $text-main;
+    line-height: 1.5;
   }
 
-  .provider-check-hint {
-    font-size: 11px;
-    color: #94a3b8;
+  .provider-check-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 }
 
+.provider-check-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: $text-secondary;
+  overflow-wrap: anywhere;
+}
+
+.provider-migration-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: $primary-light;
+  border: 1px solid $primary-border;
+  border-radius: 8px;
+
+  > .material-symbols-outlined {
+    flex: none;
+    margin-top: 1px;
+    font-size: 16px;
+    color: $primary;
+  }
+
+  > div {
+    min-width: 0;
+  }
+
+  code {
+    display: block;
+    margin-top: 6px;
+    font-family: $font-mono;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: $primary-dark;
+    overflow-wrap: anywhere;
+  }
+}
 
 /* ---- Active Model Configuration: effective-resolution hint ---- */
 .config-effective-hint {
@@ -5414,6 +5494,8 @@ $text-light: #94a3b8;
       font-size: 13px;
       font-weight: 600;
       color: #1e293b;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
 
     .provider-item-default {
@@ -5437,6 +5519,37 @@ $text-light: #94a3b8;
       display: inline-flex;
       align-items: center;
       gap: 2px;
+      flex: none;
+
+      .btn-icon-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: 1px solid $card-border;
+        border-radius: 6px;
+        background: $card-bg;
+        color: $text-muted;
+        cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+
+        .material-symbols-outlined {
+          font-size: 16px;
+        }
+
+        &:hover:not(:disabled) {
+          background: $primary-light;
+          border-color: $primary-border;
+          color: $primary;
+        }
+
+        &:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+      }
     }
   }
 
@@ -5462,6 +5575,8 @@ $text-light: #94a3b8;
       background: #ffffff;
       border: 1px solid #e2e8f0;
       border-radius: 6px;
+      min-width: 0;
+      max-width: 100%;
 
       .provider-chip-label {
         font-size: 9.5px;
@@ -5474,6 +5589,8 @@ $text-light: #94a3b8;
         font-family: $font-mono;
         font-size: 11.5px;
         color: #334155;
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
     }
   }
@@ -5565,7 +5682,97 @@ $text-light: #94a3b8;
 }
 
 .provider-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   border: 0;
+  margin: 0;
   padding: 0;
   min-width: 0;
+}
+
+.provider-protocol-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  align-items: end;
+  gap: 10px;
+}
+
+.provider-select-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: $text-secondary;
+}
+
+.provider-select-wrapper {
+  position: relative;
+  display: flex;
+  min-width: 0;
+
+  select {
+    appearance: none;
+    width: 100%;
+    min-width: 0;
+    height: 36px;
+    padding: 0 32px 0 10px;
+    border: 1px solid $card-border;
+    border-radius: 8px;
+    background: $card-bg;
+    font: 400 12.5px $font-sans;
+    color: $text-main;
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+
+    &:hover:not(:disabled) {
+      border-color: $card-border-hover;
+    }
+
+    &:focus-visible {
+      outline: none;
+      border-color: $primary;
+      box-shadow: 0 0 0 2px rgba($primary, 0.12);
+    }
+
+    &:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+  }
+
+  > .material-symbols-outlined {
+    position: absolute;
+    right: 9px;
+    top: 10px;
+    font-size: 16px;
+    color: $text-muted;
+    pointer-events: none;
+  }
+}
+
+.provider-form button,
+.provider-form-actions button,
+.provider-item-actions button,
+.model-picker-menu button {
+  &:focus-visible {
+    outline: 2px solid $primary;
+    outline-offset: 2px;
+  }
+}
+
+@media (max-width: 640px) {
+  .provider-protocol-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .model-picker-head {
+    flex-wrap: wrap;
+  }
+
+  .model-picker-item {
+    flex-wrap: wrap;
+  }
 }

@@ -691,13 +691,13 @@
               }
               <div class="provider-item-actions">
                 @if (p.name !== llmDefaultProvider()) {
-                <button type="button" class="btn-icon-action" title="{{ 'Make this the default provider' | t }}"
+                <button type="button" class="btn-icon-action" title="{{ 'Make this the default provider' | t }}" [attr.aria-label]="'Make this the default provider' | t"
                   (click)="setDefaultLlmProvider(p.name)">
                   <span class="material-symbols-outlined">star</span>
                 </button>
                 }
-                <button type="button" class="btn-icon-action" data-testid="provider-edit" [disabled]="providerBusy()" title="{{ 'Edit provider' | t }}" (click)="editLlmProvider(p)"><span class="material-symbols-outlined">edit</span></button>
-                <button type="button" class="btn-icon-action" title="{{ 'Remove provider' | t }}"
+                <button type="button" class="btn-icon-action" data-testid="provider-edit" [disabled]="providerBusy()" title="{{ 'Edit provider' | t }}" [attr.aria-label]="'Edit provider' | t" (click)="editLlmProvider(p)"><span class="material-symbols-outlined">edit</span></button>
+                <button type="button" class="btn-icon-action" title="{{ 'Remove provider' | t }}" [attr.aria-label]="'Remove provider' | t"
                   (click)="removeLlmProvider(p.name)">
                   <span class="material-symbols-outlined">delete_outline</span>
                 </button>
@@ -736,24 +736,37 @@
           <div class="input-box-header">
             <div class="header-label">
               <span class="material-symbols-outlined label-icon">add_circle</span>
-              <span>{{ 'Add or edit provider:' | t }}</span>
+              <span>{{ editingProvider() ? ('Edit provider' | t) : ('Add or edit provider:' | t) }}</span>
             </div>
           </div>
 
-          <fieldset class="provider-form" [disabled]="providerBusy()">
-          <div class="unified-key-row">
-            <button type="button" class="btn-unified-test" data-testid="minimax-preset" (click)="useMiniMaxPreset()">{{ 'MiniMax China preset' | t }}</button>
-            <label>{{ 'Protocol' | t }}
-              <select data-testid="provider-kind" [ngModel]="newProviderKind()" (ngModelChange)="newProviderKind.set($event); newProviderVendor.set('')">
-                <option value="openai">{{ 'OpenAI compatible' | t }}</option>
-                <option value="anthropic">{{ 'Anthropic Messages' | t }}</option>
-              </select>
+          <fieldset class="provider-form" [disabled]="providerBusy()" [attr.aria-label]="'Add or edit provider:' | t">
+          <div class="provider-protocol-row">
+            <div class="unified-key-row provider-preset-action">
+              <button type="button" class="btn-unified-test" data-testid="minimax-preset" (click)="useMiniMaxPreset()">
+                <span class="material-symbols-outlined" aria-hidden="true">auto_awesome</span>
+                <span>{{ 'MiniMax China preset' | t }}</span>
+              </button>
+            </div>
+            <label class="provider-select-field">
+              <span>{{ 'Protocol' | t }}</span>
+              <span class="provider-select-wrapper">
+                <select data-testid="provider-kind" [ngModel]="newProviderKind()" (ngModelChange)="newProviderKind.set($event); newProviderVendor.set('')">
+                  <option value="openai">{{ 'OpenAI compatible' | t }}</option>
+                  <option value="anthropic">{{ 'Anthropic Messages' | t }}</option>
+                </select>
+                <span class="material-symbols-outlined" aria-hidden="true">expand_more</span>
+              </span>
             </label>
-            <label>{{ 'Vendor' | t }}
-              <select data-testid="provider-vendor" [ngModel]="newProviderVendor()" (ngModelChange)="newProviderVendor.set($event)">
-                <option value="">{{ 'Generic' | t }}</option>
-                @if (newProviderKind() === 'anthropic') { <option value="minimax">MiniMax</option> }
-              </select>
+            <label class="provider-select-field">
+              <span>{{ 'Vendor' | t }}</span>
+              <span class="provider-select-wrapper">
+                <select data-testid="provider-vendor" [ngModel]="newProviderVendor()" (ngModelChange)="newProviderVendor.set($event)">
+                  <option value="">{{ 'Generic' | t }}</option>
+                  @if (newProviderKind() === 'anthropic') { <option value="minimax">MiniMax</option> }
+                </select>
+                <span class="material-symbols-outlined" aria-hidden="true">expand_more</span>
+              </span>
             </label>
           </div>
           <p class="provider-check-hint">{{ 'Enter model IDs manually when the catalog is unavailable. Catalog access does not verify image, tools or search permissions.' | t }}</p>
@@ -824,9 +837,9 @@
           <div class="model-picker-menu">
             <div class="model-picker-head">
               <span class="material-symbols-outlined">list</span>
-              <span>Picking: {{ which === 'default' ? ('Default Model' | t) : ('Fallback Model' | t) }}</span>
+              <span>{{ 'Picking:' | t }} {{ which === 'default' ? ('Default Model' | t) : ('Fallback Model' | t) }}</span>
               <span class="model-picker-count">{{ pickerModels().length }} / {{ discoveredModels().length }} {{ 'model(s)' | t }}</span>
-              <button type="button" class="btn-icon-action" title="{{ 'Close list' | t }}" (click)="toggleModelPicker(which)">
+              <button type="button" class="btn-icon-action" title="{{ 'Close list' | t }}" [attr.aria-label]="'Close list' | t" (click)="toggleModelPicker(which)">
                 <span class="material-symbols-outlined">close</span>
               </button>
             </div>
@@ -880,7 +893,8 @@
                 (ngModelChange)="newProviderApiKey.set($event)"
                 placeholder="{{ 'API key (blank keeps the stored key when editing)' | t }}" spellcheck="false" autocomplete="off" />
               <button type="button" class="btn-icon-action"
-                [title]="showNewProviderKey() ? ('Mask Key' | t) : ('Show Plaintext' | t)" (click)="toggleNewProviderKeyVisibility()">
+                [title]="showNewProviderKey() ? ('Mask Key' | t) : ('Show Plaintext' | t)"
+                [attr.aria-label]="showNewProviderKey() ? ('Mask Key' | t) : ('Show Plaintext' | t)" (click)="toggleNewProviderKeyVisibility()">
                 <span class="material-symbols-outlined">
                   {{ showNewProviderKey() ? 'visibility_off' : 'visibility' }}
                 </span>
@@ -899,6 +913,30 @@
               }
             </button>
 
+          </div>
+
+          <label class="provider-check-row">
+            <input type="checkbox" data-testid="provider-verify-catalog" aria-describedby="provider-verify-hint" [ngModel]="verifyProviderCatalog()" (ngModelChange)="verifyProviderCatalog.set($event)" />
+            <span class="provider-check-copy">
+              <span class="provider-check-title">{{ 'Verify catalog authentication before saving' | t }}</span>
+              <span class="provider-check-hint" id="provider-verify-hint">{{ 'Turn off if this endpoint has no model catalog. Saving without verification does not confirm credentials or model permissions.' | t }}</span>
+            </span>
+          </label>
+
+          <label class="provider-check-row">
+            <input type="checkbox" aria-describedby="provider-default-hint" [ngModel]="newProviderMakeDefault()" (ngModelChange)="newProviderMakeDefault.set($event)" />
+            <span class="provider-check-copy">
+              <span class="provider-check-title">{{ 'Set as the default provider' | t }}</span>
+              <span class="provider-check-hint" id="provider-default-hint">{{ 'used whenever a model config doesn’t name a provider' | t }}</span>
+            </span>
+          </label>
+
+          </fieldset>
+          <div class="unified-key-row provider-form-actions">
+            <button type="button" class="btn-unified-test" data-testid="provider-cancel" [disabled]="providerBusy()" (click)="resetProviderForm()">{{ 'Cancel editing' | t }}</button>
+            @if (editingProvider()) {
+              <button type="button" class="btn-unified-test provider-clear-action" data-testid="provider-clear" [disabled]="providerBusy()" (click)="clearAndDisableProvider()">{{ 'Clear key and disable' | t }}</button>
+            }
             <button type="button" class="btn-unified-save"
               [class.btn-dirty]="!!newProviderName().trim() && !!newProviderApiKey().trim()"
               data-testid="provider-save" [disabled]="providerBusy() || !newProviderName().trim() || !canUseProviderKey()"
@@ -912,27 +950,13 @@
               }
             </button>
           </div>
-
-          <label class="provider-check-row">
-            <input type="checkbox" data-testid="provider-verify-catalog" [ngModel]="verifyProviderCatalog()" (ngModelChange)="verifyProviderCatalog.set($event)" />
-            <span class="provider-check-title">{{ 'Verify catalog authentication before saving' | t }}</span>
-          </label>
-          <p class="provider-check-hint">{{ 'Turn off if this endpoint has no model catalog. Saving without verification does not confirm credentials or model permissions.' | t }}</p>
-
-          <label class="provider-check-row">
-            <input type="checkbox" [ngModel]="newProviderMakeDefault()" (ngModelChange)="newProviderMakeDefault.set($event)" />
-            <span class="provider-check-title">{{ 'Set as the default provider' | t }}</span>
-            <span class="provider-check-hint">{{ 'used whenever a model config doesn’t name a provider' | t }}</span>
-          </label>
-
-          </fieldset>
-          <div class="unified-key-row">
-            <button type="button" class="btn-unified-test" data-testid="provider-cancel" [disabled]="providerBusy()" (click)="resetProviderForm()">{{ 'Cancel editing' | t }}</button>
-            @if (editingProvider()) {
-              <button type="button" class="btn-unified-test" data-testid="provider-clear" [disabled]="providerBusy()" (click)="clearAndDisableProvider()">{{ 'Clear key and disable' | t }}</button>
-            }
+          <div class="provider-migration-note" data-testid="migration-guidance">
+            <span class="material-symbols-outlined" aria-hidden="true">info</span>
+            <div>
+              <p class="provider-check-hint">{{ 'Saving a provider does not migrate all roles or mark tasks ready. Complete MiniMax setup in the terminal, then refresh configuration:' | t }}</p>
+              <code>{{ minimaxMigrationCommand() }}</code>
+            </div>
           </div>
-          <p class="provider-check-hint" data-testid="migration-guidance">{{ 'Saving a provider does not migrate all roles or mark tasks ready. Complete MiniMax setup in the terminal, then refresh configuration:' | t }} <code>{{ minimaxMigrationCommand() }}</code></p>
           @if (providerSaveMessage()) {
           <div class="feedback-msg success">
             <span class="material-symbols-outlined">check_circle</span>
