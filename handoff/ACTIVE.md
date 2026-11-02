@@ -26,4 +26,3 @@
 
 | lane_id | Topic | owner(session) | branch/worktree | Owned files/directories | State | head_commit | synced_master | updated/ready_at (UTC) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| provider-ui-consistency | Unify model and Provider form styling | Codex:01a1957d-26fb-7173-abdc-ba44f87b31d0 | fix/provider-ui-consistency / D:/Codex Project/artemis-provider-ui | apps/showcase_ui/src/app/pages/home/home.component.html; apps/showcase_ui/src/app/pages/home/home.component.scss; docs/aegis/work/2026-11-02-provider-ui.md | ready | 190e715ad6c3cbc75fa758dd83f45bf4935b5b12 | 2180db0 | 2026-11-02 15:25:27 |
