@@ -31,6 +31,7 @@ from artemis.services.llm import (
     get_llm,
     invoke_llm_with_timeout_message,
     with_fallback,
+    context_uses_minimax,
 )
 from artemis.tools.index import get_tool_by_name, get_tools_from_wrappers
 from artemis.tools.scratchpad import (
@@ -163,6 +164,7 @@ async def run_async_planner_validation(
                     "",  # Pass empty string to avoid rendering the task plan in the history
                     steps,
                     "default",
+                    ctx=ctx,
                 )
 
             except Exception as e:
@@ -195,6 +197,8 @@ async def run_async_planner_validation(
         }
     except Exception as e:
         logger.error(f"Planner async validation failed: {e}")
+        if context_uses_minimax(ctx):
+            return {"status": "failed", "feedback": f"Validation failed with error: {e}"}
         # In case of error, we fallback to approving so we don't block the agent unnecessarily
         return {
             "status": "success",

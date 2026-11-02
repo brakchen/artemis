@@ -83,7 +83,8 @@ Ensure an Android device (with **USB Debugging** enabled) or emulator is connect
 
 ```bash
 # 1. Clone repo & navigate to directory
-git clone https://github.com/google/artemis.git && cd artemis
+git clone --branch feat/model-config https://github.com/brakchen/artemis.git
+cd artemis
 
 # 2. One-click launch
 ./start.sh
@@ -93,7 +94,7 @@ git clone https://github.com/google/artemis.git && cd artemis
 
 ```powershell
 # 1. Clone repo & navigate to directory
-git clone https://github.com/google/artemis.git
+git clone --branch feat/model-config https://github.com/brakchen/artemis.git
 cd artemis
 
 # 2. One-click launch
@@ -103,6 +104,34 @@ cd artemis
 > PowerShell does not search the current directory for executable scripts by default, so use `.\start.bat` without a trailing `\`. In Command Prompt (CMD), use `start.bat` instead.
 
 > **Tip**: Opens `http://localhost:8000` in your default browser with a device connection wizard, live screen mirroring, prompt sandbox, and execution replays. You can also run directly from CLI: `uv run artemis run "Open Settings, find Battery and tell me current level" --profile flash`.
+
+### MiniMax setup
+
+The MiniMax implementation is currently on this fork's [feat/model-config branch](https://github.com/brakchen/artemis/tree/feat/model-config).
+
+Configure every active model role with the Anthropic Messages interface:
+
+```bash
+uv run artemis init --provider minimax
+```
+
+The command prompts for the key with hidden input. The default is `MiniMax-M3.1-Flash` at `https://api.minimax.cn/anthropic`; use `--base-url` for another supported Messages endpoint. To explicitly import `MINIMAX_API_KEY` and optional `MINIMAX_BASE_URL` from the current process, add `--import-env`. An existing registry key wins unless you also pass `--replace-key`. These variables are initialization inputs; runtime credentials come from the provider registry.
+
+Initialization migrates active primary, fallback, utility and auxiliary model settings, while retaining unrelated settings and unselected presets. `--name` selects the registry entry and `--config` selects the main file. Existing keys survive a blank replacement prompt. Use `--model MiniMax-M3` to migrate that model's thinking settings too. A provider saved in the console still needs this role migration before it can run all tasks.
+
+For a Messages gateway without a model catalog, enter the model ID manually and turn off **Verify catalog authentication before saving**. **Save without verification** stores the configuration while leaving credentials and model permissions unverified.
+
+Keys are stored in the protected provider registry; the main configuration references its alias. `artemis providers list` shows masked entries and the actual registry path. Installed wheels use a writable application configuration rather than modifying the bundled template. Catalog authentication does not verify image, search or native speech permissions; MiniMax OCR uses the task's model credentials, without a separate Google Vision key.
+
+Use the same `ARTEMIS_APP_DIR` and main-config selection for the CLI, console and SDK. After changing environment variables or the selected configuration path, restart existing console/MCP/worker processes; SDK applications should rebuild their Agent configuration. Running tasks retain their pinned configuration.
+
+Existing files receive adjacent protected `<filename>.backup-<UTC timestamp>` copies. Setup prints each backup and its original path. For rollback, stop new tasks, compare current files, and restore the matching configuration, registry and environment backups together only when that would preserve subsequent edits. Publication uses individual atomic file replacements with conditional rollback; it is not a multi-file atomic transaction.
+
+Container deployments need explicit configuration mounts. Build the repository's runtime first with `docker build -t artemis-runtime:latest .`; both Playground images reuse that runtime and its bundled UI and client/core wheels. Set `ARTEMIS_MAIN_CONFIG`, `ARTEMIS_PROVIDER_REGISTRY` and `ARTEMIS_SELECTED_ENV_FILE` to absolute source-file paths for the Compose examples (an empty protected dotenv file is sufficient for registry-only MiniMax). The backend manager also requires `ARTEMIS_EXPORT_HOST_ROOT`, the absolute Docker-host directory mounted at its `ARTEMIS_EXPORT_ROOT`. It exports only the selected profile's credentials to child containers. Injected files are read-only and configuration changes return 403; runtime state remains writable. See the [deployment contract](docs/designs/2026-11-01-minimax-anthropic.md#9-控制台cli-与兼容迁移) for lifecycle and path details. Real Docker execution has not been verified on this host.
+
+MiniMax tasks use fixed image operations and guarded device actions. Autonomous Python image coding and arbitrary agent-authored shell scripts return an unsupported-operation error; crop, zoom, detection and OCR remain available.
+
+This branch's MiniMax checks use synthetic inputs and simulated SDK HTTP responses. Account capabilities, grounding accuracy and real-device performance require separate verification. The upstream benchmark and per-step timing figures elsewhere in this README do not describe measured MiniMax results.
 
 <a id="mcp-setup"></a>
 <a id="mcp"></a>

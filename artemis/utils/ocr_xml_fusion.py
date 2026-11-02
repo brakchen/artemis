@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import base64
+import copy
 import difflib
 from io import BytesIO
 from typing import Any
@@ -89,6 +92,8 @@ def _calculate_overlap_ratio(ocr_bounds: dict[str, int], xml_bounds: dict[str, i
 
 def _detect_status_bar_height(xml_hierarchy: list[dict[str, Any]], screen_height: int) -> int:
     """Try to detect status bar height from XML, fallback to 4% of screen height."""
+    if type(screen_height) is not int or screen_height <= 0:
+        return 0
     for node in xml_hierarchy:
         package = node.get("package") or node.get("packageName")
         bounds_str = node.get("bounds")
@@ -97,7 +102,8 @@ def _detect_status_bar_height(xml_hierarchy: list[dict[str, Any]], screen_height
         if package == "com.android.systemui":
             bounds = _parse_bounds(bounds_str)
             if bounds and bounds["top"] == 0:
-                return bounds["bottom"]
+                candidate = bounds["bottom"]
+                return candidate if 0 < candidate < screen_height else 0
 
     return int(screen_height * 0.04)
 
@@ -111,8 +117,8 @@ def _crop_image_remove_status_bar(screenshot_b64: str, crop_height: int) -> tupl
     img = Image.open(BytesIO(img_data))
     width, height = img.size
 
-    if crop_height >= height:
-        logger.warning("Crop height is greater than image height. Not cropping.")
+    if not 0 < crop_height < height:
+        logger.debug("Status bar crop is outside the input image. Not cropping.")
         return screenshot_b64, width, height
 
     # Crop: left, top, right, bottom
@@ -138,8 +144,78 @@ def _map_coordinates_back(
         for v in position:
             mapped_position.append({"x": v.get("x", 0), "y": v.get("y", 0) + status_bar_height})
 
-        mapped_results.append({"text": text, "position": mapped_position})
+        mapped = {**res, "text": text, "position": mapped_position, "position_space": "root_pixel"}
+        snapshot = res.get("snapshot")
+        if (
+            isinstance(snapshot, dict)
+            and snapshot.get("width", 0) > 0
+            and snapshot.get("height", 0) > 0
+            and mapped_position
+        ):
+            from artemis.utils.coordinates import normalize_bbox
+
+            mapped["bbox"] = normalize_bbox(
+                [
+                    min(v["x"] for v in mapped_position),
+                    min(v["y"] for v in mapped_position),
+                    max(v["x"] for v in mapped_position),
+                    max(v["y"] for v in mapped_position),
+                ],
+                snapshot["width"],
+                snapshot["height"],
+            )
+        mapped_results.append(mapped)
     return mapped_results
+
+
+def pure_xml_hierarchy(hierarchy: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Copy native XML while removing previously fused OCR-derived material.
+
+    The historical fuser only added ocr_elements and a class suffix; it never
+    rewrote native text/content-desc. Preserve that original text. Explicit OCR
+    virtual nodes or OCR-sourced text are not native accessibility evidence.
+    Newly recognized typed OCR is fused *after* this baseline is prepared.
+    """
+    cleaned = []
+    derived_keys = {
+        "ocr_elements",
+        "ocr_text",
+        "ocr_result",
+        "ocr_results",
+        "ocr_status",
+        "ocr_version",
+        "recognition_source",
+        "snapshot",
+        "snapshot_id",
+        "bbox",
+        "transform",
+        "coordinate_space",
+        "coordinate_version",
+        "evidence",
+        "status",
+    }
+    for original in hierarchy or []:
+        if not isinstance(original, dict):
+            continue
+        node = copy.deepcopy(original)
+        class_name = str(node.get("class") or node.get("className") or "")
+        native_class = class_name.replace("[OCR]", "").strip()
+        if (
+            ("[OCR]" in class_name and not native_class)
+            or str(node.get("is_ocr", "")).lower() == "true"
+            or node.get("source") in {"ocr", "minimax"}
+            or node.get("text_source") in {"ocr", "minimax"}
+        ):
+            continue
+        for key in derived_keys:
+            node.pop(key, None)
+        for key in ("class", "className"):
+            if isinstance(node.get(key), str):
+                node[key] = node[key].replace("[OCR]", "").strip()
+        if isinstance(node.get("children"), list):
+            node["children"] = pure_xml_hierarchy(node["children"])
+        cleaned.append(node)
+    return cleaned
 
 
 def fuse_ocr_with_xml(
@@ -149,6 +225,8 @@ def fuse_ocr_with_xml(
 
     Assumes ocr_results coordinates are already mapped back to full screen.
     """
+    # Never persist a fused derivative through an alias to raw capture/DB data.
+    xml_hierarchy = copy.deepcopy(xml_hierarchy)
     # 0. Detect screen dimensions to calculate screen area
     max_width = 1080
     max_height = 2400
@@ -266,6 +344,19 @@ def fuse_ocr_with_xml(
             if similarity > 0.8:
                 discard = True
 
+        if not discard and any(item["ocr"].get("source") == "minimax" for item in matched_list):
+            from artemis.utils.vision import copy_provenance
+
+            node["ocr_elements"] = [
+                {
+                    "text": item["ocr"].get("text", ""),
+                    "bounds": f"[{item['bounds']['left']},{item['bounds']['top']}][{item['bounds']['right']},{item['bounds']['bottom']}]",
+                    **copy_provenance(item["ocr"]),
+                }
+                for item in matched_list
+            ]
+            continue
+
         if not discard:
             # Instead of a single flat string, we list OCR elements line by line
             ocr_elements = []
@@ -314,5 +405,24 @@ def fuse_ocr_with_xml(
             orig_class = str(node.get("className") or node.get("class") or "")
             if "[OCR]" not in orig_class:
                 node["class"] = f"{orig_class} [OCR]".strip()
+
+    from artemis.utils.vision import copy_provenance
+
+    for item in unmatched_ocrs:
+        ocr, bounds = item["ocr"], item["bounds"]
+        if ocr.get("source") == "minimax":
+            xml_hierarchy.append(
+                {
+                    "class": "[OCR]",
+                    "bounds": f"[{bounds['left']},{bounds['top']}][{bounds['right']},{bounds['bottom']}]",
+                    "ocr_elements": [
+                        {
+                            "text": ocr.get("text", ""),
+                            "bounds": f"[{bounds['left']},{bounds['top']}][{bounds['right']},{bounds['bottom']}]",
+                            **copy_provenance(ocr),
+                        }
+                    ],
+                }
+            )
 
     return xml_hierarchy

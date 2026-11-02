@@ -30,6 +30,8 @@ Device action status comes from ``ActionResult.ok``; helper tools report failure
 through ``ToolFailure`` or an explicit status.
 """
 
+from __future__ import annotations
+
 import ast
 import hashlib
 import json
@@ -43,7 +45,10 @@ from artemis.data_engine.trace import TraceSpan
 from artemis.mcp.action_manifest import OPTIONAL_ACTIONS, REQUIRED_ACTIONS
 from artemis.mcp.action_specs import exception_prefix
 from artemis.mcp.action_session import ActionSession, get_action_session
-from artemis.mcp.action_types import ActionCode, ActionResult
+from artemis.mcp.action_types import ActionCode, ActionResult, DispatchState
+from artemis.mcp.target_guard import decision_snapshot, guard_target, snapshot_error, changes_screen
+from artemis.utils.vision import copy_provenance, uses_minimax
+from artemis.mcp.observation import apply_observation_to_state
 from artemis.mcp.actuators.adb import AdbActuator
 from artemis.agents.validator.tool_declarations import (
     ToolExecutionResult,
@@ -71,7 +76,8 @@ __all__ = ["McpActionExecutor"]
 
 #: Non-device tools executed agent-side (never behind the action server).
 AGENT_TOOL_NAMES: frozenset[str] = (
-    frozenset({"read_note", "list_notes", "ask_explorer", "video_analyzer"}) | HISTORY_TOOL_NAMES
+    frozenset({"read_note", "list_notes", "ask_explorer", "video_analyzer", "web_search"})
+    | HISTORY_TOOL_NAMES
 )
 
 #: Actions whose ``target`` is a single point: an element index or an [x, y] pair.
@@ -171,6 +177,7 @@ class McpActionExecutor:
         xml_list: str | None = None
         target_semantics: dict[str, Any] = {}
         target_coordinates: list[int] | None = None
+        session = None
         with span:
             try:
                 session = await self._session_or_start()
@@ -183,31 +190,74 @@ class McpActionExecutor:
                     # not a point).
                     target_coordinates = wire_args.get("target")
                 extension = raw_name not in (REQUIRED_ACTIONS | OPTIONAL_ACTIONS)
+                expected = None
+                if uses_minimax(self.ctx) and changes_screen(wire_name):
+                    from artemis.services.llm import get_llm
+
+                    expected = target_semantics.get("snapshot", decision_snapshot(state))
+                    point = wire_args.get("target")
+                    if wire_name == "swipe" and target_semantics:
+                        point = wire_args.get("start")
+                    if wire_name == "click_sequence":
+                        sequence = wire_args.get("sequence", [])
+                        if len(sequence) != 1:
+                            raise _ArgError(
+                                "Agent click_sequence requires one target then a fresh observation."
+                            )
+                        point = sequence[0]
+                        target_semantics["target_description"] = target_semantics[
+                            "target_descriptions"
+                        ][0]
+                    if point or wire_name == "swipe" or expected is not None:
+                        error = snapshot_error(self.ctx, expected)
+                        if error:
+                            raise _ArgError(error)
+                    if point:
+                        action = {
+                            **target_semantics,
+                            "snapshot": expected,
+                            "action": wire_name,
+                            "coordinates": point,
+                            "coordinate_space": "normalized",
+                        }
+                        raw = getattr(state, "operator_raw_data", None)
+                        screenshot = raw.get("screenshot_b64", "") if isinstance(raw, dict) else ""
+                        if not screenshot:
+                            screenshot_path = getattr(state, "latest_screenshot", None)
+                            if screenshot_path:
+                                import base64
+
+                                screenshot = base64.b64encode(
+                                    Path(screenshot_path).read_bytes()
+                                ).decode("ascii")
+                        verdict = await guard_target(
+                            self.ctx, session, action, state, screenshot, get_llm_fn=get_llm
+                        )
+                        target_semantics["precondition_outcome"] = action.get(
+                            "precondition_outcome"
+                        )
+                        if not verdict.allowed:
+                            raise _ArgError(verdict.reason)
 
                 if extension:
-                    raw_result = await session.call_raw(wire_name, wire_args)
+                    raw_result = await session.call_raw(
+                        wire_name,
+                        wire_args,
+                        **({"expected_snapshot": expected} if expected else {}),
+                    )
                     message = next(
                         (b.text for b in raw_result.content if getattr(b, "type", "") == "text"),
                         f"Extension tool '{raw_name}' completed.",
                     )
                     res = ActionResult.success(raw_name, message)
                 else:
-                    res = await session.call(wire_name, wire_args)
+                    res = await session.call(
+                        wire_name,
+                        wire_args,
+                        **({"expected_snapshot": expected} if expected else {}),
+                    )
                     message = finalize(res) if finalize else res.message
 
-                if res.ok or self._observe_despite_failure(raw_name, res):
-                    obs = await session.observe(settle_ms=400)
-                    if obs.ok:
-                        shot_path = obs.screenshot_path
-                        xml_list = obs.elements_text
-                        if obs.hierarchy_ok:
-                            state.indexed_points = [el["center"] for el in obs.elements]
-                            state.indexed_elements = obs.elements
-                        if shot_path:
-                            try:
-                                img_bytes = Path(shot_path).read_bytes()
-                            except Exception as read_err:
-                                logger.warning(f"Failed to read observed screenshot: {read_err}")
             except _ArgError as e:
                 res = ActionResult.failure(raw_name, str(e), code=ActionCode.INVALID_ARGS)
                 message = str(e)
@@ -215,8 +265,26 @@ class McpActionExecutor:
                 message = f"{exception_prefix(raw_name)}: {e}"
                 res = ActionResult.failure(raw_name, message, detail=repr(e))
 
-            if shot_path:
-                state.latest_screenshot = shot_path
+            should_observe = res.ok or self._observe_despite_failure(raw_name, res)
+            if uses_minimax(self.ctx):
+                should_observe = changes_screen(raw_name) or not res.ok
+            if session is not None and should_observe:
+                try:
+                    obs = await session.observe(settle_ms=400)
+                except Exception as observe_error:
+                    logger.warning(f"Post-action observation unavailable: {observe_error}")
+                    obs = None
+                if obs is not None and obs.ok:
+                    shot_path = obs.screenshot_path
+                    xml_list = obs.elements_text
+                    if shot_path:
+                        try:
+                            img_bytes = Path(shot_path).read_bytes()
+                        except OSError as read_err:
+                            logger.warning(f"Failed to read observed screenshot: {read_err}")
+                    # State visibility violations are programming errors, never
+                    # permission to silently continue with stale provenance.
+                    apply_observation_to_state(state, obs, img_bytes)
 
             status = "success" if res.ok else "error"
             post_image_name = None
@@ -244,6 +312,7 @@ class McpActionExecutor:
             ui_elements_text=xml_list,
             metadata={
                 "code": res.code.value,
+                "dispatch_state": res.dispatch_state.value,
                 "normalized_coordinates": res.normalized_coordinates,
                 "target_semantics": target_semantics,
                 "target_coordinates": target_coordinates,
@@ -339,7 +408,9 @@ class McpActionExecutor:
             )
 
         if raw_name == "click_sequence":
-            sequence = self._resolve_sequence(args.get("sequence") or [])
+            sequence = self._resolve_sequence(
+                args.get("sequence") or [], strict=uses_minimax(self.ctx)
+            )
             recorded = self._require_descriptions(args, len(sequence))
             return (
                 "click_sequence",
@@ -388,6 +459,10 @@ class McpActionExecutor:
 
     def _screen_size(self) -> tuple[int, int]:
         """The device resolution the indexed element list was built against."""
+        if uses_minimax(self.ctx):
+            from artemis.agents.explorer.geometry import resolve_screen_size
+
+            return resolve_screen_size(self.ctx, None)
         device = getattr(self.ctx, "device", None)
         width = getattr(device, "device_width", None) if device else None
         height = getattr(device, "device_height", None) if device else None
@@ -411,12 +486,24 @@ class McpActionExecutor:
         straight from the indexed list); a coordinate pair carries only the
         model's own ``target_description``. The two never mix (Pro parity).
         """
-        target = normalize_coordinate_target(raw)
+        try:
+            target = normalize_coordinate_target(raw, strict=uses_minimax(self.ctx))
+        except ValueError as error:
+            raise _ArgError(str(error)) from error
         if isinstance(target, bool):
             target = None
         if isinstance(target, (int, float)):
+            if uses_minimax(self.ctx) and (not float(target).is_integer()):
+                raise _ArgError("Target index must be an integer from the current observation.")
             return self._resolve_index(int(target), label, state, index_elements=index_elements)
         if isinstance(target, (list, tuple)) and len(target) == 2:
+            if uses_minimax(self.ctx):
+                from artemis.utils.coordinates import validate_normalized_point
+
+                try:
+                    target = validate_normalized_point(target)
+                except ValueError as error:
+                    raise _ArgError(str(error)) from error
             recorded = self._require_description(args, label)
             return [int(target[0]), int(target[1])], recorded
         raise _ArgError(
@@ -479,7 +566,15 @@ class McpActionExecutor:
             "target_bounds": norm_bounds,
             "target_resource_id": element.get("resource_id"),
             "target_class": element.get("class"),
+            **copy_provenance(element),
         }
+        if uses_minimax(self.ctx):
+            from artemis.utils.coordinates import normalize_target_point
+
+            try:
+                return normalize_target_point(center, bounds, width, height), recorded
+            except ValueError as error:
+                raise _ArgError(str(error)) from error
         return [_norm_x(center[0]), _norm_y(center[1])], recorded
 
     @staticmethod
@@ -514,7 +609,7 @@ class McpActionExecutor:
         return {"target_descriptions": [d.strip() for d in descriptions]}
 
     @staticmethod
-    def _resolve_sequence(sequence: Any) -> list[list[int]]:
+    def _resolve_sequence(sequence: Any, *, strict: bool = False) -> list[list[int]]:
         """Normalize click_sequence entries to coordinate pairs; reject element indices."""
         if isinstance(sequence, str):
             sequence_str = sequence.strip()
@@ -531,7 +626,10 @@ class McpActionExecutor:
 
         resolved: list[list[int]] = []
         for position, raw_target in enumerate(sequence, start=1):
-            target = normalize_coordinate_target(raw_target)
+            try:
+                target = normalize_coordinate_target(raw_target, strict=strict)
+            except ValueError as error:
+                raise _ArgError(str(error)) from error
             if isinstance(target, (int, float)) and not isinstance(target, bool):
                 raise _ArgError(
                     f"Error during click sequence: entry {position} ({raw_target!r}) is an"
@@ -540,6 +638,13 @@ class McpActionExecutor:
                     " or ask_explorer to locate it."
                 )
             if isinstance(target, (list, tuple)) and len(target) == 2:
+                if strict:
+                    from artemis.utils.coordinates import validate_normalized_point
+
+                    try:
+                        target = validate_normalized_point(target)
+                    except ValueError as error:
+                        raise _ArgError(str(error)) from error
                 nx, ny = int(target[0]), int(target[1])
             else:
                 raise _ArgError(f"Error during click sequence: Invalid target format: {raw_target}")
@@ -564,12 +669,20 @@ class McpActionExecutor:
     ) -> tuple[str, dict[str, Any], Any, dict[str, Any]]:
         width, height = self._screen_size()
         default_duration = args.get("duration", 400)
-        kind, target, final_duration = parse_swipe_parameters(
-            dict(args), default_duration=default_duration
-        )
+        try:
+            kind, target, final_duration = parse_swipe_parameters(
+                dict(args), default_duration=default_duration, strict=uses_minimax(self.ctx)
+            )
+        except ValueError as error:
+            raise _ArgError(str(error)) from error
 
         if kind == "direction":
             dir_name = target
+            recorded = {}
+            if uses_minimax(self.ctx) and isinstance(args.get("target"), (int, float)):
+                _, recorded = self._resolve_target(
+                    args["target"], "swipe", args, state, index_elements=index_elements
+                )
             x1, y1, x2, y2, smart_dur = compute_smart_swipe_coordinates(
                 direction=target,
                 target=args.get("target"),
@@ -596,7 +709,7 @@ class McpActionExecutor:
                     "duration_ms": smart_dur,
                 },
                 finalize,
-                {},
+                recorded,
             )
 
         if kind == "coords":
@@ -642,10 +755,28 @@ class McpActionExecutor:
                 )
             elif raw_name == "list_notes":
                 text = await self._list_notes()
+            elif raw_name == "web_search":
+                from artemis.services.web_search import web_search
+                from artemis.tools.web_search import web_search_enabled
+
+                if not web_search_enabled(self.ctx, self.agent_name):
+                    text, ok = "MiniMax web search is not enabled", False
+                else:
+                    role = (
+                        "operator" if self.agent_name in {"flash", "validator"} else self.agent_name
+                    )
+                    result = await web_search(self.ctx, args.get("query", ""), role=role)
+                    text = result.model_dump_json()
+                    ok = result.status == "complete"
             elif raw_name == "video_analyzer":
                 text, ok = await self._video_analyzer(
                     args.get("time_description") or args.get("TimeDescription") or "",
                     args.get("purpose") or args.get("Purpose") or "",
+                    **{
+                        name: args[name]
+                        for name in ("visual", "speech", "acoustic")
+                        if name in args
+                    },
                 )
             elif raw_name in HISTORY_TOOL_NAMES:
                 text, blocks = await self._history_tool(raw_name, args)
@@ -718,7 +849,9 @@ class McpActionExecutor:
             return text or "Screenshot attached.", result
         return text, None
 
-    async def _video_analyzer(self, time_description: str, purpose: str) -> tuple[str, bool]:
+    async def _video_analyzer(
+        self, time_description: str, purpose: str, **media_args
+    ) -> tuple[str, bool]:
         """Runs the video-analyzing subagent over the session recording.
 
         Same subagent the Pro operator's ``video_analyzer`` LangChain tool
@@ -727,11 +860,13 @@ class McpActionExecutor:
         from artemis.agents.video_analyzer.video_analyzer import VideoAnalyzer
 
         try:
-            outcome, status = await VideoAnalyzer(self.ctx).run(time_description, purpose)
+            outcome, status = await VideoAnalyzer(self.ctx).run(
+                time_description, purpose, **media_args
+            )
         except Exception as e:
             logger.error(f"Error running video analyzer: {e}")
             return f"Error running video analyzer: {e}", False
-        if status in ("failed", "error"):
+        if status not in ("success", "complete"):
             return f"Video analysis failed: {outcome}", False
         return outcome, True
 

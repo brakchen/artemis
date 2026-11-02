@@ -17,16 +17,29 @@ version: '3.8'
 services:
   backend-manager:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: playground/backend_manager/Dockerfile
+      args:
+        ARTEMIS_BASE_IMAGE: ${ARTEMIS_BASE_IMAGE:-artemis-runtime:latest}
     container_name: backend
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       # Mount host Docker socket for spawning ephemeral Artemis containers
       - /var/run/docker.sock:/var/run/docker.sock
+      # This read/write export mapping is manager-owned. Child containers receive files only.
+      - ${ARTEMIS_EXPORT_HOST_ROOT:?Set absolute Docker host export root}:/var/lib/artemis-session-configs
+      # Explicit source files are readonly; runtime state remains in ARTEMIS_APP_DIR.
+      - ${ARTEMIS_MAIN_CONFIG:?Set main config file}:/run/artemis/artemis.jsonc:ro
+      - ${ARTEMIS_PROVIDER_REGISTRY:?Set provider registry file}:/var/lib/artemis/llm_providers.json:ro
+      - ${ARTEMIS_SELECTED_ENV_FILE:?Set selected legacy dotenv file}:/var/lib/artemis/.env:ro
     environment:
+      - ARTEMIS_ARTEMIS_JSONC=/run/artemis/artemis.jsonc
+      - ARTEMIS_APP_DIR=/var/lib/artemis
+      - ARTEMIS_CONFIG_READ_ONLY=1
+      - ARTEMIS_EXPORT_ROOT=/var/lib/artemis-session-configs
+      - ARTEMIS_EXPORT_HOST_ROOT=${ARTEMIS_EXPORT_HOST_ROOT}
       - APP_ENV=production
       - PORT=8000
       - DOCKER_SOCKET_PATH=unix://var/run/docker.sock

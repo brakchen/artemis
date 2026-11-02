@@ -18,7 +18,14 @@ Explorer candidates use normalized ``[x, y]`` coordinates on a 0-1000 scale;
 device actions use pixels.
 """
 
+from __future__ import annotations
+
+import math
+from numbers import Real
 from typing import Any
+
+from artemis.utils.coordinates import denormalize_point, normalize_point
+from artemis.utils.vision import SnapshotRef, uses_minimax
 
 #: Fallback screen size when neither the operator observation nor the device
 #: context reports one (a common phone portrait resolution).
@@ -34,6 +41,20 @@ def resolve_screen_size(ctx: Any, state: Any) -> tuple[int, int]:
     screenshot it annotated), then the device context, then the fallback.
     """
     raw = getattr(state, "operator_raw_data", None) or {}
+    if uses_minimax(ctx):
+        value = raw.get("snapshot") if isinstance(raw, dict) else None
+        snapshot = (
+            SnapshotRef.model_validate(value)
+            if isinstance(value, dict)
+            else getattr(ctx, "_current_snapshot", None)
+        )
+        if (
+            not isinstance(snapshot, SnapshotRef)
+            or not snapshot.capture_valid
+            or min(snapshot.width, snapshot.height) <= 1
+        ):
+            raise ValueError("MiniMax target conversion requires an actual valid capture")
+        return snapshot.width, snapshot.height
     width = raw.get("width") if isinstance(raw, dict) else None
     height = raw.get("height") if isinstance(raw, dict) else None
     if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
@@ -50,24 +71,23 @@ def resolve_screen_size(ctx: Any, state: Any) -> tuple[int, int]:
 
 def norm_to_pixel(nx: float, ny: float, width: int, height: int) -> tuple[int, int]:
     """Maps normalized 0-1000 coordinates to clamped pixel coordinates."""
-    px = int(max(0, min(width, nx * width / NORMALIZED_MAX)))
-    py = int(max(0, min(height, ny * height / NORMALIZED_MAX)))
-    return px, py
+    return tuple(denormalize_point(nx, ny, width, height))
 
 
 def pixel_to_norm(px: float, py: float, width: int, height: int) -> tuple[int, int]:
-    """Maps pixel coordinates to clamped normalized 0-1000 coordinates."""
-    nx = int(max(0, min(NORMALIZED_MAX, px * NORMALIZED_MAX / width)))
-    ny = int(max(0, min(NORMALIZED_MAX, py * NORMALIZED_MAX / height)))
-    return nx, ny
+    """Maps physical pixels using the shared finite-number and rounding contract."""
+    return tuple(normalize_point(px, py, width, height))
 
 
-def is_valid_norm_point(coords: Any) -> bool:
+def is_valid_norm_point(coords: Any, *, strict: bool = False) -> bool:
     """True when ``coords`` is a 2-item ``[nx, ny]`` inside the 0-1000 range."""
     if not isinstance(coords, (list, tuple)) or len(coords) != 2:
         return False
-    try:
-        nx, ny = int(coords[0]), int(coords[1])
-    except (TypeError, ValueError):
+    if any(isinstance(v, bool) for v in coords):
         return False
-    return 0 <= nx <= NORMALIZED_MAX and 0 <= ny <= NORMALIZED_MAX
+    if strict and any(not isinstance(v, Real) for v in coords):
+        return False
+    try:
+        return all(math.isfinite(float(v)) and 0 <= float(v) <= NORMALIZED_MAX for v in coords)
+    except (ValueError, TypeError, OverflowError):
+        return False

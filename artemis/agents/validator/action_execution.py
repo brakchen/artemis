@@ -27,9 +27,20 @@ from artemis.context import ArtemisContext
 from artemis.graph.state import State
 from artemis.mcp.action_names import to_canonical_call
 from artemis.mcp.action_session import ActionSession
+from artemis.mcp.action_types import DispatchState
+from artemis.utils.vision import uses_minimax
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class ActionExecutionOutcome(tuple):
+    """Compatible two-item result retaining whether a retry can be safe."""
+
+    def __new__(cls, success: bool, error: str, dispatch_state: DispatchState):
+        result = super().__new__(cls, (success, error))
+        result.dispatch_state = dispatch_state
+        return result
 
 
 def parse_decisions(structured_decisions: str) -> tuple[list[dict] | None, str | None]:
@@ -86,13 +97,22 @@ async def exec_action(
     height = getattr(ctx.device, "device_height", 2400) if ctx.device else 2400
 
     try:
-        tool_name, wire_args = to_canonical_call(action_item, dims=(width, height))
+        tool_name, wire_args = to_canonical_call(
+            action_item, dims=(width, height), strict=uses_minimax(ctx)
+        )
     except ValueError as e:
-        return False, str(e)
+        return ActionExecutionOutcome(False, str(e), DispatchState.NOT_DISPATCHED)
 
     try:
-        res = await session.call(tool_name, wire_args)
+        if uses_minimax(ctx):
+            res = await session.call(
+                tool_name, wire_args, expected_snapshot=action_item.get("snapshot")
+            )
+        else:
+            res = await session.call(tool_name, wire_args)
     except Exception as e:
-        return False, f"MCP call failed: {e}"
+        return ActionExecutionOutcome(
+            False, f"MCP call failed ({type(e).__name__}): {e}", DispatchState.UNKNOWN
+        )
 
-    return (True, "") if res.ok else (False, res.message)
+    return ActionExecutionOutcome(res.ok, "" if res.ok else res.message, res.dispatch_state)

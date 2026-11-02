@@ -113,6 +113,20 @@ async def run_task(request: RunRequest):
                 "total_queued": len(state.queue_tasks),
             }
 
+    from artemis.config.task import prepare_task_submission
+
+    try:
+        prepare_task_submission(
+            request.profile or "flash",
+            verification_level=request.verification_level,
+            explorer_mode=request.explorer_mode,
+        )
+    except (ValueError, OSError):
+        raise HTTPException(
+            status_code=422,
+            detail="Task model configuration is invalid; check the selected profile and providers",
+        ) from None
+
     # Reject an explicit unknown/offline target before running the more
     # expensive readiness probe. Besides producing a stable SDK response,
     # this avoids probing the currently active device for a serial that can
@@ -315,7 +329,16 @@ async def get_status():
                 sess_row, llm_traces, agent_names=agent_names
             )
 
-    model_info = model_service.get_active_model_info(active_profile)
+    model_row = (
+        session_repo.get_session_by_id(running_sid or latest_session_id)
+        if (running_sid or latest_session_id)
+        else None
+    )
+    model_info = (
+        model_service.get_session_model_info(model_row, active_profile)
+        if model_row
+        else model_service.get_active_model_info(active_profile)
+    )
 
     # Unified Global Queue: merge web tasks and external SDK/CLI device queue tickets
     global_queued = DeviceExecutionLock.get_queued_tasks()
@@ -358,7 +381,7 @@ async def get_status():
         conn_info = state.active_connections[str(latest_session_id)]
         is_paused = state.is_paused
         conn_profile = conn_info.get("profile") or active_profile
-        conn_model_info = model_service.get_active_model_info(conn_profile)
+        conn_model_info = model_service.get_session_model_info(latest_session or {}, conn_profile)
         return {
             "status": "paused" if is_paused else "running",
             "paused_error": state.paused_error if is_paused else None,

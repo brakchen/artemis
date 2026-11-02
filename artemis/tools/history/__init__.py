@@ -79,23 +79,23 @@ __all__ = [
 # --- Configuration -----------------------------------------------------------------------
 
 
-def _memory_config(warn: bool = True) -> Any:
+def _memory_config(warn: bool = True, ctx: Any = None) -> Any:
     try:
-        from artemis.config import load_agent_config
+        from artemis.config.task import get_task_agent_config
 
-        return load_agent_config().memory
+        return get_task_agent_config(ctx).memory
     except Exception as e:
         if warn:
             logger.debug(f"memory config unavailable, using defaults: {e}")
         return None
 
 
-def _recall_config(warn: bool = True) -> Any:
-    return getattr(_memory_config(warn), "recall", None)
+def _recall_config(warn: bool = True, ctx: Any = None) -> Any:
+    return getattr(_memory_config(warn, ctx), "recall", None)
 
 
-def _replay_config(warn: bool = True) -> Any:
-    return getattr(_memory_config(warn), "replay", None)
+def _replay_config(warn: bool = True, ctx: Any = None) -> Any:
+    return getattr(_memory_config(warn, ctx), "replay", None)
 
 
 def history_available(ctx: Any) -> bool:
@@ -107,7 +107,7 @@ def search_history_available(ctx: Any) -> bool:
     """``search_history`` is additionally gated by ``agent.memory.recall.enabled``."""
     if not history_available(ctx):
         return False
-    return bool(getattr(_recall_config(warn=False), "enabled", True))
+    return bool(getattr(_recall_config(warn=False, ctx=ctx), "enabled", True))
 
 
 # --- search_history ----------------------------------------------------------------------
@@ -190,7 +190,7 @@ class SearchHistoryTool(ArtemisTool):
                 query=query or "",
                 step_range=step_range,
                 max_results=int(max_results or 5),
-                recall_config=_recall_config(),
+                recall_config=_recall_config(ctx=ctx),
             )
         except Exception as e:
             logger.error(f"search_history failed: {e}")
@@ -248,7 +248,7 @@ class ReplayStepsTool(ArtemisTool):
         reader = getattr(ctx, "data_engine", None) if ctx else None
         if reader is None:
             return ToolFailure("Error: no execution history available.")
-        cfg = _replay_config()
+        cfg = _replay_config(ctx=ctx)
         try:
             return replay_steps_text(
                 reader,

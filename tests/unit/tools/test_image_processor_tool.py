@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from langchain_core.messages import AIMessage
 
 from artemis.context import ArtemisContext
 from artemis.graph.state import State
@@ -92,3 +96,120 @@ def test_ask_image_processor_tool_subclass():
     assert declaration.name == "ask_image_processor"
     assert "instruction" in declaration.parameters.properties
     assert "target_image_id" in declaration.parameters.properties
+
+
+def test_legacy_image_processor_tool_keeps_sync_invocation():
+    ctx = MagicMock(spec=ArtemisContext)
+    ctx.data_engine = None
+    processor = MagicMock()
+    processor.run = AsyncMock(return_value={"outputs": [], "summary": "legacy fixture"})
+    with patch(
+        "artemis.agents.image_processor.image_processor.ImageProcessor", return_value=processor
+    ):
+        result = get_ask_image_processor_tool(ctx).invoke(
+            {"instruction": "legacy image edit", "target_image_id": "img_0"}
+        )
+    assert result == {"outputs": [], "summary": "legacy fixture"}
+    processor.run.assert_awaited_once_with("legacy image edit", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pool_shape",
+    [
+        "root_list",
+        "entry_list",
+        "existing_entry_list",
+        "transform_list",
+        "annotations_list",
+        "path_object",
+        "missing_transform",
+        "empty",
+        "valid",
+        "partial",
+    ],
+)
+async def test_legacy_image_pool_shapes_remain_recoverable(
+    monkeypatch, tmp_path, caplog, pool_shape
+):
+    from artemis.agents.image_processor import image_processor as module
+
+    context = SimpleNamespace(llm_config=SimpleNamespace(), data_engine=None)
+    llm = MagicMock()
+    llm.bind_tools.return_value = llm
+    llm.ainvoke = AsyncMock(
+        side_effect=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "execute_python",
+                        "args": {"code": "synthetic fixture output"},
+                        "id": "step1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "submit_result",
+                        "args": {"summary": "recovered"},
+                        "id": "step2",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+    )
+    monkeypatch.setattr(module, "get_llm", lambda *args, **kwargs: llm)
+    monkeypatch.setattr(module.settings, "TRACES_PATH", tmp_path / "traces")
+    image = tmp_path / "fixture.jpg"
+    image.write_bytes(b"synthetic image; byte transport only")
+    valid = {
+        "path": str(image),
+        "transform": {"offset_x": 0.0, "offset_y": 0.0, "scale_x": 1.0, "scale_y": 1.0},
+        "annotations": {"D1": [0, 0]},
+        "is_output": True,
+    }
+    pools = {
+        "root_list": [],
+        "entry_list": {"img_1": []},
+        "existing_entry_list": {"img_0": []},
+        "transform_list": {"img_1": {**valid, "transform": []}},
+        "annotations_list": {"img_1": {**valid, "annotations": []}},
+        "path_object": {"img_1": {**valid, "path": {}}},
+        "missing_transform": {"img_1": {"path": str(image)}},
+        "empty": {},
+        "valid": {"img_1": valid},
+        "partial": {"img_1": valid, "img_2": []},
+    }
+    closed = []
+
+    class SyntheticExecutor:
+        def __init__(self, session_dir):
+            self.directory = session_dir
+
+        def execute(self, code):
+            pool = next(self.directory.rglob("intermediate_transforms.json"))
+            pool.write_text(json.dumps(pools[pool_shape]), encoding="utf-8")
+            return "synthetic executor result"
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(module, "PythonExecutor", SyntheticExecutor)
+    processor = module.ImageProcessor(context)
+    result = await processor.run("recover from malformed pool", str(image))
+    assert result["summary"] == "recovered" and closed == [True]
+    assert llm.ainvoke.await_count == 2
+    if pool_shape in {"valid", "partial"}:
+        assert list(processor.intermediate_image_pool) == ["img_0", "img_1"]
+        assert result["outputs"][0]["image_id"] == "img_1"
+        assert result["outputs"][0]["annotations"] == {"D1": [0, 0]}
+    else:
+        assert list(processor.intermediate_image_pool) == ["img_0"]
+        assert result["outputs"][0]["image_id"] == "img_0"
+    if pool_shape not in {"valid", "empty"}:
+        assert "Failed to read pool_json_path" in caplog.text

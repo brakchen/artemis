@@ -53,7 +53,9 @@ from typing import Any
 import anyio
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from artemis.mcp.action_types import ActionResult, ObserveResult
+from artemis.mcp.action_types import ActionResult, ObserveResult, DispatchState, ActionCode
+from artemis.mcp.target_guard import changes_screen, snapshot_error
+from artemis.utils.vision import invalidate_snapshot, state_version, uses_minimax
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -66,8 +68,9 @@ _SHUTDOWN = object()  # queue sentinel
 class ActionSession:
     """Owns the in-memory MCP client/server pair for one device run."""
 
-    def __init__(self, server: Any):
+    def __init__(self, server: Any, ctx: Any = None):
         self._server = server
+        self.ctx = ctx
         self._session: Any = None
         self._ready = asyncio.Event()
         self._owner: asyncio.Task | None = None
@@ -95,11 +98,40 @@ class ActionSession:
             item = await self._requests.get()
             if item is _SHUTDOWN:
                 return
-            fut, name, args = item
+            fut, name, args, expected_snapshot = item
             if fut.cancelled():
                 continue  # caller gave up before we started; nothing was sent
             try:
+                strict = self.ctx is not None and uses_minimax(self.ctx)
+                if expected_snapshot is not None:
+                    error = snapshot_error(self.ctx, expected_snapshot)
+                    if error:
+                        from artemis.mcp.action_server import _wrap
+
+                        fut.set_result(
+                            _wrap(ActionResult.failure(name, error, code=ActionCode.INVALID_ARGS))
+                        )
+                        continue
+                previous = getattr(self.ctx, "_current_snapshot", None) if strict else None
+                version = state_version(self.ctx) if strict else 0
+                changing = strict and changes_screen(name)
+                if changing:
+                    # Invalidate in the owner BEFORE a command may be sent, even
+                    # if its caller abandons the future while call_tool runs.
+                    invalidate_snapshot(self.ctx)
                 result = await session.call_tool(name, args)
+                if changing:
+                    payload = getattr(result, "structuredContent", None)
+                    if isinstance(payload, dict):
+                        outcome = ActionResult.model_validate(payload)
+                        if (
+                            outcome.dispatch_state is DispatchState.NOT_DISPATCHED
+                            and state_version(self.ctx) == version + 1
+                            and getattr(self.ctx, "_current_snapshot", None) is None
+                        ):
+                            # A confirmed pre-effect rejection may be retried.
+                            self.ctx._screen_state_version = version
+                            self.ctx._current_snapshot = previous
             except BaseException as e:
                 if not fut.cancelled():
                     fut.set_exception(e)
@@ -140,7 +172,7 @@ class ActionSession:
     def started(self) -> bool:
         return self._session is not None
 
-    async def call_raw(self, name: str, args: dict[str, Any]) -> Any:
+    async def call_raw(self, name: str, args: dict[str, Any], *, expected_snapshot=None) -> Any:
         """Calls a tool and returns the raw ``CallToolResult``.
 
         There is deliberately no transport-level timeout here (see the module
@@ -152,7 +184,7 @@ class ActionSession:
         if self._session is None:
             raise RuntimeError("ActionSession is not started.")
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._requests.put_nowait((fut, name, args))
+        self._requests.put_nowait((fut, name, args, expected_snapshot))
         result = await fut
         if getattr(result, "isError", False):
             # Protocol-level failure (unknown tool, schema violation) -- a programming
@@ -165,9 +197,11 @@ class ActionSession:
             raise RuntimeError(f"MCP tool '{name}' failed: {text}")
         return result
 
-    async def call(self, name: str, args: dict[str, Any]) -> ActionResult:
+    async def call(
+        self, name: str, args: dict[str, Any], *, expected_snapshot=None
+    ) -> ActionResult:
         """Calls a device action tool and returns its typed result."""
-        result = await self.call_raw(name, args)
+        result = await self.call_raw(name, args, expected_snapshot=expected_snapshot)
         return ActionResult.model_validate(result.structuredContent)
 
     async def observe(self, settle_ms: int = 400, include_image: bool = False) -> ObserveResult:
@@ -188,6 +222,14 @@ class ActionSession:
         if not data.get("ok"):
             raise RuntimeError(f"take_screenshot failed: {data.get('error')}")
         return data["image_b64"]
+
+    async def verification_capture(self, timeout: float = 3.0) -> tuple[str, dict | None]:
+        """Fresh capture metadata without replacing the decision observation."""
+        result = await self.call_raw("take_screenshot", {"timeout_ms": int(timeout * 1000)})
+        data = result.structuredContent or {}
+        if not data.get("ok"):
+            raise RuntimeError(f"Verification capture failed: {data.get('error')}")
+        return data["image_b64"], data.get("snapshot")
 
     async def ui_hierarchy(self, timeout: float | None = None) -> Any:
         """Returns the raw UI element hierarchy."""
@@ -219,6 +261,20 @@ async def get_action_session(ctx: Any, actuator: Any = None) -> ActionSession:
     Contract validation happens here (inside ``build_action_server``), so a backend
     that cannot satisfy the manifest fails before the first device interaction.
     """
+    lock = getattr(ctx, "_action_session_init_lock", None)
+    if not isinstance(lock, asyncio.Lock):
+        lock = asyncio.Lock()
+        try:
+            ctx._action_session_init_lock = lock
+        except (AttributeError, ValueError, TypeError):
+            # Legacy strict injected contexts cannot be extended. They retain
+            # the historical unattached-session contract.
+            logger.debug("Could not store the action session initialization lock on ctx.")
+    async with lock:
+        return await _get_or_start_action_session(ctx, actuator)
+
+
+async def _get_or_start_action_session(ctx: Any, actuator: Any = None) -> ActionSession:
     existing = getattr(ctx, "action_session", None)
     if existing is not None and existing.started:
         return existing
@@ -235,11 +291,17 @@ async def get_action_session(ctx: Any, actuator: Any = None) -> ActionSession:
 
     actuator = actuator or getattr(ctx, "actuator", None) or AdbActuator(ctx)
     server = build_action_server(actuator)
-    session = ActionSession(server)
-    await session.start()
+    session = ActionSession(server, ctx=ctx)
     try:
         ctx.action_session = session
-    except Exception:
+    except (AttributeError, ValueError, TypeError):
         # Contexts that forbid new attributes (strict mocks) can still use the session.
         logger.debug("Could not store action session on ctx; proceeding unattached.")
+    try:
+        await session.start()
+    except BaseException:
+        # A cancelled initializer must not leave an unattached owner behind or
+        # let the next caller race a still-starting second session.
+        await asyncio.shield(session.aclose())
+        raise
     return session

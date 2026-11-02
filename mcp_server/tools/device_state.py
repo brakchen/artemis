@@ -14,20 +14,13 @@
 
 """MCP Tool: mobile_get_device_state."""
 
+from __future__ import annotations
+
 import base64
 import os
 
 from mcp_server.base import mcp
-from artemis.mcp.adb_server import _get_controller
 from mcp_server.utils import env_utils
-from artemis.utils.ocr_xml_fusion import (
-    fuse_ocr_with_xml,
-    _detect_status_bar_height,
-    _crop_image_remove_status_bar,
-    _map_coordinates_back,
-)
-from artemis.utils.ocr_api import is_ocr_configured, perform_ocr
-from artemis.utils.visualization import format_minimal_list_with_elements
 
 
 @mcp.tool()
@@ -49,6 +42,20 @@ async def mobile_get_device_state(view_type: str, device_serial: str | None = No
           several devices attached, confirm the target with the user
           (`adb devices -l` lists serials).
     """
+
+    env_utils.import_artemis_package()
+    from artemis.mcp.adb_server import _get_controller
+    from artemis.utils.ocr_xml_fusion import (
+        fuse_ocr_with_xml,
+        pure_xml_hierarchy,
+        _detect_status_bar_height,
+        _crop_image_remove_status_bar,
+        _map_coordinates_back,
+    )
+    from artemis.utils.ocr_api import is_ocr_configured, perform_ocr, ocr_outcome, ocr_status_text
+    from artemis.utils.vision import SnapshotRef, ImageTransform, create_snapshot, uses_minimax
+    from artemis.utils.visualization import format_minimal_list_with_elements
+
     try:
         controller = _get_controller(device_serial=device_serial)
         device_width = controller.ctx.device.device_width
@@ -60,6 +67,15 @@ async def mobile_get_device_state(view_type: str, device_serial: str | None = No
         device_data = await controller.get_screen_data()
         latest_screenshot_b64 = device_data.base64
         xml_hierarchy = device_data.elements
+        if uses_minimax(controller.ctx):
+            xml_hierarchy = pure_xml_hierarchy(xml_hierarchy)
+        snapshot = getattr(device_data, "snapshot", None)
+        if not isinstance(snapshot, SnapshotRef):
+            snapshot = create_snapshot(
+                controller.ctx, base64.b64decode(latest_screenshot_b64), device_data, bind=False
+            )
+        device_width = snapshot.width or device_data.width
+        device_height = snapshot.height or device_data.height
 
         project_root = env_utils.get_project_root()
 
@@ -79,25 +95,56 @@ async def mobile_get_device_state(view_type: str, device_serial: str | None = No
 
         elif view_type == "hierarchy":
             ocr_results = []
-            if is_ocr_configured():
+            request_outcome = {
+                "status": "disabled",
+                "reason": "ocr_unconfigured",
+                "source": "minimax",
+                "snapshot_id": snapshot.capture_id,
+            }
+            if is_ocr_configured(controller.ctx):
                 try:
-                    screen_height = device_data.height
+                    screen_height = device_height
                     status_bar_height = _detect_status_bar_height(xml_hierarchy, screen_height)
                     if status_bar_height > 0:
                         cropped_b64, _, _ = _crop_image_remove_status_bar(
                             latest_screenshot_b64, status_bar_height
                         )
-                        raw_ocr_results = await perform_ocr(cropped_b64)
-                        ocr_results = _map_coordinates_back(raw_ocr_results, status_bar_height)
+                        applied_offset = (
+                            status_bar_height if cropped_b64 != latest_screenshot_b64 else 0
+                        )
+                        raw_ocr_results = await perform_ocr(
+                            cropped_b64,
+                            ctx=controller.ctx,
+                            snapshot=snapshot,
+                            transform=ImageTransform(offset_y=applied_offset),
+                        )
+                        ocr_results = (
+                            _map_coordinates_back(raw_ocr_results, applied_offset)
+                            if applied_offset
+                            else raw_ocr_results
+                        )
                     else:
-                        ocr_results = await perform_ocr(latest_screenshot_b64)
-                except Exception:
+                        ocr_results = await perform_ocr(
+                            latest_screenshot_b64, ctx=controller.ctx, snapshot=snapshot
+                        )
+                    request_outcome = ocr_outcome(controller.ctx)
+                except Exception as error:
+                    request_outcome = {
+                        "status": "error",
+                        "reason": type(error).__name__,
+                        "source": "minimax",
+                        "snapshot_id": snapshot.capture_id,
+                    }
+                    controller.ctx._ocr_last_outcome = dict(request_outcome)
                     ocr_results = []
 
             fused_xml = fuse_ocr_with_xml(xml_hierarchy, ocr_results)
             hierarchy_text, elements, labels = format_minimal_list_with_elements(
                 fused_xml, width=device_width, height=device_height
             )
+            status_text = ocr_status_text(controller.ctx, request_outcome)
+            if status_text:
+                hierarchy_text += "\n" + status_text
             return hierarchy_text
 
         else:

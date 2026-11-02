@@ -22,6 +22,8 @@ model parameters, tier-aware prompt construction, initial screenshot
 annotation), packaged as a mixin consumed by ``Explorer``.
 """
 
+from __future__ import annotations
+
 import base64
 import glob
 import hashlib
@@ -45,8 +47,10 @@ from artemis.agents.object_detector.object_detector import _run_object_detection
 from artemis.config import settings
 from artemis.data_engine.storage import StorageManager
 from artemis.graph.state import State
-from artemis.utils.ocr_api import is_ocr_configured, perform_ocr
-from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml
+from artemis.llm.reliability import LLMCallError
+from artemis.utils.ocr_api import is_ocr_configured, perform_ocr, automatic_ocr_enabled, ocr_outcome
+from artemis.utils.vision import snapshot_for_image, image_size, uses_minimax
+from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml, pure_xml_hierarchy
 from artemis.utils.visualization import draw_dots, format_minimal_list_with_elements
 from third_party.mobile_use.utils.logger import get_logger
 
@@ -125,6 +129,7 @@ class RunSetupMixin:
                 queries,
                 templates,
                 global_timeout=global_timeout,
+                snapshot=self.snapshot,
             )
             detected_items = result.get("detected", [])
             candidates = []
@@ -136,15 +141,41 @@ class RunSetupMixin:
                             "label": f"D{idx + 1}",
                             "coords": pos,
                             "description": item.get("label", query),
+                            **{
+                                k: v
+                                for k, v in item.items()
+                                if k not in {"label", "point", "coords", "description"}
+                            },
                         }
                     )
-            fallback_message = "" if candidates else f"Failed to detect: {query}"
+            fallback_message = (
+                ""
+                if candidates
+                else (
+                    f"Ambiguous target: {query}"
+                    if result.get("ambiguous")
+                    else f"Failed to detect: {query}"
+                )
+            )
             return json.dumps(
-                {"candidates": candidates, "fallback_message": fallback_message},
+                {
+                    "candidates": candidates,
+                    "fallback_message": fallback_message,
+                    **({"ambiguous": result["ambiguous"]} if result.get("ambiguous") else {}),
+                },
                 ensure_ascii=False,
             )
-        except Exception as e:
+        except (LLMCallError, OSError, ValueError, TypeError, KeyError) as e:
             logger.error(f"Flash mode object detection failed: {e}")
+            if uses_minimax(self.ctx):
+                return json.dumps(
+                    {
+                        "candidates": [],
+                        "fallback_message": f"Flash mode detection error: {type(e).__name__}",
+                        "error": True,
+                        "status": "error",
+                    }
+                )
             return self._failure_outcome(f"Flash mode detection error: {e}")
 
     def _resolve_image_record(self, screenshot_path: str) -> tuple:
@@ -194,7 +225,20 @@ class RunSetupMixin:
         """
         image_name, record = self._resolve_image_record(screenshot_path)
         self.image_name = image_name
-        self._resolve_screen_dimensions(state)
+        with open(screenshot_path, "rb") as image_file:
+            data = image_file.read()
+        raw = getattr(state, "operator_raw_data", None)
+        latest = getattr(state, "latest_screenshot", None)
+        same_image = (
+            isinstance(latest, (str, Path))
+            and Path(latest).resolve() == Path(screenshot_path).resolve()
+        )
+        metadata = raw.get("snapshot") if same_image and isinstance(raw, dict) else None
+        self.snapshot = snapshot_for_image(self.ctx, data, metadata)
+        try:
+            self.width, self.height = image_size(data)
+        except (ValueError, OSError):
+            self._resolve_screen_dimensions(state)
         fused_xml = await self._build_fused_hierarchy(
             record, state, screenshot_path, allow_ocr=not tier.is_oneshot
         )
@@ -260,7 +304,7 @@ class RunSetupMixin:
 
         try:
             data = load_prompt_sections(prompt_path)
-        except Exception as e:
+        except (OSError, ValueError, TypeError) as e:
             return None, f"Error loading or parsing explorer.json: {e}"
 
         exposed = self._exposed_tool_names(tier)
@@ -305,30 +349,109 @@ class RunSetupMixin:
         HTTP client backing on-the-fly OCR is created here on first need and
         released by ``Explorer.run`` regardless of the engine used.
         """
-        fused_xml: Any = []
-        if record and getattr(record, "ui_tree", None):
-            ui_tree = record.ui_tree
-            ocr_results = getattr(record, "ocr_result", None)
-            if ocr_results is None:
-                if allow_ocr and is_ocr_configured():
-                    try:
-                        logger.info("Previous screenshot OCR is missing. Running OCR on-the-fly...")
-                        with open(screenshot_path, "rb") as img_file:
-                            img_b64 = base64.b64encode(img_file.read()).decode("utf-8")
-                        if self.http_client is None:
-                            self.http_client = httpx.AsyncClient()
-                        ocr_results = await perform_ocr(img_b64, client=self.http_client)
-                    except Exception as ocr_err:
-                        logger.error(f"On-the-fly OCR failed for previous screenshot: {ocr_err}")
-                        ocr_results = []
-                else:
-                    ocr_results = []
+        if uses_minimax(self.ctx):
+            self._ocr_outcome = {
+                "status": "disabled",
+                "reason": "automatic_ocr_disabled"
+                if not automatic_ocr_enabled(self.ctx)
+                else "ocr_not_requested",
+                "source": "minimax",
+                "snapshot_id": self.snapshot.capture_id if self.snapshot else None,
+            }
+        ui_tree = getattr(record, "ui_tree", None) if record else None
+        raw = getattr(state, "operator_raw_data", None)
+        if (
+            uses_minimax(self.ctx)
+            and screenshot_path == getattr(state, "latest_screenshot", None)
+            and isinstance(raw, dict)
+            and isinstance(raw.get("snapshot"), dict)
+        ):
+            # Pixel-identical frames can carry different live accessibility state.
+            # Historical same-hash UI trees cannot replace the current observation.
+            ui_tree = raw.get("xml_hierarchy") if isinstance(raw.get("xml_hierarchy"), list) else []
+        if not isinstance(ui_tree, list):
+            raw = getattr(state, "operator_raw_data", None)
+            ui_tree = raw.get("xml_hierarchy") if isinstance(raw, dict) else None
+        if not isinstance(ui_tree, list) and screenshot_path == getattr(
+            state, "latest_screenshot", None
+        ):
+            ui_tree = getattr(state, "latest_ui_hierarchy", None)
+        self._base_hierarchy = list(ui_tree) if isinstance(ui_tree, (list, tuple)) else []
+        if uses_minimax(self.ctx):
+            self._base_hierarchy = pure_xml_hierarchy(self._base_hierarchy)
+        ocr_results = (
+            None
+            if uses_minimax(self.ctx)
+            else getattr(record, "ocr_result", None)
+            if record
+            else None
+        )
+        if (
+            uses_minimax(self.ctx)
+            and isinstance(raw, dict)
+            and self.snapshot
+            and self.snapshot.capture_valid
+        ):
+            current_outcome = raw.get("ocr_outcome")
+            current_regions = raw.get("ocr_results")
+            if (
+                isinstance(current_outcome, dict)
+                and current_outcome.get("source") == "minimax"
+                and current_outcome.get("status") in {"complete", "partial", "empty"}
+                and current_outcome.get("snapshot_id") == self.snapshot.capture_id
+                and isinstance(current_regions, list)
+                and all(
+                    isinstance(row, dict)
+                    and row.get("source") == "minimax"
+                    and row.get("ocr_version") == "regions-ltrb-v1"
+                    and row.get("snapshot_id") == self.snapshot.capture_id
+                    for row in current_regions
+                )
+            ):
+                ocr_results = current_regions
+                self._ocr_outcome = dict(current_outcome)
+                self._ocr_loaded = True
+        if (
+            ocr_results is None
+            and allow_ocr
+            and automatic_ocr_enabled(self.ctx)
+            and is_ocr_configured(self.ctx)
+        ):
+            try:
+                ocr_results = await self._request_ocr(screenshot_path)
+            except (LLMCallError, httpx.HTTPError, OSError, ValueError) as error:
+                logger.warning(f"Explorer OCR unavailable; using XML only: {type(error).__name__}")
+                self._ocr_outcome = {
+                    "status": "error",
+                    "reason": type(error).__name__,
+                    "source": "minimax",
+                    "snapshot_id": self.snapshot.capture_id if self.snapshot else None,
+                }
+                self.ctx._ocr_last_outcome = dict(self._ocr_outcome)
+        if uses_minimax(self.ctx) and ocr_results is None and not automatic_ocr_enabled(self.ctx):
+            self.ctx._ocr_last_outcome = dict(self._ocr_outcome)
+        return fuse_ocr_with_xml(self._base_hierarchy, ocr_results or [])
 
-            fused_xml = fuse_ocr_with_xml(ui_tree, ocr_results or [])
-            logger.info("Successfully loaded and fused UI hierarchy for previous screenshot.")
-        elif screenshot_path == getattr(state, "latest_screenshot", None):
-            fused_xml = getattr(state, "latest_ui_hierarchy", None)
-        return list(fused_xml) if isinstance(fused_xml, (list, tuple)) else []
+    async def _request_ocr(self, screenshot_path: str) -> list[dict]:
+        with open(screenshot_path, "rb") as image_file:
+            data = image_file.read()
+        if not uses_minimax(self.ctx) and self.http_client is None:
+            self.http_client = httpx.AsyncClient()
+        result = await perform_ocr(
+            base64.b64encode(data).decode("ascii"),
+            client=self.http_client,
+            ctx=self.ctx,
+            snapshot=self.snapshot,
+        )
+        self._ocr_outcome = ocr_outcome(self.ctx)
+        self._ocr_loaded = True
+        return result
+
+    async def _load_ocr_on_demand(self) -> None:
+        if not self._ocr_loaded and self.screenshot_path and is_ocr_configured(self.ctx):
+            results = await self._request_ocr(self.screenshot_path)
+            fused = fuse_ocr_with_xml(self._base_hierarchy, results)
+            self.screen_index = ScreenIndex.from_hierarchy(fused, self.width, self.height)
 
     def _annotate_initial_screenshot(
         self, fused_xml, screenshot_path: str, image_name, minimal_list: str

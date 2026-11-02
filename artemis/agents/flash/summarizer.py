@@ -38,6 +38,7 @@ from artemis.context import ArtemisContext
 from artemis.memory.step_memory import JobKey, StepMemoryService
 from artemis.services.llm import RobustChatModelWrapper, get_google_llm, get_llm
 from artemis.services.token_meter import record_llm_usage
+from artemis.llm.reliability import LLMCallError
 from artemis.utils.task_tree import format_actions_clean
 from artemis.utils.visualization import draw_action_overlay_on_image
 from third_party.mobile_use.utils.logger import get_logger
@@ -161,16 +162,33 @@ class VisualStepSummarizer(StepMemoryService):
             flush_timeout_s=flush_timeout_s,
         )
 
-        # Initialize lightweight VLM: prioritize explicit model_name
+        from artemis.utils.vision import uses_minimax
+
         target_model = model_name or "gemini-2.5-flash-lite"
         self._model_name = target_model
-        try:
-            if model_name:
-                self._llm = get_google_llm(model_name=target_model, temperature=0.0)
-            else:
-                self._llm = get_llm(ctx, name="summarizer", is_utils=True)
-        except Exception:
+        if uses_minimax(ctx):
+            from artemis.services.llm import get_auxiliary_llm
+
+            self._llm = get_auxiliary_llm(ctx, "step_summarizer", model_name=model_name)
+            self._model_name = self._llm.endpoint.model_name
+        elif model_name:
             self._llm = get_google_llm(model_name=target_model, temperature=0.0)
+        else:
+            from artemis.config.llm import LLMConfig
+
+            if isinstance(getattr(ctx, "llm_config", None), LLMConfig) or (
+                getattr(ctx, "llm_config", None) is None and issubclass(type(ctx), ArtemisContext)
+            ):
+                self._llm = get_llm(ctx, name="summarizer", is_utils=False)
+            else:
+                # Opaque legacy injections retain their historical fallback;
+                # canonical typed configuration errors never enter it.
+                try:
+                    self._llm = get_llm(ctx, name="summarizer", is_utils=False)
+                except Exception:
+                    self._llm = get_google_llm(model_name=target_model, temperature=0.0)
+        if isinstance(self._llm, RobustChatModelWrapper):
+            self._llm = self._llm.with_usage(update_last_prompt=False)
         try:
             configured = getattr(self._llm, "model", None) or getattr(self._llm, "model_name", None)
             if isinstance(configured, str) and configured:
@@ -458,7 +476,10 @@ class VisualStepSummarizer(StepMemoryService):
                 HumanMessage(content=content_blocks),
             ]
 
-            response = await asyncio.wait_for(self._llm.ainvoke(messages), timeout=25.0)
+            llm = self._llm
+            if isinstance(llm, RobustChatModelWrapper):
+                llm = llm.with_usage(update_last_prompt=False)
+            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=25.0)
             self._meter_lens_call(response)
             summary_raw = response.content if isinstance(response.content, str) else ""
             if isinstance(response.content, list):
@@ -504,13 +525,14 @@ class VisualStepSummarizer(StepMemoryService):
                         logger.debug(f"DataEngine step summary update skipped: {de_err}")
                 return True
 
+        except LLMCallError:
+            raise
         except Exception as e:
             # ``str(asyncio.TimeoutError())`` is empty; repr keeps the reason
             # column from reading as a blank failure.
             logger.warning(
-                f"VisualStepSummarizer: Error generating summary for step"
-                f" {step_number}: {e!r}" if not str(e) else
-                f"VisualStepSummarizer: Error generating summary for step"
-                f" {step_number}: {e}"
+                f"VisualStepSummarizer: Error generating summary for step {step_number}: {e!r}"
+                if not str(e)
+                else f"VisualStepSummarizer: Error generating summary for step {step_number}: {e}"
             )
         return False

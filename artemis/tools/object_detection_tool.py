@@ -14,6 +14,8 @@
 
 """Universal Object Detection tool for visual element detection and localization."""
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,7 @@ from artemis.graph.state import State
 from artemis.tools.base import ArtemisTool, ToolCategory
 from artemis.tools.tool_wrapper import ToolWrapper
 from artemis.utils.cython_compat import CyFunctionDetector
+from artemis.utils.vision import snapshot_for_image
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -103,7 +106,22 @@ async def _run_object_detection_logic(
 
     try:
         with TraceSpan(name="run_object_detection", ctx=ctx) as span:
-            result = await _run_object_detection(ctx, target_image, target_queries, templates)
+            raw = getattr(state, "operator_raw_data", None) if state is not None else None
+            value = raw.get("snapshot") if isinstance(raw, dict) else None
+            latest = getattr(state, "latest_screenshot", None) if state is not None else None
+            if (
+                not isinstance(latest, (str, Path))
+                or Path(latest).resolve() != Path(target_image).resolve()
+            ):
+                value = None
+            snapshot = (
+                snapshot_for_image(ctx, Path(target_image).read_bytes(), value)
+                if isinstance(value, dict)
+                else None
+            )
+            result = await _run_object_detection(
+                ctx, target_image, target_queries, templates, snapshot=snapshot
+            )
             span.result = result
             output = json.dumps(result) if not isinstance(result, str) else result
 

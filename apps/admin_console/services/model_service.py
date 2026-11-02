@@ -14,7 +14,7 @@
 
 import json
 import logging
-import time
+from types import SimpleNamespace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -23,60 +23,97 @@ logger = logging.getLogger(__name__)
 class ModelService:
     """Service handling agent architecture profile detection and metadata formatting."""
 
-    # parse_llm_config re-reads and re-validates the config file on every call;
-    # /api/sessions calls this once per session row, so cache (provider, model_id)
-    # for a short TTL. Config edits take effect within _LLM_INFO_TTL seconds.
-    _LLM_INFO_TTL = 10.0
-    _llm_info_cache: tuple[float, str, str] | None = None
-
-    @classmethod
-    def _get_llm_provider_and_model(cls) -> tuple[str, str]:
-        cached = cls._llm_info_cache
-        now = time.monotonic()
-        if cached and now - cached[0] < cls._LLM_INFO_TTL:
-            return cached[1], cached[2]
-        provider = "google"
-        model_id = "gemini-3.7-flash"
-        try:
-            from artemis.config import parse_llm_config
-
-            llm_cfg = parse_llm_config()
-            if llm_cfg and llm_cfg.operator:
-                provider = str(llm_cfg.operator.provider)
-                model_id = str(llm_cfg.operator.model)
-            elif llm_cfg and llm_cfg.default:
-                provider = str(llm_cfg.default.provider)
-                model_id = str(llm_cfg.default.model)
-        except Exception as exc:
-            # Unreadable/invalid LLM config: fall back to display defaults
-            # (cached for the TTL, so this logs at most once per window).
-            logger.warning("Could not resolve LLM config for display: %s", exc)
-        cls._llm_info_cache = (now, provider, model_id)
-        return provider, model_id
+    @staticmethod
+    def _format_model(profile: str | None, endpoint: dict | None = None) -> dict[str, str]:
+        arch_name = "Flash"
+        if profile:
+            value = str(profile).lower()
+            arch_name = (
+                "Pro"
+                if "pro" in value
+                else "Flash"
+                if "flash" in value
+                else str(profile).capitalize()
+            )
+        info = {
+            "name": arch_name,
+            "id": "unknown",
+            "provider": "unknown",
+            "architecture": f"ARTEMIS {arch_name}",
+        }
+        if endpoint is not None:
+            for source, target in (
+                ("model", "id"),
+                ("kind", "provider"),
+                ("vendor", "vendor"),
+                ("registry", "registry"),
+            ):
+                value = endpoint.get(source)
+                if isinstance(value, str):
+                    info[target] = value
+        return info
 
     @classmethod
     def get_active_model_info(cls, profile: str | None = None) -> dict[str, str]:
-        """Return active architecture and underlying LLM model configuration."""
-        # 1. Determine underlying LLM model and provider from config (cached)
-        provider, model_id = cls._get_llm_provider_and_model()
+        """Resolve current configured operator read-only, without constructing a client."""
+        try:
+            from artemis.config import parse_llm_config, load_agent_config
+            from artemis.llm.resolution import public_model_snapshot
 
-        # 2. Determine agent architecture name (Flash vs Pro)
-        arch_name = "Flash"
-        if profile:
-            p_lower = str(profile).lower()
-            if "pro" in p_lower:
-                arch_name = "Pro"
-            elif "flash" in p_lower:
-                arch_name = "Flash"
-            else:
-                arch_name = str(profile).capitalize()
+            snapshot = public_model_snapshot(
+                SimpleNamespace(
+                    llm_config=parse_llm_config(),
+                    agent_config=load_agent_config(),
+                )
+            )
+            operator = next(
+                row
+                for row in snapshot["roles"]
+                if row["role"] == "operator" and not row["fallback"]
+            )
+            return cls._format_model(profile, operator)
+        except (ValueError, OSError, KeyError, StopIteration) as exc:
+            logger.warning(
+                "Could not resolve model configuration for display (%s)", type(exc).__name__
+            )
+            info = cls._format_model(profile)
+            info["diagnostic"] = f"Invalid model configuration ({type(exc).__name__})"
+            return info
 
-        return {
-            "name": arch_name,
-            "id": model_id,
-            "provider": provider,
-            "architecture": f"ARTEMIS {arch_name}",
-        }
+    @classmethod
+    def get_session_model_info(
+        cls,
+        row: dict[str, Any],
+        profile: str | None = None,
+        llm_trace_payloads: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Display persisted task evidence; current configuration is irrelevant."""
+        raw = row.get("device_info")
+        try:
+            device_info = json.loads(raw) if isinstance(raw, str) else raw
+            snapshot = device_info.get("model_snapshot") if isinstance(device_info, dict) else None
+            if isinstance(snapshot, dict):
+                roles = snapshot.get("roles", [])
+                for endpoint in roles if isinstance(roles, list) else []:
+                    if (
+                        isinstance(endpoint, dict)
+                        and endpoint.get("role") == "operator"
+                        and endpoint.get("fallback") is False
+                    ):
+                        return cls._format_model(
+                            profile or snapshot.get("requested_profile"), endpoint
+                        )
+            # Old traces can carry direct model evidence. Never substitute a
+            # current configured model for a historical unknown.
+            for raw_trace in llm_trace_payloads or []:
+                trace = json.loads(raw_trace) if isinstance(raw_trace, str) else raw_trace
+                if isinstance(trace, dict) and isinstance(trace.get("model"), str):
+                    return cls._format_model(
+                        profile, {"model": trace["model"], "kind": trace.get("provider")}
+                    )
+        except (ValueError, TypeError):
+            pass
+        return cls._format_model(profile)
 
     @staticmethod
     def resolve_session_profile(

@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Video Analyzer utility for analyzing video content using Gemini models.
+"""Video analysis through the task's selected media provider and explicit modalities.
 
-This utility sends video files to video-capable Gemini models for analysis
-and returns text descriptions based on the provided prompt.
-It also exposes a tool for agents to perform structured video analysis.
+MiniMax uses visual evidence plus optional native speech transcription; legacy
+providers retain their existing video/audio engines and supported modalities.
 """
 
 from typing import Any, Literal
@@ -59,6 +58,18 @@ class VideoAnalyzerArgs(BaseModel):
             " segment."
         ),
     )
+    visual: bool = Field(
+        default=True,
+        description="Analyze visual content. False requests speech only, which is required.",
+    )
+    speech: Literal["not_requested", "optional", "required"] = Field(
+        default="not_requested",
+        description="Request native speech transcription explicitly. Required unavailable speech prevents completion; optional failure is disclosed.",
+    )
+    acoustic: bool = Field(
+        default=False,
+        description="Request non-speech sound analysis; unsupported by MiniMax. Speech transcription does not analyze such sounds.",
+    )
 
 
 OPERATOR_VIDEO_ANALYZER_DOCSTRING = (
@@ -79,7 +90,12 @@ OPERATOR_VIDEO_ANALYZER_DOCSTRING = (
     " changes too quickly for static screenshots to capture.\n"
     "  - Please specify a narrow time range when possible to ensure faster"
     " processing.\n"
-    "  - If only audio analysis is needed, state it clearly in your purpose.\n"
+    "  - Visual analysis is enabled by default. For speech-only analysis set"
+    " visual=False and speech='required'; describe the question in purpose.\n"
+    "  - Set speech='optional' or 'required' to request transcription with visual"
+    " analysis. Required missing coverage prevents completion; optional failures"
+    " are disclosed. MiniMax does not support non-speech acoustic analysis;"
+    " acoustic=True reports unsupported. Legacy provider capabilities remain unchanged.\n"
 )
 
 #: Flash-profile declaration of the same tool (FlashRunner binds JSON-schema
@@ -88,17 +104,7 @@ OPERATOR_VIDEO_ANALYZER_DOCSTRING = (
 VIDEO_ANALYZER_TOOL = ToolDeclaration(
     name="video_analyzer",
     description=OPERATOR_VIDEO_ANALYZER_DOCSTRING,
-    parameters={
-        "type": "object",
-        "properties": {
-            field_name: {
-                "type": "string",
-                "description": field_info.description or "",
-            }
-            for field_name, field_info in VideoAnalyzerArgs.model_fields.items()
-        },
-        "required": list(VideoAnalyzerArgs.model_fields),
-    },
+    parameters=VideoAnalyzerArgs.model_json_schema(),
 )
 
 DIAGNOSER_VIDEO_ANALYZER_DOCSTRING = (
@@ -111,7 +117,7 @@ DIAGNOSER_VIDEO_ANALYZER_DOCSTRING = (
 
 
 class VideoAnalyzerTool(ArtemisTool):
-    """Universal tool for analyzing video content using Gemini models."""
+    """Analyze a recording interval using the selected provider and modalities."""
 
     def __init__(
         self,
@@ -161,7 +167,10 @@ class VideoAnalyzerTool(ArtemisTool):
             if ctx is None:
                 raise ValueError("ArtemisContext is required for VideoAnalyzer.")
             agent = VideoAnalyzer(ctx)
-            agent_outcome, status = await agent.run(time_desc, purp)
+            media_args = {
+                name: kwargs[name] for name in ("visual", "speech", "acoustic") if name in kwargs
+            }
+            agent_outcome, status = await agent.run(time_desc, purp, **media_args)
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error(f"Error running video analyzer: {e}")
             agent_outcome = f"Error running video analyzer: {e}"
@@ -171,11 +180,11 @@ class VideoAnalyzerTool(ArtemisTool):
             return ToolMessage(
                 tool_call_id=tcid or "",
                 content=agent_outcome,
-                status=status,
+                status="success" if status in {"success", "complete"} else "error",
             )
 
-        if status == "failed":
-            return f"Video analysis failed: {agent_outcome}"
+        if status not in {"success", "complete"}:
+            return ToolFailure(f"Video analysis failed: {agent_outcome}")
         return agent_outcome
 
 
@@ -219,8 +228,11 @@ class VideoAnalyzerPureTool(ArtemisTool):
             if ctx is None:
                 raise ValueError("ArtemisContext is required for VideoAnalyzer.")
             agent = VideoAnalyzer(ctx)
-            agent_outcome, status = await agent.run(time_desc, purp)
-            if status == "failed":
+            media_args = {
+                name: kwargs[name] for name in ("visual", "speech", "acoustic") if name in kwargs
+            }
+            agent_outcome, status = await agent.run(time_desc, purp, **media_args)
+            if status not in {"success", "complete"}:
                 return ToolFailure(f"Video analysis failed: {agent_outcome}")
             return agent_outcome
         except Exception as e:  # pylint: disable=broad-exception-caught

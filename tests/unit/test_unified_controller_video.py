@@ -492,13 +492,19 @@ async def test_segment_cache_is_scoped_to_recording_generation(mock_ctx, tmp_pat
     with patch("artemis.controllers.unified_controller.render_timeline_clip", render):
         first = await controller.extract_segment_metadata(2.0, 8.0)
         cached = await controller.extract_segment_metadata(2.0, 8.0)
+        exclusive_path = tmp_path / "owned-run" / "exclusive.mp4"
+        exclusive = await controller.extract_segment_metadata(2.0, 8.0, output_path=exclusive_path)
+        assert exclusive.video_path == exclusive_path
+        assert exclusive_path.read_bytes() == b"clip"
+        assert first.video_path != exclusive_path and first.video_path.is_file()
+        assert (await controller.extract_segment_metadata(2.0, 8.0)).video_path == cached.video_path
         session.generation = 1
         regenerated = await controller.extract_segment_metadata(2.0, 8.0)
 
     assert first is cached
     assert regenerated is not cached
     assert regenerated.generation == 1
-    assert render.await_count == 2
+    assert render.await_count == 3
     remove_active_session("emulator-5554")
 
 

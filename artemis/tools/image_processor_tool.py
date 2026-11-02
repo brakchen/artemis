@@ -14,12 +14,16 @@
 
 """Universal Image Processor tool for executing image transformations."""
 
-from typing import Any
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from typing import Annotated, Any
 
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
+from langgraph.prebuilt import InjectedState
 from pydantic import BaseModel, Field
 
 from artemis.context import ArtemisContext
+from artemis.agents.image_processor.image_processor import ensure_image_processor_supported
 from artemis.data_engine.trace import trace, trace_langchain_tool
 from artemis.drivers.base import BaseDeviceDriver
 from artemis.graph.state import State
@@ -69,6 +73,37 @@ class AskImageProcessorTool(ArtemisTool):
             category="custom",
         )
 
+    def to_langchain_tool(self, ctx: Any, name: str | None = None) -> BaseTool:
+        """Use the context directly; this image tool never needs a driver."""
+
+        async def run(
+            instruction: str,
+            target_image_id: str,
+            state: Annotated[Any, InjectedState] = None,
+        ) -> Any:
+            return await _run_image_processor_logic(ctx, state, instruction, target_image_id)
+
+        def run_sync(
+            instruction: str,
+            target_image_id: str,
+            state: Annotated[Any, InjectedState] = None,
+        ) -> Any:
+            # Preserve the generic adapter's synchronous legacy invocation.
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(run(instruction, target_image_id, state))
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, run(instruction, target_image_id, state)).result()
+
+        return StructuredTool.from_function(
+            func=run_sync,
+            coroutine=run,
+            name=name or self.name,
+            description=self.description,
+            args_schema=self.args_schema,
+        )
+
     # pylint: disable=too-many-arguments,too-many-positional-arguments
     async def execute(
         self,
@@ -103,6 +138,8 @@ async def _run_image_processor_logic(
     instruction: str,
     target_image_id: str,  # pylint: disable=unused-argument
 ) -> Any:
+    ensure_image_processor_supported(ctx)
+
     @trace(type="agent", name="image_processor", ctx=ctx)
     async def run_image_processor_agent(inst: str, img_path: str) -> dict:
         from artemis.agents.image_processor.image_processor import (  # pylint: disable=import-outside-toplevel

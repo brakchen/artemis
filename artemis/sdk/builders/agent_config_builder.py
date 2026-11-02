@@ -14,6 +14,8 @@
 
 """Builder for AgentConfig objects using a fluent interface."""
 
+from __future__ import annotations
+
 import os
 from typing import Any, cast
 
@@ -43,7 +45,8 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._concurrency_mode: str = "per_device"
         self._max_concurrency: int | None = None
 
-        agent_cfg = load_agent_config()
+        agent_cfg = load_agent_config().model_copy(deep=True)
+        self._ocr = agent_cfg.ocr.model_copy(deep=True)
         self._explorer = agent_cfg.explorer
         self._explorer_versions = agent_cfg.explorer_versions
         self._denylisted_tools = agent_cfg.denylisted_tools
@@ -70,23 +73,24 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._outputter = agent_cfg.outputter
         self._disable_outputter = not agent_cfg.outputter.enabled
         self._flash = agent_cfg.flash
-        self._pro = agent_cfg.pro
+        self._pro = agent_cfg.pro.model_copy(deep=True)
+        self._memory = agent_cfg.memory.model_copy(deep=True)
 
-    def for_device_serial(self, device_serial: str) -> "AgentConfigBuilder":
+    def for_device_serial(self, device_serial: str) -> AgentConfigBuilder:
         """Target a specific Android device by its ADB serial number."""
         return self.for_device(DevicePlatform.ANDROID, device_serial)
 
-    def with_concurrency_mode(self, mode: str) -> "AgentConfigBuilder":
+    def with_concurrency_mode(self, mode: str) -> AgentConfigBuilder:
         """Configure concurrency mode: 'global' (1 task globally) or 'per_device' (1 task per device)."""
         self._concurrency_mode = str(mode).strip().lower()
         return self
 
-    def with_max_concurrency(self, max_concurrency: int) -> "AgentConfigBuilder":
+    def with_max_concurrency(self, max_concurrency: int) -> AgentConfigBuilder:
         """Configure max concurrent tasks limit."""
         self._max_concurrency = max_concurrency
         return self
 
-    def with_video_recording_tools(self, enabled: bool = True) -> "AgentConfigBuilder":
+    def with_video_recording_tools(self, enabled: bool = True) -> AgentConfigBuilder:
         """Enable or disable video recording tools.
 
         Args:
@@ -95,7 +99,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._video_recording_tools_enabled = enabled
         return self
 
-    def with_web_accessibility(self, enabled: bool = True) -> "AgentConfigBuilder":
+    def with_web_accessibility(self, enabled: bool = True) -> AgentConfigBuilder:
         """Enable or disable forcing web accessibility for WebViews.
 
         Args:
@@ -104,7 +108,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._force_web_accessibility = enabled
         return self
 
-    def with_disable_checker(self, disable: bool = True) -> "AgentConfigBuilder":
+    def with_disable_checker(self, disable: bool = True) -> AgentConfigBuilder:
         """Temporarily disable the background Checker task (useful for debugging).
 
         Args:
@@ -126,7 +130,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         settlement_timeout: float | None = None,
         assert_failure_policy: str | None = None,
         device_probes: bool | None = None,
-    ) -> "AgentConfigBuilder":
+    ) -> AgentConfigBuilder:
         """Configure plan-driven checkpoint verification and the final review.
 
         Args:
@@ -165,7 +169,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
             self._disable_device_probes = not device_probes
         return self
 
-    def with_verification_level(self, level: str) -> "AgentConfigBuilder":
+    def with_verification_level(self, level: str) -> AgentConfigBuilder:
         """Apply a coarse Checker preset (the ``--verification-level`` knob).
 
         Presets are defined once in :data:`artemis.config.VERIFICATION_LEVEL_PRESETS`:
@@ -184,17 +188,17 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         """
         return self.with_checker(**checker_overrides_for_level(level))
 
-    def with_midway_checks(self, enabled: bool = True) -> "AgentConfigBuilder":
+    def with_midway_checks(self, enabled: bool = True) -> AgentConfigBuilder:
         """Enable or disable plan-declared midway checkpoints."""
         self._disable_midway_checks = not enabled
         return self
 
-    def with_final_check(self, enabled: bool = True) -> "AgentConfigBuilder":
+    def with_final_check(self, enabled: bool = True) -> AgentConfigBuilder:
         """Enable or disable the exit final review."""
         self._disable_final_check = not enabled
         return self
 
-    def with_disable_planner_validation(self, disable: bool = True) -> "AgentConfigBuilder":
+    def with_disable_planner_validation(self, disable: bool = True) -> AgentConfigBuilder:
         """Temporarily disable the background Planner validation task.
 
         Args:
@@ -203,7 +207,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._disable_planner_validation = disable
         return self
 
-    def with_planner_validation(self, enabled: bool = True) -> "AgentConfigBuilder":
+    def with_planner_validation(self, enabled: bool = True) -> AgentConfigBuilder:
         """Configure the advisory async Planner validation on milestone changes.
 
         Every top-level milestone text change is reviewed by the lightweight
@@ -216,12 +220,12 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._disable_planner_validation = not enabled
         return self
 
-    def with_enable_committee(self, enabled: bool = True) -> "AgentConfigBuilder":
+    def with_enable_committee(self, enabled: bool = True) -> AgentConfigBuilder:
         """Enable or disable the Committee council debate tool for Operator."""
         self._enable_committee = enabled
         return self
 
-    def with_committee(self, enabled: bool = True, debate_rounds: int = 2) -> "AgentConfigBuilder":
+    def with_committee(self, enabled: bool = True, debate_rounds: int = 2) -> AgentConfigBuilder:
         """Configure Multi-Agent Committee council debate settings.
 
         Args:
@@ -236,7 +240,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self,
         enabled: bool = True,
         force_synthesis: bool = False,
-    ) -> "AgentConfigBuilder":
+    ) -> AgentConfigBuilder:
         """Configure Outputter post-execution synthesis agent options.
 
         Args:
@@ -249,7 +253,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._disable_outputter = not enabled
         return self
 
-    def with_disable_outputter(self, disable: bool = True) -> "AgentConfigBuilder":
+    def with_disable_outputter(self, disable: bool = True) -> AgentConfigBuilder:
         """Disable Outputter agent execution."""
         self._disable_outputter = disable
         self._outputter = self._outputter.model_copy(update={"enabled": not disable})
@@ -262,7 +266,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         step_summarizer: bool | None = None,
         step_summarizer_model: str | None = None,
         prune_history_xml: bool | None = None,
-    ) -> "AgentConfigBuilder":
+    ) -> AgentConfigBuilder:
         """Configure ⚡ Flash execution profile options.
 
         Args:
@@ -302,7 +306,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         enabled: bool = True,
         model: str | None = None,
         prune_history_xml: bool | None = None,
-    ) -> "AgentConfigBuilder":
+    ) -> AgentConfigBuilder:
         """Configure Flash asynchronous step state summarizer options."""
         return self.with_flash_config(
             step_summarizer=enabled,
@@ -318,7 +322,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         checker: bool | None = None,
         video_ledger: bool | None = None,
         verification_level: str | None = None,
-    ) -> "AgentConfigBuilder":
+    ) -> AgentConfigBuilder:
         """Configure 🚀 Pro execution profile options.
 
         Args:
@@ -364,7 +368,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         pro_mode: ExplorerVersion | None = None,
         caching: bool | None = None,
         versions: dict[str, ExplorerVersion] | None = None,
-    ) -> "AgentConfigBuilder":
+    ) -> AgentConfigBuilder:
         """Configure the Explorer tier behind ``ask_explorer``.
 
         The tier is a user setting resolved per execution profile; calling agents
@@ -399,7 +403,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
             self._explorer_versions = versions
         return self
 
-    def with_explorer_version(self, version: ExplorerVersion) -> "AgentConfigBuilder":
+    def with_explorer_version(self, version: ExplorerVersion) -> AgentConfigBuilder:
         """Configure the fallback Explorer tier ('flash', 'pro', or 'ultra').
 
         Only applies when no profile knob matches; prefer :meth:`with_flash_config`
@@ -408,12 +412,12 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._explorer = self._explorer.model_copy(update={"default_version": version})
         return self
 
-    def with_explorer_versions(self, versions: dict[str, ExplorerVersion]) -> "AgentConfigBuilder":
+    def with_explorer_versions(self, versions: dict[str, ExplorerVersion]) -> AgentConfigBuilder:
         """Configure the advanced per-agent Explorer tier override (empty by default)."""
         self._explorer_versions = versions
         return self
 
-    def with_denylisted_tools(self, tools: dict[str, list[str]]) -> "AgentConfigBuilder":
+    def with_denylisted_tools(self, tools: dict[str, list[str]]) -> AgentConfigBuilder:
         """Configure denylisted tools."""
         self._denylisted_tools = tools
         return self
@@ -444,8 +448,10 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
             "disable_outputter": self._disable_outputter,
             "outputter": self._outputter,
             "flash": self._flash,
-            "pro": self._pro,
+            "pro": self._pro.model_copy(deep=True),
+            "memory": self._memory.model_copy(deep=True),
             "explorer": self._explorer,
+            "ocr": self._ocr,
             "explorer_versions": self._explorer_versions,
             "denylisted_tools": self._denylisted_tools,
             "enable_video_ledger": self._enable_video_ledger,
@@ -457,7 +463,11 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         }
 
     def build(self, validate_profiles: bool = True) -> AgentConfig:
-        return cast(AgentConfig, super().build(validate_profiles=validate_profiles))
+        from artemis.config.task import copy_task_config
+
+        return cast(
+            AgentConfig, copy_task_config(super().build(validate_profiles=validate_profiles))
+        )
 
 
 def get_default_servers():

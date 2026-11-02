@@ -23,6 +23,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from artemis.llm.reliability import (
     CircuitBreaker,
@@ -42,6 +45,74 @@ class VideoFailureCategory(StrEnum):
     MEDIA_PROCESSING = "media_processing"
     CANCELLED = "cancelled"
     UNKNOWN = "unknown"
+    INVALID_OUTPUT = "invalid_output"
+    BALANCE = "balance"
+    PERMISSION = "permission"
+    CONTENT_REFUSAL = "content_refusal"
+    QUOTA_EXHAUSTED = "quota_exhausted"
+
+
+class RequestedMediaScope(BaseModel):
+    """A user interval bound before coordination, independent of tool work."""
+
+    time_description: str
+    resolution: Literal["explicit", "recording_metadata", "unresolved"] = "unresolved"
+    start: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    end: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    error: str | None = None
+
+    @property
+    def interval(self) -> tuple[float, float] | None:
+        if (
+            self.resolution != "unresolved"
+            and self.start is not None
+            and self.end is not None
+            and self.end > self.start
+        ):
+            return self.start, self.end
+        return None
+
+
+class MediaCoverage(BaseModel):
+    """Successful evidence coverage for exactly one observed modality."""
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+    modality: Literal["visual", "speech"]
+    start: float = Field(strict=True, ge=0, allow_inf_nan=False)
+    end: float = Field(strict=True, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _valid_interval(self):
+        if self.end <= self.start:
+            raise ValueError("Media coverage end must exceed start")
+        return self
+
+
+class MediaAnalysisResult(BaseModel):
+    """Internal result; only complete is exposed as legacy tuple success."""
+
+    status: Literal["complete", "partial", "incomplete", "failed"]
+    outcome: str
+    requested_scope: RequestedMediaScope | None = None
+    coverage: list[MediaCoverage] = Field(default_factory=list)
+    missing_coverage: dict[str, list[tuple[float, float]]] = Field(default_factory=dict)
+    modalities: dict[str, Any] = Field(default_factory=dict)
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+    recording_source: dict[str, Any] = Field(default_factory=dict)
+
+    def legacy(self) -> tuple[str, str]:
+        return self.model_dump_json(), "success" if self.status == "complete" else "error"
+
+
+class MediaChunkResult(str):
+    """Legacy child text carrying program-owned facts to the Blackboard commit."""
+
+    media_facts: dict[str, Any]
+
+    def __new__(cls, text: str, *, media_facts: dict[str, Any]):
+        value = super().__new__(cls, text)
+        value.media_facts = media_facts
+        return value
 
 
 @dataclass(frozen=True)
@@ -104,11 +175,16 @@ def classify_video_failure(error: BaseException) -> VideoFailure:
     # Media markers take precedence over generic connection / bad-request /
     # unknown classification (rate-limit, unavailable, timeout, and auth
     # signals still win, matching the original ordering of checks).
-    if has_media_marker and generic.category in {
-        FailureCategory.CONNECTION,
-        FailureCategory.BAD_REQUEST,
-        FailureCategory.UNKNOWN,
-    }:
+    if (
+        not hasattr(error, "failure")
+        and has_media_marker
+        and generic.category
+        in {
+            FailureCategory.CONNECTION,
+            FailureCategory.BAD_REQUEST,
+            FailureCategory.UNKNOWN,
+        }
+    ):
         # Media failures are about the extracted clip itself (missing frames,
         # corrupt container, unsupported codec). Bisecting the interval only
         # re-runs the same broken extraction on smaller ranges and turns one
@@ -122,7 +198,9 @@ def classify_video_failure(error: BaseException) -> VideoFailure:
     # The video pipeline keeps its historical behavior of falling back to the
     # universal analyzer even for bad requests (a different provider may accept
     # the same media payload).
-    should_fallback = generic.should_fallback or category is VideoFailureCategory.BAD_REQUEST
+    should_fallback = generic.should_fallback or (
+        category is VideoFailureCategory.BAD_REQUEST and not hasattr(error, "failure")
+    )
     if category is VideoFailureCategory.CANCELLED:
         should_fallback = False
     return VideoFailure(category, generic.retryable, should_split, should_fallback)

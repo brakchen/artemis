@@ -14,6 +14,8 @@
 
 """MCP Tool: mobile_run_task."""
 
+from __future__ import annotations
+
 import logging
 import os
 import subprocess
@@ -26,15 +28,6 @@ import uuid
 from mcp_server.base import mcp
 from mcp_server.notifiers import notify
 from mcp_server.utils import env_utils
-from artemis.config import ExplorerVersion, checker_overrides_for_level
-from artemis.config.runtime import read_ipc_port
-from artemis.runtime import (
-    DeviceExecutionLock,
-    device_pool,
-    ensure_daemon_running,
-    submit_task_to_daemon,
-    trace_store,
-)
 
 # Seconds the spawned runner gets to finish its imports and open its log files
 # before the spawn is declared dead. Normal startup creates stdout.log within a
@@ -79,6 +72,9 @@ def _watch_spawn(
     Returns True when the runner booted (or was already terminal), False when it
     was declared hung and killed.
     """
+
+    from artemis.runtime import DeviceExecutionLock, trace_store
+
     trace_dir = trace_store.get_trace_dir(trace_id)
     log_paths = (
         os.path.join(trace_dir, "stdout.log"),
@@ -151,6 +147,9 @@ def _validate_device_serial(device_serial: str) -> dict[str, Any] | None:
     the device is usable. If device enumeration itself fails (no adb available),
     validation is skipped rather than blocking task submission.
     """
+
+    from artemis.runtime import device_pool
+
     try:
         # The shared validator fails open on an indeterminate/empty enumeration:
         # the task proceeds and fails downstream with a clear no-device error.
@@ -170,9 +169,6 @@ def _validate_device_serial(device_serial: str) -> dict[str, Any] | None:
     }
 
 
-_EXPLORER_MODES: tuple[str, ...] = get_args(ExplorerVersion)
-
-
 def _normalize_pro_tuning(
     verification_level: str | None, explorer_mode: str | None
 ) -> tuple[str | None, str | None]:
@@ -182,6 +178,9 @@ def _normalize_pro_tuning(
         ValueError: with a caller-facing message when a value is not a known
             preset, so the tool rejects the call before any trace is created.
     """
+    from artemis.config import ExplorerVersion, checker_overrides_for_level
+
+    explorer_modes = get_args(ExplorerVersion)
     level: str | None = None
     if verification_level is not None and str(verification_level).strip():
         level = str(verification_level).strip().lower()
@@ -193,10 +192,10 @@ def _normalize_pro_tuning(
     mode: str | None = None
     if explorer_mode is not None and str(explorer_mode).strip():
         mode = str(explorer_mode).strip().lower()
-        if mode not in _EXPLORER_MODES:
+        if mode not in explorer_modes:
             raise ValueError(
                 f"Invalid explorer_mode {explorer_mode!r}. Must be one of: "
-                + ", ".join(_EXPLORER_MODES)
+                + ", ".join(explorer_modes)
             )
     return level, mode
 
@@ -278,6 +277,16 @@ def mobile_run_task(
           `"pro"` (3-turn ReAct), `"ultra"` (deep pixel reasoning; slowest).
           Ignored for Flash.
     """
+
+    env_utils.import_artemis_package()
+    from artemis.config.runtime import read_ipc_port
+    from artemis.runtime import (
+        DeviceExecutionLock,
+        ensure_daemon_running,
+        submit_task_to_daemon,
+        trace_store,
+    )
+
     # 0. Validate and normalize model
     if model.lower() not in ("flash", "pro"):
         raise ValueError(f"Invalid model '{model}'. Must be either 'Flash' or 'Pro'.")
@@ -285,6 +294,12 @@ def mobile_run_task(
     # 0b. Validate the Pro tuning knobs before any trace exists so a typo is a
     # plain tool error rather than a failed trace on disk.
     verification_level, explorer_mode = _normalize_pro_tuning(verification_level, explorer_mode)
+
+    from mcp_server.utils.task_config import prepare_task_config
+
+    prepare_task_config(
+        canonical_model, verification_level=verification_level, explorer_mode=explorer_mode
+    )
 
     # 1. Generate a unique trace_id
     trace_id = str(uuid.uuid4())

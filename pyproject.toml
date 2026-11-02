@@ -41,7 +41,11 @@ dependencies = [
     # Configuration, Models & Validation
     "pydantic>=2.7.0",
     "pydantic-settings>=2.10.1",
+    "jsonschema>=4.26.0,<5",
+    "referencing>=0.37.0,<1",
     "python-dotenv>=1.0.1",
+    "filelock>=3.32.3,<4",
+    "pywin32>=312; sys_platform == 'win32'",
     "jinja2>=3.1.5",
     "typing-extensions>=4.12.0",
     # Android Automation & Device Subsystem
@@ -73,7 +77,9 @@ dependencies = [
     "uuid-utils>=0.9.0",
     "jupyter-client>=8.6.0",
     "ipykernel>=6.29.0",
-    "langchain-anthropic>=1.5.4",
+    # The MiniMax complete-payload hook is verified against this SDK pair.
+    "langchain-anthropic==1.5.6",
+    "anthropic==0.122.0",
     "socksio>=1.0.0",
 ]
 

@@ -29,6 +29,7 @@ from google.genai import types
 
 from artemis.agents.video_analyzer import gemini_files
 from artemis.agents.video_analyzer import video_analyzer as _va
+from artemis.utils.video import communicate_process
 from artemis.agents.video_analyzer.reliability import SubAgentAnswerExhausted
 from artemis.constants import SAFETY_SETTINGS_BLOCK_NONE
 from artemis.data_engine.trace import CURRENT_TRACE_ID, TraceSpan
@@ -473,7 +474,7 @@ async def _persist_timeline_events(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await proc.communicate()
+            await communicate_process(proc)
         except Exception as e:
             logger.warning(f"Failed to extract frame: {e}")
 

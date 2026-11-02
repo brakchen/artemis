@@ -530,7 +530,7 @@ async def _cleanup_native_run(analyzer) -> None:
                     Path.home().resolve(),
                     Path(tempfile.gettempdir()).resolve(),
                 }
-                if resolved in system_dirs:
+                if resolved in system_dirs or resolved not in analyzer._owned_dirs:
                     logger.debug(f"Skipping deletion of root/system directory: {dir_path}")
                     continue
 

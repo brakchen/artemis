@@ -14,7 +14,10 @@
 
 """Unit tests verifying that OCR is optional and the system degrades gracefully."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
 import pytest
 
 from artemis.agents.explorer.explorer import Explorer
@@ -26,7 +29,7 @@ from artemis.tools.mobile.ocr import (
     ocr_recognition,
     ocr_recognition_wrapper,
 )
-from artemis.utils.ocr_api import is_ocr_configured, perform_ocr
+from artemis.utils.ocr_api import _parse_ocr_response, is_ocr_configured, perform_ocr
 from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml
 from artemis.utils.visualization import format_minimal_list_with_elements
 
@@ -88,6 +91,80 @@ async def test_perform_ocr_executes_api_call_when_configured():
         result = await perform_ocr(screenshot_b64="dummy_b64")
         assert len(result) == 1
         assert result[0]["text"] == "Login"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"responses": {}},
+        {"responses": [[]]},
+        {"responses": [{"textAnnotations": {}}]},
+        {"responses": [{"textAnnotations": [{}, []]}]},
+        {"responses": [{"textAnnotations": [{}, {"description": []}]}]},
+        {"responses": [{"textAnnotations": [{}, {"boundingPoly": []}]}]},
+        {"responses": [{"textAnnotations": [{}, {"boundingPoly": {"vertices": {}}}]}]},
+        {"responses": [{"textAnnotations": [{}, {"boundingPoly": {"vertices": [[]]}}]}]},
+    ],
+)
+def test_legacy_ocr_parser_shapes_raise_recoverable_value_error(payload):
+    with pytest.raises(ValueError, match="Vision API"):
+        _parse_ocr_response(httpx.Response(200, json=payload))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"responses": []}, {"responses": [{}]}, {"responses": [{"textAnnotations": []}]}],
+)
+def test_legacy_ocr_parser_keeps_legitimate_empty_responses(payload):
+    assert _parse_ocr_response(httpx.Response(200, json=payload)) == []
+
+
+def test_legacy_ocr_service_error_never_echoes_upstream_body_or_key():
+    private = "fixture-private-upstream-input"
+    response = httpx.Response(503, json={"error": {"message": private}})
+    with pytest.raises(ValueError, match="^Vision API returned status 503$") as error:
+        _parse_ocr_response(response)
+    assert private not in str(error.value)
+    assert error.value.__cause__ is None and error.value.__context__ is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(503, json={"error": {"message": "fixture-private-upstream-input"}}),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, json={"responses": [{"textAnnotations": [{}, {"boundingPoly": []}]}]}),
+    ],
+)
+async def test_actual_legacy_ocr_parse_failures_keep_explorer_xml(monkeypatch, tmp_path, response):
+    import google.genai
+
+    def prohibited(*args, **kwargs):
+        raise AssertionError("Live HTTP or Google client is prohibited")
+
+    monkeypatch.setattr(google.genai, "Client", prohibited)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", prohibited)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", prohibited)
+    monkeypatch.setattr(Settings, "get_api_key", lambda *args, **kwargs: None)
+    monkeypatch.setenv("OCR_API_KEY", "fixture-only-ocr-key")
+    context = SimpleNamespace(
+        llm_config=SimpleNamespace(explorer=SimpleNamespace(model="fixture-legacy")),
+        agent_config=SimpleNamespace(),
+        data_engine=None,
+    )
+    explorer = Explorer(context)
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic fixture: OCR byte transport only")
+    state = State(initial_goal="fixture")
+    state.latest_screenshot = str(image)
+    state.latest_ui_hierarchy = [{"text": "XML-only text", "bounds": [0, 0, 10, 10]}]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: response)) as client:
+        explorer.http_client = client
+        fused = await explorer._build_fused_hierarchy(None, state, str(image))
+    assert fused and fused[0]["text"] == "XML-only text"
+    assert explorer._ocr_outcome["status"] == "error"
 
 
 def test_fuse_ocr_with_xml_empty_ocr_retains_xml_pruning():

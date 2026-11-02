@@ -14,6 +14,8 @@
 
 """Agent tools, sub-agent capabilities, and explorer settings configuration."""
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -25,7 +27,7 @@ from artemis.config.constants import (
     DEFAULT_EXPLORER_VERSION,
     ExplorerVersion,
 )
-from artemis.config.paths import ROOT_DIR, get_config_path
+from artemis.config.paths import get_main_config_path
 from artemis.llm.google import VideoProcessing
 from third_party.mobile_use.utils.file import load_jsonc
 from third_party.mobile_use.utils.logger import get_logger
@@ -42,6 +44,16 @@ class VideoAnalyzerConfig(BaseModel):
             "Whether continuous screen video recording and video analyzer tools "
             "are enabled. If None, auto-detected based on scrcpy & ffmpeg availability."
         ),
+    )
+    max_job_attempts: int = Field(
+        default=64,
+        ge=1,
+        le=256,
+        description="Shared finite MiniMax media-job wire attempt budget, including coordinator, subclips and ASR.",
+    )
+    job_timeout_seconds: float = Field(default=900.0, ge=15.0, le=3600.0)
+    speech_language: str | None = Field(
+        default=None, description="Optional native ASR language header."
     )
     enable_ledger: bool = Field(
         default=True,
@@ -278,7 +290,7 @@ def checker_overrides_for_level(level: str | None) -> dict[str, Any]:
     return dict(preset)
 
 
-def verification_level_for_checker(checker: "CheckerConfig") -> VerificationLevel:
+def verification_level_for_checker(checker: CheckerConfig) -> VerificationLevel:
     """Classify an effective :class:`CheckerConfig` back onto the coarse ladder.
 
     Used by launcher UIs to show where the configured defaults sit; the inverse of
@@ -294,8 +306,8 @@ def verification_level_for_checker(checker: "CheckerConfig") -> VerificationLeve
 def run_tuning_for_profile(
     profile: str | None,
     *,
-    checker: "CheckerConfig",
-    explorer: "ExplorerConfig",
+    checker: CheckerConfig,
+    explorer: ExplorerConfig,
     explorer_versions: dict[str, str] | None = None,
 ) -> dict[str, str] | None:
     """Return Pro verification and explorer settings for session metadata.
@@ -579,7 +591,7 @@ class MemoryTranscriptConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     @model_validator(mode="after")
-    def _ratios_are_ordered(self) -> "MemoryTranscriptConfig":
+    def _ratios_are_ordered(self) -> MemoryTranscriptConfig:
         """The three thresholds form a ladder against the same budget."""
         if not (0.0 <= self.start_ratio <= self.soft_ratio <= self.hard_ratio <= 1.0):
             raise ValueError(
@@ -711,7 +723,7 @@ class MemoryChunkingConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _min_steps_within_cap(self) -> "MemoryChunkingConfig":
+    def _min_steps_within_cap(self) -> MemoryChunkingConfig:
         if self.min_steps > self.max_steps:
             raise ValueError(
                 "memory.chunking.min_steps must not exceed max_steps"
@@ -854,6 +866,15 @@ class ProProfileConfig(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class OCRConfig(BaseModel):
+    """Automatic OCR is opt-in for MiniMax; explicit recognition is independent."""
+
+    automatic: bool | None = Field(
+        default=None,
+        description="None preserves legacy automatic OCR and disables MiniMax automatic OCR.",
+    )
+
+
 class AgentGlobalConfig(BaseModel):
     """Global configuration parsed from artemis.jsonc / agent_config.json."""
 
@@ -866,6 +887,8 @@ class AgentGlobalConfig(BaseModel):
         default_factory=ProProfileConfig,
         description="Options for 🚀 Pro multi-agent graph execution.",
     )
+
+    ocr: OCRConfig = Field(default_factory=OCRConfig)
 
     # 🌐 Core Component Configurations
     explorer: ExplorerConfig = Field(
@@ -909,7 +932,9 @@ class AgentGlobalConfig(BaseModel):
         description="Unified step-memory runtime and transcript scrub options.",
     )
 
-    model_config = {"extra": "allow"}
+    # Validation errors cross diagnostics, CLI, MCP and task admission. Keep
+    # nested field locations/types useful without reflecting arbitrary input.
+    model_config = {"extra": "allow", "hide_input_in_errors": True}
 
     @model_validator(mode="before")
     @classmethod
@@ -1075,17 +1100,7 @@ def load_agent_config(
     Returns:
         Validated AgentGlobalConfig instance.
     """
-    resolved_path = config_path
-    if not resolved_path:
-        for candidate in ("artemis.jsonc", "artemis.json", AGENT_CONFIG_FILENAME):
-            try:
-                resolved_path = get_config_path(candidate)
-                break
-            except FileNotFoundError:
-                continue
-
-    if not resolved_path:
-        resolved_path = get_config_path(AGENT_CONFIG_FILENAME, ROOT_DIR / AGENT_CONFIG_FILENAME)
+    resolved_path = config_path or get_main_config_path(AGENT_CONFIG_FILENAME)
 
     try:
         with open(resolved_path, encoding="utf-8") as f:

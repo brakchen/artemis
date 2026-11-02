@@ -443,13 +443,14 @@ async def _format_structured(
 ) -> Any:
     """Convert the answer to the configured schema with a second model call.
 
-    Returns None if no schema is configured. If the call fails, falls back to
-    parsing the answer locally, and then to the answer text. Never raises.
+    Returns None for no schema or a validated JSON null. MiniMax formatting
+    failures propagate; legacy failures fall back to local parsing or text.
     """
     bound = output_config.bind_structured_output(llm, llm_fallback)
     if bound is None:
         return None
     structured_llm, structured_llm_fallback = bound
+    minimax = getattr(getattr(llm, "endpoint", None), "vendor", None) == "minimax"
     logger.info("Formatting raw output to structured format...")
 
     format_messages: list[BaseMessage] = [SystemMessage(content=_FORMAT_SYSTEM_MESSAGE)]
@@ -471,10 +472,15 @@ async def _format_structured(
             fallback_call=lambda: invoke_llm_with_timeout_message(
                 structured_llm_fallback.ainvoke(format_messages)
             ),
+            none_should_fallback=not minimax,
         )
-        if response is None:
+        if response is None and not minimax:
             raise ValueError("the model returned no structured output")
     except Exception as e:
+        if minimax:
+            # Required structured failures must remain errors: locally parsing
+            # an earlier narrative cannot establish a validated provider result.
+            raise
         logger.warning(f"Structured formatting failed ({e}); parsing the answer locally.")
         schema = output_config.structured_output_schema()
         parsed = parse_structured(
@@ -513,7 +519,7 @@ async def outputter(
     output_config: OutputConfig,
     graph_output: State,
     plan_and_history: str | None = None,
-) -> dict:
+) -> Any:
     logger.info("Starting Outputter Agent")
 
     if plan_and_history is None and ctx.data_engine:
@@ -542,11 +548,15 @@ async def outputter(
             raw_answer = _MAX_TURNS_ERROR
             logger.error(raw_answer)
 
-    if output_config.structured_output:
+    minimax_schema = (
+        getattr(getattr(llm, "endpoint", None), "vendor", None) == "minimax"
+        and output_config.structured_output_schema() is not None
+    )
+    if output_config.structured_output or minimax_schema:
         formatted = await _format_structured(
             output_config, graph_output, raw_answer, saved_report, llm, llm_fallback
         )
-        if formatted is not None:
+        if formatted is not None or minimax_schema:
             return formatted
 
     return _coerce_text_answer(raw_answer)

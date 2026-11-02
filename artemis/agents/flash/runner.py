@@ -37,6 +37,8 @@ The verbatim body of a user instruction is the exception: it stays in the
 active window until its turn is chunked, whose user lines then carry it on.
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 from dataclasses import dataclass, field
@@ -65,12 +67,7 @@ from artemis.agents.validator.tool_declarations import (
     capture_screenshot_and_parse_ui,
     prune_intermediate_screenshots,
 )
-from artemis.config import (
-    MemoryRuntimeConfig,
-    MemoryTranscriptConfig,
-    StepSummarizerConfig,
-    load_agent_config,
-)
+from artemis.config.task import explicit_aux_model
 from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.data_engine.trace import trace
@@ -79,7 +76,7 @@ from artemis.graph.state import State
 from artemis.llm.reliability import LLMCallError
 from artemis.llm.structured import ParseFailure, parse_structured
 from artemis.mcp.action_executor import McpActionExecutor
-from artemis.mcp.observation import observe
+from artemis.mcp.observation import observe, apply_observation_to_state
 from artemis.memory.transcript import PRO_UI_LIST_MARKER, TranscriptLedger, mark_ephemeral
 from artemis.services.llm import (
     RobustChatModelWrapper,
@@ -133,7 +130,10 @@ class _TurnRecord:
             if status != "success":
                 # Executor messages name the action themselves ("Error
                 # executing click: ..."); prefix only the ones that don't.
-                return {"status": "failed", "error": text if name in text else f"{name}: {text}"}
+                return {
+                    "status": "unknown" if status == "unknown" else "failed",
+                    "error": text if name in text else f"{name}: {text}",
+                }
         return None
 
 
@@ -143,19 +143,14 @@ class FlashRunner:
     def __init__(self, ctx: ArtemisContext, goal: str, max_turns: int | None = None):
         self.ctx = ctx
         self.goal = goal
-        try:
-            cfg = load_agent_config()
-            self.max_turns = max_turns if max_turns is not None else cfg.flash.max_turns
-            self.step_summarizer_cfg = cfg.flash.step_summarizer
-            self.memory_runtime_cfg = cfg.memory.runtime
-            self.transcript_cfg = cfg.memory.transcript
-            self.chunking_cfg = cfg.memory.chunking
-        except Exception:
-            self.max_turns = max_turns if max_turns is not None else 0
-            self.step_summarizer_cfg = StepSummarizerConfig()
-            self.memory_runtime_cfg = MemoryRuntimeConfig()
-            self.transcript_cfg = MemoryTranscriptConfig()
-            self.chunking_cfg = None
+        from artemis.config.task import get_task_agent_config
+
+        cfg = get_task_agent_config(ctx)
+        self.max_turns = max_turns if max_turns is not None else cfg.flash.max_turns
+        self.step_summarizer_cfg = cfg.flash.step_summarizer
+        self.memory_runtime_cfg = cfg.memory.runtime
+        self.transcript_cfg = cfg.memory.transcript
+        self.chunking_cfg = cfg.memory.chunking
 
         self.controller = UnifiedMobileController(ctx)
         # ``agent_name="flash"`` makes ask_explorer follow ``explorer.flash_mode``
@@ -164,7 +159,7 @@ class FlashRunner:
         self.summarizer = (
             VisualStepSummarizer(
                 ctx,
-                model_name=self.step_summarizer_cfg.model,
+                model_name=explicit_aux_model(self.step_summarizer_cfg),
                 retry_limit=self.memory_runtime_cfg.retry_limit,
                 max_concurrency=self.memory_runtime_cfg.max_concurrency,
                 flush_timeout_s=self.memory_runtime_cfg.flush_timeout_s,
@@ -208,6 +203,10 @@ class FlashRunner:
         # declared from the very same args schemas the LangChain tools bind
         # (same availability gates: a DataEngine session, recall config).
         tools.extend(history_tool_declarations(self.ctx))
+        from artemis.tools.web_search import WEB_SEARCH_TOOL, web_search_enabled
+
+        if web_search_enabled(self.ctx, "flash"):
+            tools.append(WEB_SEARCH_TOOL.to_tool_declaration())
         if self._video_tools_enabled():
             from artemis.tools.video_tool import VIDEO_ANALYZER_TOOL
 
@@ -280,11 +279,16 @@ class FlashRunner:
 
     def _init_llm(self):
         """Initializes the Universal LLM via the Service Layer."""
+        from artemis.config.llm import LLMConfig
+
+        # Canonical configuration errors must reach the task boundary. The
+        # legacy injected context path keeps its historical recovery behavior.
+        if isinstance(getattr(self.ctx, "llm_config", None), LLMConfig):
+            return get_llm(self.ctx, name="operator")
         try:
             return get_llm(self.ctx, name="operator")
         except Exception as e:
             logger.warning(f"Failed to get operator LLM from config, using default: {e}")
-
             return RobustChatModelWrapper(get_google_llm(model_name="gemini-2.5-flash"), self.ctx)
 
     def _render_system_prompt(self, tools_declaration: list) -> str:
@@ -297,7 +301,18 @@ class FlashRunner:
         prompt_path = Path(__file__).parent / "flash_runner.md"
         prompt_template = prompt_path.read_text(encoding="utf-8")
         available_tools = frozenset(t.name for t in tools_declaration)
-        return Template(prompt_template).render(goal=self.goal, available_tools=available_tools)
+        prompt = Template(prompt_template).render(goal=self.goal, available_tools=available_tools)
+        from artemis.utils.vision import uses_minimax
+
+        if uses_minimax(self.ctx):
+            prompt += (
+                "\nMiniMax execution contract: choose one screen-changing action, then inspect the "
+                "new observation before choosing another target or reporting completion. Indexed "
+                "and coordinate targets are validated; click_sequence cannot batch targets across "
+                "screen changes. Unknown dispatch may already have taken effect: observe and "
+                "diagnose instead of replaying. Dispatched is not proof of goal success."
+            )
+        return prompt
 
     # ------------------------------------------------------------------
     # Per-turn helpers (observe / think)
@@ -597,6 +612,11 @@ class FlashRunner:
         post_img_bytes = exec_result.screenshot_bytes
         if post_img_bytes or name not in action_names:
             return post_img_bytes
+        from artemis.mcp.target_guard import changes_screen
+        from artemis.utils.vision import uses_minimax
+
+        if uses_minimax(self.ctx) and not changes_screen(name):
+            return post_img_bytes
         try:
             obs, screenshot_bytes = await observe(self.ctx, self.controller, settle_ms=0)
         except Exception as shot_err:
@@ -611,11 +631,7 @@ class FlashRunner:
         if not exec_result.screenshot_path and obs.screenshot_path:
             exec_result.screenshot_path = obs.screenshot_path
         if state is not None:
-            if obs.hierarchy_ok:
-                state.indexed_points = [el["center"] for el in obs.elements]
-                state.indexed_elements = obs.elements
-            if obs.screenshot_path:
-                state.latest_screenshot = obs.screenshot_path
+            apply_observation_to_state(state, obs, screenshot_bytes)
         return post_img_bytes
 
     def _extract_normalized_coordinates(self, name: str, args: dict, resolved=None):
@@ -720,7 +736,9 @@ class FlashRunner:
 
             succeeded = exec_result.status == "success"
             last_execution_result = {
-                "status": "dispatched" if succeeded else "failed",
+                "status": "unknown"
+                if exec_result.metadata.get("dispatch_state") == "unknown"
+                else ("dispatched" if succeeded else "failed"),
                 "result": exec_result.text_summary,
             }
             if not succeeded:
@@ -821,7 +839,12 @@ class FlashRunner:
 
             if name in action_names:
                 turn.step_keys.append(str(recorded_step_id) if recorded_step_id else str(tc_id))
-                turn.actions.append((name, exec_result.status, exec_result.text_summary))
+                dispatch_status = (
+                    "unknown"
+                    if exec_result.metadata.get("dispatch_state") == "unknown"
+                    else exec_result.status
+                )
+                turn.actions.append((name, dispatch_status, exec_result.text_summary))
 
             # ⚡ Non-blocking dispatch of objective visual transition summarizer
             if self.summarizer and name in action_names:
@@ -933,10 +956,30 @@ class FlashRunner:
         """
         action_names = self.executor.action_tool_names
         index_elements = self._turn_index_snapshot(state)
+        from artemis.utils.vision import state_version, uses_minimax
+
+        strict = uses_minimax(self.ctx)
+        turn_version = state_version(self.ctx)
+        turn_snapshot = getattr(self.ctx, "_current_snapshot", None)
         for tc in tool_calls:
             name = tc["name"].split(":")[-1] if ":" in tc["name"] else tc["name"]
             args = tc.get("args") or {}
             tc_id = tc.get("id") or str(uuid.uuid4())
+            if strict and (
+                state_version(self.ctx) != turn_version
+                or getattr(self.ctx, "_current_snapshot", None) != turn_snapshot
+            ):
+                messages.append(
+                    ToolMessage(
+                        tool_call_id=tc_id,
+                        name=name,
+                        status="error",
+                        content="Observation changed. Remaining decisions are stale; inspect the new observation before acting or reporting completion.",
+                    )
+                )
+                if name in action_names:
+                    turn.actions.append((name, "error", "Skipped: fresh observation required."))
+                continue
             logger.info(f"Executing Flash tool: {name}({args})")
 
             if name == "report_task_status":

@@ -111,6 +111,9 @@ class Diagnoser:
             *get_history_tools(self.ctx),
             get_submit_answer_tool(self.ctx),
         ]
+        from artemis.tools.web_search import get_web_search_tools
+
+        all_tools.extend(get_web_search_tools(self.ctx, "diagnoser"))
         if not self.is_device_online:
             logger.info(
                 "Diagnoser running in OFFLINE environment: stripping adb short"
@@ -394,12 +397,15 @@ class Diagnoser:
                     state=state,
                 )
                 result_content = get_tool_result_content(result_obj)
+                failed = (
+                    is_tool_failure(result_obj) or getattr(result_obj, "status", None) == "error"
+                )
                 self.ctx.background_jobs[job_id]["result"] = result_content
-                self.ctx.background_jobs[job_id]["status"] = "completed"
+                self.ctx.background_jobs[job_id]["status"] = "failed" if failed else "completed"
                 if self.ctx.data_engine:
                     self.ctx.data_engine.unregister_background_task(
                         task_id=job_id,
-                        status="completed",
+                        status="failed" if failed else "completed",
                     )
             else:
                 self.ctx.background_jobs[job_id]["result"] = "Error: video_analyzer tool not found"
@@ -408,6 +414,13 @@ class Diagnoser:
                     self.ctx.data_engine.unregister_background_task(task_id=job_id, status="failed")
         except asyncio.CancelledError:
             logger.info(f"Background job {job_id} cancelled.")
+            self.ctx.background_jobs[job_id]["result"] = "Video analysis cancelled"
+            self.ctx.background_jobs[job_id]["status"] = "failed"
+            if self.ctx.data_engine:
+                try:
+                    self.ctx.data_engine.unregister_background_task(task_id=job_id, status="failed")
+                except Exception as error:
+                    logger.warning(f"Failed to unregister cancelled video job: {error}")
             raise
         except Exception as e:
             logger.error(f"Background job {job_id} failed: {e}")
@@ -524,6 +537,10 @@ class Diagnoser:
         base_llm = get_llm(ctx=self.ctx, name="diagnoser")
         self._llm = base_llm
         traced_tools = self._build_traced_tools()
+        if any(t.name == "web_search" for t in traced_tools):
+            from artemis.tools.web_search import SEARCH_TOOL_GUIDANCE
+
+            system_prompt += "\n\n" + SEARCH_TOOL_GUIDANCE
 
         plan_and_history = self._build_plan_and_history()
         checker_feedback = self._collect_checker_feedback(state)

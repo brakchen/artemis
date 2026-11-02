@@ -21,8 +21,10 @@ Recording session types and the session registry live in
 import asyncio
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
+from threading import Event
 import re
 import shutil
 import time
@@ -35,6 +37,60 @@ from artemis.utils.cython_compat import CyFunctionDetector
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+async def drain_media_task(task):
+    """Join one owned cleanup/decoder task despite repeated caller cancellation."""
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if task.cancelled():
+                raise
+            cancelled = cancelled or error
+    if cancelled is not None:
+        error = task.exception()
+        if error is not None:
+            logger.debug(f"Media task failed during cancelled drain ({type(error).__name__})")
+        raise cancelled
+    return task.result()
+
+
+async def communicate_process(process) -> tuple[bytes, bytes]:
+    """Finish a media process; cancellation reaps it before scratch is deleted."""
+    try:
+        return await process.communicate()
+    except BaseException:
+
+        async def reap():
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+            try:
+                await asyncio.wait_for(process.communicate(), timeout=2.0)
+            except (TimeoutError, ProcessLookupError):
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+            finally:
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                await process.wait()
+
+        try:
+            await drain_media_task(asyncio.create_task(reap()))
+        except BaseException as cleanup_error:
+            logger.debug(f"Media process cleanup failed ({type(cleanup_error).__name__})")
+        raise
+
 
 ANDROID_RECORDING_SEGMENT_SECONDS = 1800
 # The recording marker closely tracks the first frame; startup measurements
@@ -153,8 +209,8 @@ def _ffprobe_candidates() -> list[Path]:
 
         bundled = Path(imageio_ffmpeg.get_ffmpeg_exe()).parent / executable
         candidates.append(bundled)
-    except Exception:
-        pass
+    except (ImportError, OSError, RuntimeError) as error:
+        logger.debug(f"Bundled ffprobe lookup unavailable: {type(error).__name__}")
     return candidates
 
 
@@ -313,7 +369,7 @@ async def normalize_recording_to_mp4(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _stdout, stderr = await process.communicate()
+        _stdout, stderr = await communicate_process(process)
         if process.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
             return True
 
@@ -358,7 +414,7 @@ async def remux_recording_to_mp4(source_path: Path, output_path: Path) -> bool:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _stdout, stderr = await process.communicate()
+        _stdout, stderr = await communicate_process(process)
         valid = (
             process.returncode == 0
             and temporary_path.exists()
@@ -392,7 +448,7 @@ async def remux_recording_to_mp4(source_path: Path, output_path: Path) -> bool:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _fout, _ferr = await fallback_proc.communicate()
+        _fout, _ferr = await communicate_process(fallback_proc)
         if (
             fallback_proc.returncode == 0
             and temporary_path.exists()
@@ -451,7 +507,7 @@ async def probe_video_segment(video_path: Path) -> dict[str, float | int]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _stderr = await process.communicate()
+        stdout, _stderr = await communicate_process(process)
     except (OSError, FileNotFoundError):
         return _probe_video_segment_with_cv2(video_path)
     if process.returncode != 0:
@@ -492,7 +548,7 @@ async def get_android_display_state(device_id: str) -> tuple[int, int, int] | No
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=3.0)
+        stdout, _stderr = await asyncio.wait_for(communicate_process(process), timeout=3.0)
         text = stdout.decode(errors="replace")
         rotation_match = re.search(r"\bmRotation=(\d+)", text)
         size_match = re.search(r"\bcur=(\d+)x(\d+)", text)
@@ -762,9 +818,7 @@ def _file_piece_units(
         f"fps={fps}",
     ]
     if front_hole:
-        chain.append(
-            f"tpad=start_mode=clone:start_duration={in_window[0] - local_start:.6f}"
-        )
+        chain.append(f"tpad=start_mode=clone:start_duration={in_window[0] - local_start:.6f}")
     # Always clone past the window end as well: ``trim=duration`` only cuts, so
     # without the trailing pad a frame dropped at the piece's end (or a short
     # last burst) leaves the piece up to HOLE_TOLERANCE short and the analyzer's
@@ -865,7 +919,7 @@ async def render_timeline_clip(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _stdout, stderr = await process.communicate()
+        _stdout, stderr = await communicate_process(process)
         if process.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
             if clip_has_frames(output_path):
                 return True
@@ -977,8 +1031,14 @@ def extract_frames_at_timestamps(
     *,
     max_frames: int = 30,
     max_dimension: int = 1080,
+    cancel_event: Event | None = None,
+    deadline: float | None = None,
 ) -> list[tuple[float, bytes]]:
-    """Seek to exact video-relative timestamps and return JPEG evidence frames."""
+    """Sample decoded frames at/after requested times, reporting observed PTS.
+
+    Decode once in timestamp order: OpenCV's millisecond seek uses average FPS
+    for some VFR recordings and can otherwise return a much earlier frame.
+    """
 
     if max_frames <= 0:
         return []
@@ -995,14 +1055,27 @@ def extract_frames_at_timestamps(
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         logger.error(f"Failed to open video file for targeted frame extraction: {video_path}")
+        cap.release()
         return []
 
     frames: list[tuple[float, bytes]] = []
+    observed = -1.0
+    frame = None
     try:
         for timestamp in requested:
-            cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000.0)
-            ret, frame = cap.read()
-            if not ret:
+            while observed + 1e-6 < timestamp:
+                if cancel_event is not None and cancel_event.is_set():
+                    return frames
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("Video frame extraction deadline exceeded")
+                ret, frame = cap.read()
+                if not ret:
+                    return frames
+                observed = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                if not math.isfinite(observed) or observed < 0:
+                    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                    observed = max(0.0, cap.get(cv2.CAP_PROP_POS_FRAMES) - 1) / video_fps
+            if frame is None:
                 continue
             h, w = frame.shape[:2]
             if max(h, w) > max_dimension:
@@ -1014,7 +1087,7 @@ def extract_frames_at_timestamps(
                 )
             encoded, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
             if encoded:
-                frames.append((timestamp, buffer.tobytes()))
+                frames.append((round(observed, 3), buffer.tobytes()))
     finally:
         cap.release()
     return frames

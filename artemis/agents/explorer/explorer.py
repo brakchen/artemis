@@ -24,6 +24,8 @@ The :class:`Explorer` class combines the following modules:
 - ``native_runner``: the native Gemini reasoning loop of ``run``.
 """
 
+from __future__ import annotations
+
 import json
 import os
 from typing import Any, Literal
@@ -51,6 +53,9 @@ from artemis.data_engine.trace import trace
 from artemis.graph.state import State
 from artemis.llm.google import is_gemini_model, strip_provider_prefix
 from artemis.utils.ocr_api import is_ocr_configured
+from artemis.services.llm import get_effective_endpoint
+from artemis.utils.vision import copy_provenance, provenance, uses_minimax
+from artemis.utils.coordinates import normalize_bbox
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -84,6 +89,11 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
         self.ctx = ctx
         self.global_label_idx = 1
         self.width, self.height = FALLBACK_SCREEN_SIZE
+        self.snapshot = None
+        self.detection_registry: dict[str, dict] = {}
+        self._ocr_loaded = False
+        self._ocr_outcome = {}
+        self._base_hierarchy = []
         self.image_name: str | None = None
         self.screenshot_path: str | None = None
         self.image_pool: dict[str, dict[str, Any]] = {}
@@ -115,6 +125,8 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
 
     def _resolve_model_name(self) -> str:
         """Returns the configured Explorer model name without a provider prefix."""
+        if uses_minimax(self.ctx, "explorer"):
+            return get_effective_endpoint(self.ctx, "explorer").model_name
         llm_config = getattr(self.ctx, "llm_config", None)
         llm_cfg = getattr(llm_config, "explorer", None) if llm_config else None
         model = getattr(llm_cfg, "model", None) if llm_cfg else None
@@ -128,6 +140,8 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
         client already shared on the context) the SDK cannot be constructed,
         so such configurations run through the universal LangChain engine.
         """
+        if uses_minimax(self.ctx, "explorer"):
+            return False
         if not is_gemini_model(self.model_name):
             return False
         if getattr(self.ctx, "_genai_client", None) is not None:
@@ -170,7 +184,7 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
         denylist = set(self._user_denylist)
         if tier is not None:
             denylist |= tier.hidden_tools
-        if not is_ocr_configured():
+        if not is_ocr_configured(self.ctx):
             denylist.add("get_ocr_list")
         return denylist
 
@@ -214,7 +228,9 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
         without a configured OCR backend.
         """
         hidden = set(self.denylisted_tools)
-        if not is_ocr_configured():
+        if uses_minimax(self.ctx, "explorer") or uses_minimax(self.ctx):
+            hidden.add("ask_image_processor")
+        if not is_ocr_configured(self.ctx):
             hidden.add("get_ocr_list")
         return hidden
 
@@ -250,18 +266,20 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
     # Label bounds and the structural pre-pass
     # ------------------------------------------------------------------ #
 
-    def _norm_bounds(self, element: ScreenElement) -> list[int] | None:
-        """The element's bounds on the 0-1000 grid, or None when they collapse.
-
-        A box that rounds to zero width or height is useless to the caller's
-        hit test, so it is withheld rather than shipped as a degenerate rect.
-        """
-        left, top, right, bottom = element.bounds
-        n_left, n_top = pixel_to_norm(left, top, self.width, self.height)
-        n_right, n_bottom = pixel_to_norm(right, bottom, self.width, self.height)
-        if n_right <= n_left or n_bottom <= n_top:
+    def _norm_bounds(self, element: ScreenElement) -> list[float] | None:
+        """Normalized edges; MiniMax preserves subpixel bounds and legacy display truncates."""
+        if not uses_minimax(self.ctx, "explorer"):
+            values = [
+                int(max(0, min(1000, v * 1000 / size)))
+                for v, size in zip(
+                    element.bounds, (self.width, self.height, self.width, self.height), strict=True
+                )
+            ]
+            return values if values[2] > values[0] and values[3] > values[1] else None
+        try:
+            return normalize_bbox(element.bounds, self.width, self.height)
+        except ValueError:
             return None
-        return [n_left, n_top, n_right, n_bottom]
 
     def _enrich_candidates(self, candidates: list[Any]) -> list[Any]:
         """Attaches the registered element's bounds to candidates that point at it.
@@ -272,6 +290,8 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
         absorb rounding).  Unknown labels, detection-only labels and points
         outside the element pass through untouched.
         """
+        if uses_minimax(self.ctx, "explorer"):
+            return self._enrich_minimax_candidates(candidates)
         enriched: list[Any] = []
         for cand in candidates:
             element = (
@@ -293,6 +313,82 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
             enriched.append({**cand, "bounds": norm_bounds, "source": element.source})
         return enriched
 
+    def _element_candidate(
+        self, label: str, element: ScreenElement, *, coords=None, description=None
+    ) -> dict:
+        # A visible intersection is safe geometry; only an actually clickable
+        # node is local action evidence. Containment alone is not ancestry.
+        left, t, r, b = element.bounds
+        left, t, r, b = max(0, left), max(0, t), min(self.width, r), min(self.height, b)
+        point = coords or list(pixel_to_norm((left + r) / 2, (t + b) / 2, self.width, self.height))
+        bounds = self._norm_bounds(element)
+        evidence = "unverified"
+        if element.source == "xml" and element.actionable:
+            evidence = "xml_actionable"
+        metadata = copy_provenance(element.metadata)
+        candidate = {
+            "label": label,
+            "coords": point,
+            "description": description or element.text,
+            "bounds": bounds,
+            **provenance(self.snapshot, source=element.source, bbox=bounds, evidence=evidence),
+        }
+        candidate.update(metadata)
+        # The observation and local evidence are always assigned by the program.
+        candidate.update(
+            snapshot=self.snapshot.model_dump(mode="json") if self.snapshot else None,
+            snapshot_id=self.snapshot.capture_id if self.snapshot else None,
+            evidence=evidence,
+            source=element.source,
+            bbox=bounds,
+            bounds=bounds,
+            status="found",
+        )
+        if evidence == "xml_actionable":
+            candidate["actionable_bounds"] = [left, t, r, b]
+        return candidate
+
+    def _enrich_minimax_candidates(self, candidates: list[Any]) -> list[dict]:
+        enriched = []
+        for value in candidates:
+            if not isinstance(value, dict) or not is_valid_norm_point(
+                value.get("coords"), strict=True
+            ):
+                continue
+            label = str(value.get("label") or "")
+            coords = value["coords"]
+            element = self.label_registry.get(label)
+            if element is not None:
+                px, py = norm_to_pixel(*coords, self.width, self.height)
+                if element.contains(px, py):
+                    enriched.append(
+                        self._element_candidate(
+                            label,
+                            element,
+                            coords=coords,
+                            description=str(value.get("description") or element.text),
+                        )
+                    )
+                    continue
+            detected = self.detection_registry.get(label)
+            if (
+                detected is not None
+                and detected["bbox"][0] <= coords[0] <= detected["bbox"][2]
+                and detected["bbox"][1] <= coords[1] <= detected["bbox"][3]
+            ):
+                enriched.append(dict(detected))
+                continue
+            # No model-supplied source/bounds/snapshot/evidence becomes trusted.
+            enriched.append(
+                {
+                    "label": label,
+                    "coords": coords,
+                    "description": str(value.get("description") or label),
+                    **provenance(self.snapshot, source="minimax", evidence="unverified"),
+                }
+            )
+        return enriched
+
     def _structural_prepass(self, query: str) -> tuple[list[dict[str, Any]], list[str]]:
         """Resolves the ``|``-separated parts of ``query`` that exactly name one element.
 
@@ -311,6 +407,13 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
             element = hits[0]
             label = f"T{len(candidates) + 1}"
             self._register_label(label, element)
+            if uses_minimax(self.ctx, "explorer"):
+                candidates.append(
+                    self._element_candidate(
+                        label, element, description=f"{element.text} (exact text match)"
+                    )
+                )
+                continue
             cx, cy = element.center
             candidate: dict[str, Any] = {
                 "label": label,
@@ -382,6 +485,9 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
         self.screenshot_path = screenshot_path
         self.global_label_idx = 1
         self.label_registry = {}
+        self.detection_registry = {}
+        self._ocr_loaded = False
+        self._ocr_outcome = {}
 
         try:
             fused_xml = await self._load_screen(screenshot_path, state, tier)

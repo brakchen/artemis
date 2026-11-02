@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 from typing import Any
 
 from pydantic import BaseModel, Field
 from artemis.utils.cython_compat import CyFunctionDetector
+from artemis.utils.vision import SnapshotRef
 
 
 class ScreenDataResponse(BaseModel):
@@ -26,4 +29,10 @@ class ScreenDataResponse(BaseModel):
     )
     width: int = Field(default=1080, description="Device screen width in pixels")
     height: int = Field(default=2400, description="Device screen height in pixels")
+    device_id: str | None = None
+    display_id: str = "0"
+    rotation: int | None = None
+    capture_valid: bool = True
+    invalid_reason: str | None = None
+    snapshot: SnapshotRef | None = None
     platform: str = Field(default="android", description="Platform identifier")

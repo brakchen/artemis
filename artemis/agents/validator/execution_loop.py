@@ -20,10 +20,13 @@ emitted in the turn:
 * **Vetted single action** (one action): the pre-execution Safety Net runs
   first (XML-first with pixel fallback), then the action executes locally with
   a short retry loop.
-* **Fast-action burst** (two or more actions): the actions fire back to back
+* **Fast-action burst** (two or more legacy actions): the actions fire back to back
   with no safety net, no retries and no screenshots in between. The burst is
   the Operator's tool against turn latency (transient menus, toasts, control
   bars); the Operator owns the risk. The first failure aborts the rest.
+
+MiniMax gates both tiers and ends a burst after its first screen-changing
+dispatch. Only confirmed pre-dispatch failures can be retried.
 
 Either way, a failure does not spawn a repair agent. The loop opens an
 *execution incident* (:mod:`artemis.agents.validator.incidents`) that rides in
@@ -39,6 +42,7 @@ are dispatched through the node so existing test patches keep working.
 import asyncio
 import base64
 from dataclasses import dataclass
+from pathlib import Path
 import time
 import uuid
 from uuid import UUID
@@ -51,6 +55,16 @@ from artemis.agents.validator.incidents import (
 )
 from artemis.data_engine.trace import CURRENT_TRACE_ID
 from artemis.graph.state import State
+from artemis.mcp.action_types import DispatchState
+from artemis.mcp.target_guard import (
+    changes_screen,
+    decision_snapshot,
+    guard_target,
+    snapshot_error,
+    canonical_target_action,
+)
+from artemis.mcp.observation import apply_observation_to_state
+from artemis.utils.vision import uses_minimax
 from artemis.utils.coordinates import normalize_action_dict
 from artemis.utils.task_tree import format_action_clean
 from third_party.mobile_use.utils.logger import get_logger
@@ -77,6 +91,52 @@ async def _run_precondition_gate(
     node, session, action_item: dict, state: State, pre_screenshot_b64: str, original_coords: list
 ) -> tuple[bool, ValidationErrorCategory, str]:
     """Runs the pre-execution Safety Net: XML-first with pixel fallback."""
+    if uses_minimax(node.ctx):
+        from artemis.agents.validator.validator import get_llm
+
+        if not changes_screen(action_item.get("action")):
+            return True, ValidationErrorCategory.NONE, ""
+        if not action_item.get("coordinates"):
+            if action_item.get("action") in {
+                "tap",
+                "long_press_on",
+                "focus_and_input_text",
+                "focus_and_clear_text",
+            }:
+                return False, ValidationErrorCategory.GENERAL, "Target coordinates are missing."
+            expected = action_item.get("snapshot")
+            error = snapshot_error(node.ctx, expected) if expected is not None else None
+            return (
+                not error,
+                ValidationErrorCategory.GENERAL if error else ValidationErrorCategory.NONE,
+                error or "",
+            )
+        error = snapshot_error(node.ctx, action_item.get("snapshot"))
+        if error:
+            return False, ValidationErrorCategory.GENERAL, error
+        try:
+            target_action = canonical_target_action(node.ctx, action_item)
+        except ValueError as error:
+            return False, ValidationErrorCategory.GENERAL, str(error)
+        if action_item.get("direction") and not action_item.get("source"):
+            error = snapshot_error(node.ctx, action_item.get("snapshot"))
+            return (
+                not error,
+                ValidationErrorCategory.GENERAL if error else ValidationErrorCategory.NONE,
+                error or "",
+            )
+        verdict = await guard_target(
+            node.ctx, session, target_action, state, pre_screenshot_b64, get_llm_fn=get_llm
+        )
+        if "precondition_outcome" in target_action:
+            action_item["precondition_outcome"] = target_action["precondition_outcome"]
+        return (
+            verdict.allowed,
+            ValidationErrorCategory.NONE
+            if verdict.allowed
+            else ValidationErrorCategory.PIXEL_TARGET_DISAPPEARED,
+            verdict.reason,
+        )
     is_explorer_candidate = action_item.get("target_class") == "ExplorerCandidate"
     is_ocr_element = "[OCR]" in str(action_item.get("target_class") or "")
     has_index_metadata = bool(
@@ -135,10 +195,21 @@ async def _attempt_local_execution(
     error_msg = ""
     for attempt in range(max_local_retries):
         try:
-            exec_success, exec_error = await node._exec_action(session, action_item)
+            result = await node._exec_action(session, action_item)
+            exec_success, exec_error = result
+            dispatch = getattr(
+                result,
+                "dispatch_state",
+                DispatchState.DISPATCHED if exec_success else DispatchState.UNKNOWN,
+            )
         except Exception as e:
             exec_success = False
             exec_error = str(e)
+            dispatch = DispatchState.UNKNOWN
+
+        strict = uses_minimax(node.ctx)
+        if strict:
+            action_item["dispatch_state"] = dispatch.value
 
         # No effect polling: "dispatched" only says the device accepted the
         # command; whether it had the intended effect is the Operator's call.
@@ -151,6 +222,9 @@ async def _attempt_local_execution(
             success = False
             error_msg = exec_error
             attempts_log.append(error_msg)
+
+        if strict and dispatch is not DispatchState.NOT_DISPATCHED:
+            break
 
         if attempt < max_local_retries - 1:
             await asyncio.sleep(0.5)
@@ -178,11 +252,14 @@ async def _process_action(
 ) -> _ActionOutcome:
     """Runs precondition checks (vetted tier only) and execution for one action item."""
     action_item = dict(action_item)  # Make a copy to avoid mutating original state actions
+    strict = uses_minimax(node.ctx)
+    if strict and "snapshot" not in action_item and not action_item.get("coordinates"):
+        action_item["snapshot"] = decision_snapshot(state)
     outcome = _ActionOutcome(action_item=action_item)
     attempts_log = []
 
     validation_passed = True
-    if not burst:
+    if not burst or strict:
         # 1. Pre-execution validation (Safety Net)
         original_coords = list(action_item.get("coordinates") or [])
         (
@@ -193,6 +270,8 @@ async def _process_action(
             node, session, action_item, state, pre_screenshot_b64, original_coords
         )
         if not validation_passed:
+            if strict:
+                action_item["dispatch_state"] = DispatchState.NOT_DISPATCHED.value
             outcome.success = False
             outcome.intercepted = True
             outcome.error_msg = f"Pre-execution validation failed: {validation_error}"
@@ -215,7 +294,7 @@ async def _process_action(
             max_local_retries=max_local_retries,
         )
 
-    if not outcome.success:
+    if not outcome.success and not strict:
         logger.info("Action failed, capturing failure screenshot...")
         outcome.post_screenshot_b64 = await _capture_live_screenshot(session, "failure screenshot")
 
@@ -418,6 +497,22 @@ async def run_validation_loop(node, state: State) -> dict:
             success = outcome.success
             execution.append(outcome.action_item)
 
+            if uses_minimax(ctx) and (
+                not success
+                or (
+                    changes_screen(action_name)
+                    and outcome.action_item.get("dispatch_state") in ("dispatched", "unknown")
+                )
+            ):
+                # A command acknowledgment does not prove the intended goal.
+                # Renew decision provenance, including recovery from unknown.
+                obs = await session.observe(settle_ms=400)
+                if obs.ok:
+                    image_bytes = (
+                        Path(obs.screenshot_path).read_bytes() if obs.screenshot_path else None
+                    )
+                    apply_observation_to_state(state, obs, image_bytes)
+
             post_image_name = None
             if outcome.post_screenshot_b64:
                 post_image_name = _absorb_post_screenshot(ctx, state, outcome.post_screenshot_b64)
@@ -447,6 +542,12 @@ async def run_validation_loop(node, state: State) -> dict:
                 f" consecutive={incident['consecutive_failures']}) for the Operator."
             )
             break
+        if (
+            uses_minimax(ctx)
+            and changes_screen(action_name)
+            and outcome.action_item.get("dispatch_state") == "dispatched"
+        ):
+            break  # Remaining decisions were made before this screen-changing command.
         index += 1
 
     # Append any skipped actions to the execution log
@@ -457,7 +558,9 @@ async def run_validation_loop(node, state: State) -> dict:
 
     report = {
         "execution": execution,
-        "status": "dispatched" if success else "failed",
+        "status": "unknown"
+        if any(item.get("dispatch_state") == "unknown" for item in execution)
+        else ("dispatched" if success else "failed"),
         "burst": burst,
         "incident": incident,
     }

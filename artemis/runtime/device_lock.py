@@ -26,6 +26,8 @@ import time
 from typing import Any
 import uuid
 
+from filelock import FileLock, Timeout as FileLockTimeout
+
 from artemis.config.paths import get_temp_dir
 from artemis.runtime.process_probe import pid_is_alive
 
@@ -213,15 +215,24 @@ class DeviceExecutionLock:
         return pid_is_alive(owner.pid, owner.process_created_at)
 
     @staticmethod
-    def _read_owner(path: Path) -> DeviceLockOwner | None:
+    def _read_owner(path: Path, *, raise_on_io_error: bool = False) -> DeviceLockOwner | None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             return DeviceLockOwner.from_dict(payload)
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        except OSError:
+            if raise_on_io_error:
+                raise
+            return None
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
             return None
 
     def _remove_stale_lock(self) -> bool:
-        owner = self._read_owner(self.path)
+        try:
+            owner = self._read_owner(self.path, raise_on_io_error=True)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
         if owner is not None:
             if self._owner_is_alive(owner):
                 return False
@@ -333,10 +344,20 @@ class DeviceExecutionLock:
         ticket sorts ahead of every younger ticket for that device.
         """
         entries: list[tuple[Path, str | None]] = []
+        unreadable_entries: list[Path] = []
         known_lock_ids: set[str] = set()
         for wait_path in wait_files:
-            owner = cls._read_owner(wait_path)
+            try:
+                owner = cls._read_owner(wait_path, raise_on_io_error=True)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                owner = None
             if owner is None:
+                # A publishing/replaced ticket can be temporarily unreadable.
+                # Its target is unknown, so retain its FIFO position until a
+                # later scan can route it or stale-ticket cleanup removes it.
+                unreadable_entries.append(wait_path)
                 continue
             if cls._normalize_device_id(owner.device_id) in ("pending", "any"):
                 if cls._ticket_targets_device(
@@ -369,11 +390,14 @@ class DeviceExecutionLock:
                 parked[wait_path] = idle_candidates[next_candidate]
                 next_candidate += 1
 
-        return [
-            wait_path
-            for wait_path, lock_id in entries
-            if lock_id == target_lock_id or parked.get(wait_path) == target_lock_id
-        ]
+        return sorted(
+            unreadable_entries
+            + [
+                wait_path
+                for wait_path, lock_id in entries
+                if lock_id == target_lock_id or parked.get(wait_path) == target_lock_id
+            ]
+        )
 
     @classmethod
     def reserve(
@@ -384,8 +408,13 @@ class DeviceExecutionLock:
         session_id: str | None = None,
         ingress: str | None = None,
         lock_scope: str | None = None,
+        _blocking: bool = True,
+        _deadline: float | None = None,
+        _poll_interval: float = _DEFAULT_POLL_INTERVAL_SECONDS,
+        _cancel_event=None,
     ) -> str:
         """Reserve a FIFO position in the global queue before a worker process is spawned."""
+        cls._check_queue_wait(deadline=_deadline, cancel_event=_cancel_event)
         token = uuid.uuid4().hex
         queue_dir = get_temp_dir("device-locks") / "artemis-global-device.queue"
         queue_dir.mkdir(parents=True, exist_ok=True)
@@ -397,34 +426,138 @@ class DeviceExecutionLock:
             ingress=ingress,
             lock_scope=lock_scope or os.getenv(cls.LOCK_SCOPE_ENV) or None,
         )
-        for _ in range(8):
-            path = queue_dir / f"{time.time_ns():020d}-{token}.wait"
-            try:
-                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                continue
-            else:
+        # filelock 3.32.3 (MIT), https://py-filelock.readthedocs.io/: use the
+        # native cross-process lock only for admission, never while waiting to run.
+        # The marker lives inside the queue, outside both owner and *.wait scans.
+        admission = FileLock(queue_dir / ".admission.lock", mode=0o600, preserve_lock_file=True)
+        remaining = max(0.0, _deadline - time.monotonic()) if _deadline is not None else -1
+        try:
+            admission.acquire(
+                blocking=_blocking,
+                timeout=remaining,
+                poll_interval=min(max(0.01, _poll_interval), remaining)
+                if remaining > 0
+                else max(0.01, _poll_interval),
+                cancel_check=_cancel_event.is_set if _cancel_event is not None else None,
+            )
+        except FileLockTimeout as exc:
+            cls._check_queue_wait(deadline=_deadline, cancel_event=_cancel_event)
+            raise DeviceBusyError("The Artemis device queue admission is busy.") from exc
+        published_path: Path | None = None
+        body_error: BaseException | None = None
+        try:
+            # FileLock checks its controls after a failed native attempt. If a
+            # holder released late, reject the acquired lock before publication.
+            cls._check_queue_wait(deadline=_deadline, cancel_event=_cancel_event)
+            for _ in range(8):
+                prefixes = (
+                    int(prefix)
+                    for path in queue_dir.iterdir()
+                    if path.name.endswith(".wait")
+                    for prefix, separator, candidate in [path.stem.partition("-")]
+                    if separator and prefix.isdecimal() and candidate
+                )
+                # Wall time can stall or rewind. Existing tickets define the
+                # next position; UUIDs identify owners, not their FIFO order.
+                position = max(time.time_ns(), max(prefixes, default=-1) + 1)
+                path = queue_dir / f"{position:020d}-{token}.wait"
+                temp_path = path.with_suffix(".tmp")
                 try:
-                    os.write(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-                finally:
-                    os.close(fd)
+                    fd = os.open(temp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except FileExistsError:
+                    continue
+                try:
+                    try:
+                        remaining = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                        while remaining:
+                            written = os.write(fd, remaining)
+                            if written <= 0:
+                                raise OSError("Could not write the Artemis queue reservation.")
+                            remaining = remaining[written:]
+                    except BaseException as write_error:
+                        try:
+                            os.close(fd)
+                        except OSError as close_error:
+                            write_error.add_note(
+                                f"Could not close the unpublished Artemis queue ticket: {close_error}"
+                            )
+                        raise
+                    else:
+                        os.close(fd)
+                    cls._check_queue_wait(deadline=_deadline, cancel_event=_cancel_event)
+                    os.replace(temp_path, path)
+                except BaseException as exc:
+                    if not cls._safe_unlink(temp_path):
+                        exc.add_note(
+                            "Could not remove the unpublished Artemis queue reservation temp file."
+                        )
+                    raise
+                published_path = path
                 return token
-        raise DeviceBusyError("Could not reserve a position in the Artemis device queue.")
+            raise DeviceBusyError("Could not reserve a position in the Artemis device queue.")
+        except BaseException as exc:
+            body_error = exc
+            raise
+        finally:
+            try:
+                admission.release()
+            except BaseException as release_error:
+                if body_error is not None:
+                    # Keep the body's original object, traceback and cause;
+                    # a native exit report must not replace that failure.
+                    body_error.add_note(
+                        f"Could not release the Artemis device queue admission: {release_error}"
+                    )
+                else:
+                    # The caller does not receive its token until release also
+                    # succeeds, so reserve still owns any published ticket here.
+                    if published_path is not None:
+                        try:
+                            removed = cls._safe_unlink(published_path)
+                        except OSError as cleanup_error:
+                            release_error.add_note(
+                                "Could not remove the published Artemis queue reservation "
+                                f"after admission release failed: {cleanup_error}"
+                            )
+                        else:
+                            if not removed:
+                                release_error.add_note(
+                                    "Could not remove the published Artemis queue reservation "
+                                    "after admission release failed; its ticket remains pending."
+                                )
+                    raise
+
+    @staticmethod
+    def _check_queue_wait(*, deadline: float | None = None, cancel_event=None) -> None:
+        """Apply the acquire caller's shared deadline and cancellation at wait boundaries."""
+        if cancel_event is not None and cancel_event.is_set():
+            raise DeviceBusyError("Waiting for the Artemis device queue was cancelled.")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise DeviceBusyError("Timed out waiting for the Artemis device queue.")
+
+    @classmethod
+    def _reservation_paths(cls, token: str | None) -> list[Path]:
+        """Find top-level tickets by their complete literal token, never a glob."""
+        if not token or "/" in token or "\\" in token:
+            return []
+        queue_dir = get_temp_dir("device-locks") / "artemis-global-device.queue"
+        matches = []
+        for path in queue_dir.glob("*.wait"):
+            timestamp, separator, candidate = path.stem.partition("-")
+            if separator and timestamp.isdecimal() and candidate == token:
+                matches.append(path)
+        return matches
 
     @classmethod
     def cancel_reservation(cls, token: str | None) -> bool:
         """Remove a pending queue ticket. Active execution leases are untouched."""
-        if not token:
-            return False
-        queue_dir = get_temp_dir("device-locks") / "artemis-global-device.queue"
         removed = False
-        if queue_dir.exists():
-            for path in queue_dir.glob(f"*-{token}.wait"):
-                try:
-                    path.unlink(missing_ok=True)
-                    removed = True
-                except OSError:
-                    pass
+        for path in cls._reservation_paths(token):
+            try:
+                path.unlink(missing_ok=True)
+                removed = True
+            except OSError:
+                pass
         return removed
 
     @classmethod
@@ -440,11 +573,7 @@ class DeviceExecutionLock:
         lock_scope: str | None = None,
     ) -> bool:
         """Transfer a submission ticket to its worker process."""
-        queue_dir = get_temp_dir("device-locks") / "artemis-global-device.queue"
-        if not queue_dir.exists():
-            return False
-        matches = list(queue_dir.glob(f"*-{token}.wait"))
-        path = min(matches, default=None)
+        path = min(cls._reservation_paths(token), default=None)
         if path is None:
             return False
         try:
@@ -471,12 +600,17 @@ class DeviceExecutionLock:
         return cls._atomic_write_json(path, payload)
 
     def _find_reserved_ticket(self) -> Path | None:
-        if not self.queue_ticket:
-            return None
-        matches = list(self.queue_dir.glob(f"*-{self.queue_ticket}.wait"))
-        return min(matches, default=None)
+        return min(self._reservation_paths(self.queue_ticket), default=None)
 
-    def _claim_or_create_queue_ticket(self) -> Path:
+    def _claim_or_create_queue_ticket(
+        self,
+        *,
+        blocking: bool = True,
+        deadline: float | None = None,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL_SECONDS,
+        cancel_event=None,
+    ) -> Path:
+        self._check_queue_wait(deadline=deadline, cancel_event=cancel_event)
         self.queue_dir.mkdir(parents=True, exist_ok=True)
         if self.queue_ticket:
             path = self._find_reserved_ticket()
@@ -504,6 +638,10 @@ class DeviceExecutionLock:
             session_id=self.session_id,
             ingress=self.ingress,
             lock_scope=self.lock_scope,
+            _blocking=blocking,
+            _deadline=deadline,
+            _poll_interval=poll_interval,
+            _cancel_event=cancel_event,
         )
         path = self._find_reserved_ticket()
         if path is None:
@@ -517,7 +655,10 @@ class DeviceExecutionLock:
         for path in self.queue_dir.glob("*.wait"):
             if self._queue_path is not None and path == self._queue_path:
                 continue
-            owner = self._read_owner(path)
+            try:
+                owner = self._read_owner(path, raise_on_io_error=True)
+            except OSError:
+                continue
             if owner is not None and self._owner_is_alive(owner):
                 continue
             if owner is None:
@@ -608,13 +749,21 @@ class DeviceExecutionLock:
         cancel_event=None,
     ) -> None:
         """Wait in FIFO order and acquire exclusive access to the target Artemis device."""
-        self._queue_path = self._claim_or_create_queue_ticket()
-        started_at = time.monotonic()
-        effective_concurrency = self.effective_concurrency
         try:
+            started_at = time.monotonic()
+            # timeout=0 retains the existing one immediate eligibility attempt.
+            # Admission must still be nonblocking rather than wait there.
+            deadline = started_at + timeout if timeout is not None and timeout > 0 else None
+            self._check_queue_wait(deadline=deadline, cancel_event=cancel_event)
+            self._queue_path = self._claim_or_create_queue_ticket(
+                blocking=blocking and (timeout is None or timeout > 0),
+                deadline=deadline,
+                poll_interval=poll_interval,
+                cancel_event=cancel_event,
+            )
+            effective_concurrency = self.effective_concurrency
             while True:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise DeviceBusyError("Waiting for the Artemis device queue was cancelled.")
+                self._check_queue_wait(deadline=deadline, cancel_event=cancel_event)
                 self._remove_stale_queue_entries()
 
                 if not self._queue_path.exists():
@@ -622,7 +771,24 @@ class DeviceExecutionLock:
 
                 # 1. Check global concurrency limit if configured (> 0)
                 if effective_concurrency > 0:
-                    active_owners = self.get_active_owners()
+                    try:
+                        active_owners = self.get_active_owners(strict=True)
+                    except (OSError, DeviceBusyError) as exc:
+                        if not blocking:
+                            raise DeviceBusyError(
+                                "Could not verify the global task concurrency slot: "
+                                "an Artemis device owner record is unreadable."
+                            ) from exc
+                        if timeout is not None and time.monotonic() - started_at >= timeout:
+                            raise DeviceBusyError(
+                                f"Timed out waiting for a concurrency slot after {timeout:.1f}s."
+                            ) from exc
+                        time.sleep(
+                            max(0.0, min(max(0.01, poll_interval), deadline - time.monotonic()))
+                            if deadline is not None
+                            else max(0.01, poll_interval)
+                        )
+                        continue
                     active_other_owners = [
                         o
                         for o in active_owners.values()
@@ -648,14 +814,17 @@ class DeviceExecutionLock:
                             raise DeviceBusyError(
                                 f"Timed out waiting for a concurrency slot after {timeout:.1f}s."
                             )
-                        time.sleep(max(0.01, poll_interval))
+                        time.sleep(
+                            max(0.0, min(max(0.01, poll_interval), deadline - time.monotonic()))
+                            if deadline is not None
+                            else max(0.01, poll_interval)
+                        )
                         continue
 
                 # 2. Determine FIFO eligibility for this specific device
                 all_wait_files = sorted(self.queue_dir.glob("*.wait"))
                 if effective_concurrency == 1:
                     # In strict serial mode, global FIFO applies; re-entrant parent processes are always eligible
-                    active_owners = self.get_active_owners()
                     is_reentrant = any(
                         o.pid == os.getpid()
                         and (
@@ -679,6 +848,7 @@ class DeviceExecutionLock:
                     )
                     is_eligible = bool(device_queue and device_queue[0] == self._queue_path)
 
+                self._check_queue_wait(deadline=deadline, cancel_event=cancel_event)
                 if is_eligible and self._try_acquire_owner_lock():
                     self._safe_unlink(self._queue_path)
                     self._queue_path = None
@@ -698,13 +868,36 @@ class DeviceExecutionLock:
                     raise DeviceBusyError(
                         f"Timed out waiting for the Artemis device queue after {timeout:.1f}s."
                     )
-                time.sleep(max(0.01, poll_interval))
-        except BaseException:
+                time.sleep(
+                    max(0.0, min(max(0.01, poll_interval), deadline - time.monotonic()))
+                    if deadline is not None
+                    else max(0.01, poll_interval)
+                )
+        except BaseException as exc:
             if self._queue_path is not None:
-                self._safe_unlink(self._queue_path)
+                if not self._safe_unlink(self._queue_path):
+                    exc.add_note(
+                        "Could not cancel the failed Artemis queue reservation; "
+                        "its ticket remains pending."
+                    )
                 self._queue_path = None
-                if not self._initial_queue_ticket:
-                    self.queue_ticket = None
+            elif self.queue_ticket:
+                # Claim can fail before returning its path. The caller handed
+                # this lock the token, so terminal failure must release that
+                # reservation even while its recorded PID is still alive.
+                try:
+                    cancelled = self.cancel_reservation(self.queue_ticket)
+                    if not cancelled and self._find_reserved_ticket() is not None:
+                        exc.add_note(
+                            "Could not cancel the failed Artemis queue reservation; "
+                            "its ticket remains pending."
+                        )
+                except OSError as cleanup_error:
+                    exc.add_note(
+                        f"Could not cancel the failed Artemis queue reservation: {cleanup_error}"
+                    )
+            if not self._initial_queue_ticket:
+                self.queue_ticket = None
             raise
 
     def release(self) -> None:
@@ -726,10 +919,22 @@ class DeviceExecutionLock:
             self._acquired = False
 
     @classmethod
-    def _get_active_owner_for_path(cls, path: Path) -> DeviceLockOwner | None:
+    def _get_active_owner_for_path(
+        cls, path: Path, *, strict: bool = False
+    ) -> DeviceLockOwner | None:
         owner = None
         for attempt in range(3):
-            owner = cls._read_owner(path)
+            try:
+                owner = cls._read_owner(path, raise_on_io_error=True)
+            except FileNotFoundError:
+                return None
+            except OSError:
+                if strict:
+                    raise
+                if attempt < 2:
+                    time.sleep(0.01)
+                    continue
+                return None
             if owner is not None or not path.exists():
                 break
             if attempt < 2:
@@ -741,8 +946,11 @@ class DeviceExecutionLock:
                     and time.time() - path.stat().st_mtime >= cls._MALFORMED_LOCK_GRACE_SECONDS
                 ):
                     cls._safe_unlink(path)
+                if strict and path.exists():
+                    raise DeviceBusyError("An Artemis device owner record is not readable yet.")
             except OSError:
-                pass
+                if strict:
+                    raise
             return None
         if cls._owner_is_alive(owner):
             return owner
@@ -750,8 +958,12 @@ class DeviceExecutionLock:
         return None
 
     @classmethod
-    def get_active_owners(cls) -> dict[str, DeviceLockOwner]:
-        """Return a mapping of clean_device_id -> live DeviceLockOwner across all devices."""
+    def get_active_owners(cls, *, strict: bool = False) -> dict[str, DeviceLockOwner]:
+        """Return clean_device_id -> live owner, optionally rejecting unknown capacity.
+
+        Listings tolerate unreadable records; execution uses ``strict=True``
+        so an owner being published or replaced cannot appear to free a slot.
+        """
         lock_dir = get_temp_dir("device-locks")
         if not lock_dir.exists():
             return {}
@@ -759,7 +971,7 @@ class DeviceExecutionLock:
         seen_tokens: set[str] = set()
 
         for lock_path in sorted(lock_dir.glob("artemis-device-*.lock")):
-            owner = cls._get_active_owner_for_path(lock_path)
+            owner = cls._get_active_owner_for_path(lock_path, strict=strict)
             if owner is not None and owner.token not in seen_tokens:
                 owners.append(owner)
                 seen_tokens.add(owner.token)
@@ -767,7 +979,7 @@ class DeviceExecutionLock:
         # Also check legacy global lock if still present
         global_lock = lock_dir / "artemis-global-device.lock"
         if global_lock.exists():
-            owner = cls._get_active_owner_for_path(global_lock)
+            owner = cls._get_active_owner_for_path(global_lock, strict=strict)
             if owner is not None and owner.token not in seen_tokens:
                 owners.append(owner)
                 seen_tokens.add(owner.token)
@@ -981,7 +1193,10 @@ class DeviceExecutionLock:
                 if path in seen_paths:
                     continue
                 seen_paths.add(path)
-                owner = cls._read_owner(path)
+                try:
+                    owner = cls._read_owner(path, raise_on_io_error=True)
+                except OSError:
+                    continue
                 if owner is not None and cls._owner_is_alive(owner):
                     continue
                 if owner is None:
@@ -996,7 +1211,10 @@ class DeviceExecutionLock:
         for q_dir in lock_dir.glob("*.queue"):
             if q_dir.is_dir():
                 for path in q_dir.glob("*.wait"):
-                    owner = cls._read_owner(path)
+                    try:
+                        owner = cls._read_owner(path, raise_on_io_error=True)
+                    except OSError:
+                        continue
                     if owner is not None and cls._owner_is_alive(owner):
                         continue
                     if owner is None:

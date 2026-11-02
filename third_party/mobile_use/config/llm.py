@@ -24,7 +24,7 @@ from typing import Any, Literal
 
 import google.auth
 from google.auth.exceptions import DefaultCredentialsError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, model_validator
 
 from artemis.config.constants import AgentNode, LLMProvider, LLMUtilsNode
 from artemis.utils.cython_compat import CyFunctionDetector
@@ -62,15 +62,38 @@ def validate_vertex_ai_credentials() -> None:
 class LLM(BaseModel):
     """Base model representing an LLM model provider and runtime parameters."""
 
-    model_config = {"ignored_types": (CyFunctionDetector,)}
+    model_config = {
+        "ignored_types": (CyFunctionDetector,),
+        "extra": "forbid",
+        "hide_input_in_errors": True,
+    }
     provider: LLMProvider
     model: str
     temperature: float | None = None
+    max_tokens: int | None = Field(default=None, strict=True, gt=0)
+    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    thinking_mode: Literal["adaptive", "disabled"] | None = None
     thinking_budget: int | None = None
     thinking_level: Literal["minimal", "low", "medium", "high"] | None = None
-    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
     include_thoughts: bool | None = None
     enable_grounding: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_timeout(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "timeout" in value:
+            value = dict(value)
+            timeout = value.pop("timeout")
+            if "timeout_seconds" in value and value["timeout_seconds"] != timeout:
+                raise ValueError("timeout and timeout_seconds conflict")
+            value["timeout_seconds"] = timeout
+        return value
+
+    @property
+    def timeout(self) -> float | None:
+        """Compatibility read alias; timeout_seconds owns the stored setting."""
+        return self.timeout_seconds
 
     def validate_provider(self, name: str) -> None:
         """Ensure this node's provider can authenticate a request.
@@ -109,7 +132,10 @@ class LLMWithFallback(LLM):
 
     fallback: LLM
     fix_model: str | None = None
-    timeout: float | None = None
+
+    def validate_provider(self, name: str) -> None:
+        super().validate_provider(name)
+        self.fallback.validate_provider(f"{name} fallback")
 
     def __str__(self) -> str:
         return f"{self.provider}/{self.model} (fallback: {self.fallback})"
@@ -118,7 +144,11 @@ class LLMWithFallback(LLM):
 class LLMConfigUtils(BaseModel):
     """Configuration container for auxiliary utility agents/nodes."""
 
-    model_config = {"ignored_types": (CyFunctionDetector,)}
+    model_config = {
+        "ignored_types": (CyFunctionDetector,),
+        "extra": "forbid",
+        "hide_input_in_errors": True,
+    }
     outputter: LLMWithFallback
     hopper: LLMWithFallback
     video_analyzer: LLMWithFallback | None = None
@@ -128,7 +158,11 @@ class LLMConfigUtils(BaseModel):
 class LLMConfigBase(BaseModel):
     """Base LLM configuration: planner, utility nodes and their accessors."""
 
-    model_config = {"ignored_types": (CyFunctionDetector,)}
+    model_config = {
+        "ignored_types": (CyFunctionDetector,),
+        "extra": "forbid",
+        "hide_input_in_errors": True,
+    }
     planner: LLMWithFallback
     utils: LLMConfigUtils
 
@@ -178,8 +212,7 @@ def load_llm_config_override[C: LLMConfigBase](
 ) -> C:
     """Merge the JSON/JSONC overrides at ``path`` onto the default config.
 
-    Falls back to the default config when the file is missing or the merged
-    config is invalid.
+    An explicitly selected override must exist and be valid.
     """
     default_config = get_default()
 
@@ -189,11 +222,5 @@ def load_llm_config_override[C: LLMConfigBase](
         with open(path, encoding="utf-8") as f:
             override_config_dict = load_jsonc(f)
     else:
-        logger.warning(f"Custom LLM config not found at {path} - using default config")
-
-    try:
-        return merge(default_config, override_config_dict)
-    except ValidationError as e:
-        logger.error(f"Invalid LLM config: {e}")
-        logger.info("Falling back to default config")
-        return default_config
+        raise FileNotFoundError(f"Custom LLM config not found at {path}")
+    return merge(default_config, override_config_dict)

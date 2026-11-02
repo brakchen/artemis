@@ -22,10 +22,10 @@ Anthropic, OpenRouter, and local Ollama/vLLM endpoints.
 from enum import StrEnum
 import hashlib
 import os
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from artemis.config.settings import settings
 from artemis.llm.google.provider import supports_thinking_level
@@ -87,13 +87,17 @@ class ModelProvider(StrEnum):
 class ModelEndpoint(BaseModel):
     """Configuration definition for an LLM/VLM model endpoint."""
 
+    model_config = {"hide_input_in_errors": True}
     provider: ModelProvider = Field(default=ModelProvider.GOOGLE, description="Model provider")
     model_name: str = Field(default="gemini-2.5-flash", description="Model name identifier")
-    api_key: str | None = Field(default=None, description="API Key or secret")
+    api_key: str | None = Field(default=None, repr=False, exclude=True)
+    vendor: Literal["minimax"] | None = None
+    registry_name: str | None = None
     api_base: str | None = Field(default=None, description="Custom API endpoint base URL")
     temperature: float = Field(default=0.0, description="Sampling temperature")
-    max_tokens: int | None = Field(default=None, description="Maximum completion tokens")
-    timeout_seconds: float = Field(default=60.0, description="Request timeout in seconds")
+    max_tokens: int | None = Field(default=None, strict=True, gt=0)
+    timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
+    thinking_mode: Literal["adaptive", "disabled"] | None = None
     is_multimodal: bool = Field(
         default=True, description="Whether endpoint accepts image/video inputs"
     )
@@ -112,6 +116,40 @@ class ModelEndpoint(BaseModel):
         description="Whether to enable Google Search grounding for Gemini endpoints",
     )
 
+    @model_validator(mode="after")
+    def _minimax_parameters(self) -> "ModelEndpoint":
+        if self.vendor != "minimax":
+            return self
+        if self.provider != ModelProvider.ANTHROPIC:
+            raise ValueError("MiniMax requires the Anthropic transport")
+        if not self.api_key or not self.api_key.strip() or not self.api_base:
+            raise ValueError("MiniMax requires explicit endpoint api_key and api_base")
+        model = self.model_name.lower()
+        if model == "minimax-m3.1-flash":
+            if self.thinking_mode == "disabled":
+                raise ValueError("MiniMax-M3.1-Flash thinking cannot be disabled")
+            self.thinking_mode = "adaptive"
+            if self.reasoning_effort is None:
+                self.reasoning_effort = "medium"
+            if self.reasoning_effort not in {"low", "medium", "high", "xhigh", "max"}:
+                raise ValueError("MiniMax-M3.1-Flash effort must be low/medium/high/xhigh/max")
+            if self.max_tokens is None:
+                self.max_tokens = 8192
+        elif model == "minimax-m3":
+            if self.reasoning_effort is not None:
+                raise ValueError("MiniMax-M3 effort support is not verified")
+            self.thinking_mode = self.thinking_mode or "disabled"
+            if self.max_tokens is None:
+                self.max_tokens = 8192
+        elif self.thinking_mode is not None or self.reasoning_effort is not None:
+            raise ValueError(f"Thinking/effort support is not verified for {self.model_name}")
+        # Google thinking controls and sampling are ignored by this vendor.
+        self.thinking_budget = None
+        self.thinking_level = None
+        self.include_thoughts = None
+        self.temperature = 0.0
+        return self
+
     def cache_key(self) -> tuple:
         """Key the client cache by endpoint settings, hashing the API key."""
         api_key_digest = (
@@ -119,11 +157,14 @@ class ModelEndpoint(BaseModel):
         )
         return (
             self.provider.value,
+            self.vendor,
+            self.registry_name,
             self.model_name,
             self.temperature,
             self.max_tokens,
             self.timeout_seconds,
             self.thinking_budget,
+            self.thinking_mode,
             self.thinking_level,
             self.include_thoughts,
             self.reasoning_effort,
@@ -131,6 +172,11 @@ class ModelEndpoint(BaseModel):
             self.api_base,
             api_key_digest,
         )
+
+    def identity_key(self) -> str:
+        """Isolate capability/reliability state without exposing credentials."""
+        digest = hashlib.sha256(repr(self.cache_key()).encode()).hexdigest()[:24]
+        return f"{self.vendor or self.provider.value}:{self.model_name}:{digest}"
 
 
 def _patch_langchain_google_genai():
@@ -306,6 +352,26 @@ class ModelFactory:
         elif provider == ModelProvider.ANTHROPIC:
             from langchain_anthropic import ChatAnthropic
 
+            if endpoint.vendor == "minimax":
+                from artemis.llm.minimax_media import MiniMaxChatAnthropic
+
+                # langchain-anthropic 1.5.6 (MIT), official ChatAnthropic API:
+                # https://reference.langchain.com/python/langchain-anthropic/chat_models/ChatAnthropic
+                # Keep SDK retries off: Artemis owns the shared retry budget.
+                kwargs = {
+                    "model": endpoint.model_name,
+                    "api_key": endpoint.api_key,
+                    "base_url": endpoint.api_base,
+                    "max_tokens": endpoint.max_tokens,
+                    "timeout": endpoint.timeout_seconds,
+                    "max_retries": 0,
+                }
+                if endpoint.thinking_mode:
+                    kwargs["thinking"] = {"type": endpoint.thinking_mode}
+                if endpoint.reasoning_effort:
+                    kwargs["output_config"] = {"effort": endpoint.reasoning_effort}
+                return MiniMaxChatAnthropic(**{k: v for k, v in kwargs.items() if v is not None})
+
             api_key = (
                 endpoint.api_key
                 or (
@@ -320,6 +386,8 @@ class ModelFactory:
                 "temperature": endpoint.temperature,
                 "api_key": api_key,
                 "timeout": endpoint.timeout_seconds,
+                "base_url": endpoint.api_base,
+                "max_tokens": endpoint.max_tokens,
             }
             budget = endpoint.thinking_budget
             if not budget and endpoint.reasoning_effort:

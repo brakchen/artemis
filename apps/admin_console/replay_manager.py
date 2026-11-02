@@ -19,6 +19,7 @@ import shutil
 import sqlite3
 import sys
 import traceback
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -1612,6 +1613,26 @@ class ReplayManager:
         replay_id: str = None,
     ) -> ArtemisContext:
         """Creates a sandboxed ArtemisContext and DataEngine for the given session and step."""
+        from artemis.config import get_default_llm_config, load_agent_config
+        from artemis.llm.resolution import (
+            context_uses_minimax,
+            public_model_snapshot,
+            get_effective_endpoint,
+        )
+        from artemis.config.llm import AGENT_ROLES, UTILITY_ROLES
+
+        # Validate current replay selection before creating sandbox files or DB
+        # rows. Historical display remains tied to its original snapshot.
+        replay_config = SimpleNamespace(
+            llm_config=get_default_llm_config().model_copy(deep=True),
+            agent_config=load_agent_config().model_copy(deep=True),
+        )
+        context_uses_minimax(replay_config)
+        effective_role = agent_name if agent_name in (*AGENT_ROLES, *UTILITY_ROLES) else "operator"
+        get_effective_endpoint(
+            replay_config, effective_role, is_utils=effective_role in UTILITY_ROLES
+        )
+        replay_snapshot = public_model_snapshot(replay_config)
         self._ensure_session_chunked(session_id)
         step_dir = self.test_data_dir / f"{session_id}_chunked" / f"step_{step_number:02d}"
         if not step_dir.exists():
@@ -1714,21 +1735,17 @@ class ReplayManager:
         )
         print(f"Replay simulated device: {sim_device_id} ({sim_w}x{sim_h})")
 
-        from artemis.config import get_default_llm_config
-
-        try:
-            llm_cfg = get_default_llm_config()
-        except Exception as e:
-            print(f"Warning: Failed to load default LLM config: {e}")
-            llm_cfg = None
-
         ctx = ArtemisContext(
             device=device_context,
             adb_client=None,
             ui_adb_client=None,
             execution_setup=ExecutionSetup(traces_path=temp_traces_dir),
-            llm_config=llm_cfg,
+            llm_config=replay_config.llm_config,
+            agent_config=replay_config.agent_config,
+            model_snapshot=replay_snapshot,
         )
+
+        ctx._llm_endpoint_snapshot = replay_config._llm_endpoint_snapshot
 
         data_engine = DataEngine(ctx)
         data_engine.current_session_id = replay_id or session_id
@@ -1873,6 +1890,7 @@ class ReplayManager:
             agent_name=agent_name,
             replay_id=replay_id,
         )
+        replay_result["replay_model_snapshot"] = ctx.model_snapshot
 
         state = self.instantiate_state(
             session_id=session_id,
@@ -1881,12 +1899,25 @@ class ReplayManager:
 
         data_engine = ctx.data_engine
 
-        print("Executing using Live Gemini Client...")
+        from contextlib import nullcontext
+        from artemis.llm.google.provider import is_google_provider
+        from artemis.llm.resolution import get_effective_endpoint
 
-        from google.genai.models import AsyncModels
-        from unittest.mock import patch
+        from artemis.config.llm import AGENT_ROLES, UTILITY_ROLES
 
-        original_generate_content = AsyncModels.generate_content
+        effective_role = agent_name if agent_name in (*AGENT_ROLES, *UTILITY_ROLES) else "operator"
+        google_replay = is_google_provider(
+            get_effective_endpoint(
+                ctx, effective_role, is_utils=effective_role in UTILITY_ROLES
+            ).provider
+        )
+        capture_google = nullcontext()
+        print("Executing using the selected replay model...")
+        if google_replay:
+            from google.genai.models import AsyncModels
+            from unittest.mock import patch
+
+            original_generate_content = AsyncModels.generate_content
 
         async def wrapped_generate_content(self, *, model, contents, config=None, **kwargs):
             system_instruction = None
@@ -1997,6 +2028,9 @@ class ReplayManager:
                 )
                 raise err
 
+        if google_replay:
+            capture_google = patch.object(AsyncModels, "generate_content", wrapped_generate_content)
+
         try:
             try:
                 import inspect
@@ -2038,7 +2072,7 @@ class ReplayManager:
                                 val = resolved_val
                         tool_args[name] = val
 
-                with patch.object(AsyncModels, "generate_content", wrapped_generate_content):
+                with capture_google:
                     outcome = await tool_fn(**tool_args)
 
                 replay_result["success"] = True

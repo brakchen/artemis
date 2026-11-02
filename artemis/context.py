@@ -34,6 +34,7 @@ from artemis.utils.video import detect_video_tools_enabled
 
 
 from artemis.config import ExplorerConfig, LLMConfig, OutputterConfig
+from artemis.config.agent import OCRConfig
 
 
 from third_party.mobile_use.context import (
@@ -74,6 +75,7 @@ class ExecutionSetup(ExecutionSetupBase):
     disable_outputter: bool = False
     outputter: OutputterConfig = Field(default_factory=OutputterConfig)
     explorer: ExplorerConfig = Field(default_factory=ExplorerConfig)
+    ocr: OCRConfig = Field(default_factory=OCRConfig)
     explorer_versions: dict[str, str] = Field(default_factory=dict)
 
     @property
@@ -170,7 +172,12 @@ class ArtemisContext(DeviceClientAccessors, BaseModel):
     result for a requirement the user withdrew: the run outcome reports it as
     retired instead of counting it as a pass or failure."""
 
+    _screen_state_version: int = PrivateAttr(default=0)
+    _current_snapshot: Any | None = PrivateAttr(default=None)
+    _ocr_inflight: dict = PrivateAttr(default_factory=dict)
+    _ocr_last_outcome: dict = PrivateAttr(default_factory=dict)
     _genai_client: Any | None = PrivateAttr(default=None)
+    _llm_endpoint_snapshot: dict[tuple[str, bool, bool], Any] = PrivateAttr(default_factory=dict)
     _video_blackboard: Any | None = PrivateAttr(default=None)
     _video_circuit_breaker: Any | None = PrivateAttr(default=None)
     _mobile_controller: Any | None = PrivateAttr(default=None)

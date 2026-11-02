@@ -14,6 +14,8 @@
 
 """MCP Tool: mobile_inspect_trace."""
 
+from __future__ import annotations
+
 import json
 import os
 import sqlite3
@@ -22,10 +24,6 @@ from typing import Any
 
 from mcp_server.base import mcp
 from mcp_server.utils import env_utils
-from artemis.data_engine.history_reader import OfflineHistoryReader
-from artemis.runtime import trace_store
-from artemis.tools.history import load_step_screenshot, replay_steps_text, search_history_text
-from artemis.utils.task_tree import build_plan_and_history
 
 
 def _write_overlay(annotated_bytes: bytes, output_path: str) -> bool:
@@ -97,6 +95,13 @@ async def mobile_inspect_trace(
           `"search"`.
         max_results: Maximum `"search"` hits to return (server-side cap applies).
     """
+
+    env_utils.import_artemis_package()
+    from artemis.data_engine.history_reader import OfflineHistoryReader
+    from artemis.runtime import trace_store
+    from artemis.tools.history import load_step_screenshot, replay_steps_text, search_history_text
+    from artemis.utils.task_tree import build_plan_and_history
+
     project_root = env_utils.get_project_root()
     db_path = os.path.join(trace_store.TRACES_DIR, "data_engine.db")
     if not os.path.exists(db_path):

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import io
 import os
 import re
@@ -338,6 +340,8 @@ def format_minimal_list_with_elements(
 
     and returns structured element metadata & labels for drawing/validation.
     """
+    from artemis.utils.vision import copy_provenance
+
     lines = []
     elements = []
     labels = []
@@ -391,6 +395,7 @@ def format_minimal_list_with_elements(
                             "class": node.get("class"),
                             "resource_id": node.get("resource-id"),
                             "is_ocr": True,
+                            **copy_provenance(ocr),
                         }
                     )
                     labels.append(str(idx))
@@ -426,6 +431,7 @@ def format_minimal_list_with_elements(
                 "class": node.get("class"),
                 "resource_id": node.get("resource-id"),
                 "is_ocr": False,
+                **copy_provenance(node),
             }
             if not text.strip():
                 element["is_hint"] = True

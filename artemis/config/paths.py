@@ -162,6 +162,7 @@ def get_config_path(filename: str, default_bundled_path: Path | None = None) -> 
         env_path = Path(env_path_str)
         if env_path.exists():
             return env_path
+        raise FileNotFoundError(f"Explicit {env_var} path does not exist: {env_path}")
 
     # Check config/ directory
     config_dir_path = CONFIG_DIR / filename
@@ -194,6 +195,23 @@ def get_config_path(filename: str, default_bundled_path: Path | None = None) -> 
         f"Configuration file '{filename}' not found in config dir ({config_dir_path}), "
         f"project root ({project_path}), app dir ({app_dir_path}), or bundled resources."
     )
+
+
+def get_main_config_path(legacy_filename: str) -> Path:
+    """Select one explicit main file before discovery, with legacy fallback."""
+    candidates = ("artemis.jsonc", "artemis.json", legacy_filename)
+    explicit = [
+        name
+        for name in candidates
+        if os.getenv(f"ARTEMIS_{name.upper().replace('.', '_').replace('-', '_')}")
+    ]
+    for name in explicit or candidates:
+        try:
+            return get_config_path(name)
+        except FileNotFoundError:
+            if name in explicit:
+                raise
+    return get_config_path(legacy_filename, ROOT_DIR / legacy_filename)
 
 
 GLOBAL_APP_DIR = get_app_dir()

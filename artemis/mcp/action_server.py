@@ -62,7 +62,12 @@ def _wrap(res: ActionResult) -> CallToolResult:
 
 def _wrap_exception(action: str, exc: Exception) -> CallToolResult:
     return _wrap(
-        ActionResult.failure(action, f"{exception_prefix(action)}: {exc}", detail=repr(exc))
+        ActionResult.failure(
+            action,
+            f"{exception_prefix(action)}: {exc}",
+            detail=repr(exc),
+            code=ActionCode.TIMEOUT if isinstance(exc, TimeoutError) else ActionCode.DEVICE_ERROR,
+        )
     )
 
 
@@ -147,11 +152,19 @@ def build_action_server(actuator: Actuator, name: str = "artemis_actions") -> Fa
         async def take_screenshot(timeout_ms: int | None = None) -> CallToolResult:
             """Return the current screen as base64 (adapter-internal, no persistence)."""
             try:
-                coro = actuator.take_screenshot()
+                from artemis.utils.vision import uses_minimax
+
+                ctx = getattr(actuator, "ctx", None)
+                strict = ctx is not None and uses_minimax(ctx)
+                coro = actuator.get_screen_data() if strict else actuator.take_screenshot()
                 if timeout_ms:
                     coro = asyncio.wait_for(coro, timeout=timeout_ms / 1000.0)
-                b64 = await coro
+                capture = await coro
+                b64 = capture.base64 if strict else capture
                 payload: dict[str, Any] = {"ok": True, "image_b64": b64}
+                if strict:
+                    snapshot = getattr(capture, "snapshot", None)
+                    payload["snapshot"] = snapshot.model_dump(mode="json") if snapshot else None
             except TimeoutError:
                 payload = {"ok": False, "error": f"screenshot timed out after {timeout_ms}ms"}
             except Exception as e:

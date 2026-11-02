@@ -211,7 +211,7 @@ def resolve_operator_prompt_tools(ctx: ArtemisContext) -> frozenset[str]:
     # config-gated; the prompt must not advertise a tool that is not bound.
     if getattr(ctx, "data_engine", None) is None:
         available.difference_update(HISTORY_TOOL_NAMES)
-    elif not _recall_enabled():
+    elif not _recall_enabled(ctx):
         available.discard("search_history")
 
     # Device actions the installed actuator backend does not implement disappear
@@ -322,7 +322,7 @@ def render_transcript_static_system(
         plan_and_history="",
         unified_history="",
         transcript_history=True,
-        max_burst_actions=_max_burst_actions_for_prompt(),
+        max_burst_actions=_max_burst_actions_for_prompt(ctx),
         max_tool_calls=OPERATOR_MAX_TOOL_ITERATIONS,
         **_grammar_render_context(ctx),
     )
@@ -363,7 +363,7 @@ class TemplatePromptComponent(PromptComponent):
             plan_and_history=plan_and_history,
             unified_history="",
             transcript_history=False,
-            max_burst_actions=_max_burst_actions_for_prompt(),
+            max_burst_actions=_max_burst_actions_for_prompt(ctx),
             max_tool_calls=OPERATOR_MAX_TOOL_ITERATIONS,
             **_grammar_render_context(ctx),
         )
@@ -436,12 +436,12 @@ class FeedbackPromptComponent(PromptComponent):
 EXECUTION_INCIDENT_MARKER = "--- Execution Incident (OPEN) ---"
 
 
-def _max_burst_actions_for_prompt() -> int:
+def _max_burst_actions_for_prompt(ctx=None) -> int:
     """The configured fast-action burst ceiling, recited in the operator template."""
     try:
-        from artemis.config import load_agent_config
+        from artemis.config.task import get_task_agent_config
 
-        return int(load_agent_config().pro.execution.max_burst_actions)
+        return int(get_task_agent_config(ctx).pro.execution.max_burst_actions)
     except Exception:
         return 4
 
@@ -966,12 +966,12 @@ class ScreenshotSimilarityPromptComponent(PromptComponent):
         return diff_count
 
 
-def _recall_enabled() -> bool:
+def _recall_enabled(ctx=None) -> bool:
     """Whether the search_history tool is enabled by configuration."""
     try:
-        from artemis.config import load_agent_config
+        from artemis.config.task import get_task_agent_config
 
-        return bool(load_agent_config().memory.recall.enabled)
+        return bool(get_task_agent_config(ctx).memory.recall.enabled)
     except Exception:
         return True
 
@@ -1007,9 +1007,9 @@ class HistoricalStateHintPromptComponent(PromptComponent):
 
         max_distance = 8
         try:
-            from artemis.config import load_agent_config
+            from artemis.config.task import get_task_agent_config
 
-            transcript_cfg = load_agent_config().memory.transcript
+            transcript_cfg = get_task_agent_config(ctx).memory.transcript
             if not getattr(transcript_cfg, "similarity_hint", True):
                 return
             max_distance = int(getattr(transcript_cfg, "similarity_max_distance", 8))

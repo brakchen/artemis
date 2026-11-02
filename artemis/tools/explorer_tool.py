@@ -28,6 +28,8 @@ The Explorer tier (flash / pro / ultra) is a user setting resolved from
 configuration; it is never part of the tool contract shown to agents.
 """
 
+from __future__ import annotations
+
 import base64
 from dataclasses import dataclass, field
 import glob
@@ -59,6 +61,8 @@ from artemis.graph.state import State
 from artemis.tools.base import ArtemisTool, ToolCategory
 from artemis.tools.tool_wrapper import ToolWrapper
 from artemis.utils.cython_compat import CyFunctionDetector
+from artemis.utils.coordinates import validate_bbox, denormalize_bbox
+from artemis.utils.vision import copy_provenance, uses_minimax
 from artemis.utils.element_hit_test import find_element_at_point
 from artemis.utils.visualization import draw_dots
 from third_party.mobile_use.utils.logger import get_logger
@@ -105,22 +109,15 @@ class AskExplorerArgs(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
-NormBounds = tuple[int, int, int, int]
+NormBounds = tuple[float, float, float, float]
 
 
 def _parse_norm_bounds(value: Any) -> NormBounds | None:
     """Accepts ``[l, t, r, b]`` in the 0-1000 scale with a positive area."""
-    if not isinstance(value, (list, tuple)) or len(value) != 4:
-        return None
     try:
-        left, top, right, bottom = (int(v) for v in value)
-    except (TypeError, ValueError):
+        return tuple(validate_bbox(value))
+    except ValueError:
         return None
-    if not all(0 <= v <= 1000 for v in (left, top, right, bottom)):
-        return None
-    if right <= left or bottom <= top:
-        return None
-    return left, top, right, bottom
 
 
 @dataclass(frozen=True)
@@ -133,11 +130,13 @@ class ExplorerCandidate:
     """
 
     label: str
-    coords: tuple[int, int]
+    coords: tuple[float, float]
     description: str
     bounds: NormBounds | None = None
     #: "xml", "ocr", or "" when the candidate is a bare visual detection.
     source: str = ""
+    status: str = "found"
+    metadata: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 @dataclass
@@ -157,11 +156,11 @@ class ExplorerOutcome:
         return bool(self.candidates)
 
     @classmethod
-    def failure(cls, message: str, raw: str = "") -> "ExplorerOutcome":
+    def failure(cls, message: str, raw: str = "") -> ExplorerOutcome:
         return cls(message=message, error=True, raw=raw)
 
     @classmethod
-    def from_raw(cls, raw: Any, default_label: str = "") -> "ExplorerOutcome":
+    def from_raw(cls, raw: Any, default_label: str = "") -> ExplorerOutcome:
         """Parses the Explorer's JSON answer, dropping malformed candidates."""
         text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
         try:
@@ -175,6 +174,8 @@ class ExplorerOutcome:
         for item in data.get("candidates") or []:
             if not isinstance(item, dict):
                 continue
+            if item.get("status") in {"ambiguous", "not_found"}:
+                continue
             coords = item.get("coords")
             if not is_valid_norm_point(coords):
                 logger.warning(f"Dropping Explorer candidate with invalid coords: {item}")
@@ -184,15 +185,18 @@ class ExplorerOutcome:
             candidates.append(
                 ExplorerCandidate(
                     label=label,
-                    coords=(int(coords[0]), int(coords[1])),
+                    coords=tuple(int(v) if isinstance(v, str) else v for v in coords),
                     description=description,
-                    bounds=_parse_norm_bounds(item.get("bounds")),
+                    bounds=_parse_norm_bounds(item.get("bbox") or item.get("bounds")),
                     source=str(item.get("source") or ""),
+                    status=str(item.get("status") or "found"),
+                    metadata=copy_provenance(item),
                 )
             )
         return cls(
             candidates=candidates,
             message=str(data.get("fallback_message") or ""),
+            error=bool(data.get("error")),
             raw=text,
         )
 
@@ -203,7 +207,7 @@ class RegisteredCandidate:
 
     index: int
     pixel: tuple[int, int]
-    coords: tuple[int, int]
+    coords: tuple[float, float]
     description: str
     #: Pixel bounds when known (from the Explorer or from the reused element).
     bounds: tuple[int, int, int, int] | None = None
@@ -212,6 +216,7 @@ class RegisteredCandidate:
     #: The text the agent's own indexed list shows for the reused element, so
     #: the answer can name it the way the agent already knows it.
     existing_text: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 #: A bare-point candidate this close to an existing indexed center (in
@@ -324,6 +329,12 @@ def register_candidates(
         pixel = norm_to_pixel(cand.coords[0], cand.coords[1], width, height)
 
         existing = _find_existing_element(indexed_elements, pixel, width)
+        if uses_minimax(ctx) and existing is not None:
+            if any(
+                existing.get(key) != cand.metadata.get(key)
+                for key in ("snapshot_id", "source", "evidence", "bbox")
+            ):
+                existing = None
         if existing is not None:
             index = int(existing.get("index") or (indexed_elements.index(existing) + 1))
             registered.append(
@@ -335,14 +346,16 @@ def register_candidates(
                     bounds=_element_pixel_bounds(existing),
                     reused=True,
                     existing_text=str(existing.get("text") or ""),
+                    metadata=copy_provenance(existing),
                 )
             )
             continue
 
         pixel_bounds = None
         if cand.bounds is not None:
-            left, top = norm_to_pixel(cand.bounds[0], cand.bounds[1], width, height)
-            right, bottom = norm_to_pixel(cand.bounds[2], cand.bounds[3], width, height)
+            left, top, right, bottom = (
+                round(v) for v in denormalize_bbox(cand.bounds, width, height)
+            )
             pixel_bounds = (left, top, right, bottom)
 
         indexed_points.append([pixel[0], pixel[1]])
@@ -356,6 +369,7 @@ def register_candidates(
                 "class": "ExplorerCandidate",
                 "resource_id": None,
                 "is_ocr": cand.source == "ocr",
+                **cand.metadata,
             }
         )
         registered.append(
@@ -365,6 +379,7 @@ def register_candidates(
                 coords=cand.coords,
                 description=cand.description,
                 bounds=pixel_bounds,
+                metadata=dict(cand.metadata),
             )
         )
     return registered

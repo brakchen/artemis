@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import json
 from typing import Any
 from uuid import uuid4
 
-from langchain_core.messages import SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from artemis.core.tool_failure import is_tool_failure
@@ -52,6 +54,8 @@ from artemis.utils.plan_grammar import parse_plan
 from artemis.memory.context_policy import build_history_for
 from artemis.utils.task_tree import get_active_subgoal_hashes
 from artemis.utils.visualization import format_minimal_list_with_elements
+from artemis.utils.vision import SnapshotRef, stamp_elements, copy_provenance, uses_minimax
+from artemis.utils.coordinates import denormalize_point, normalize_point
 from third_party.mobile_use.utils.decorators import agent_lifecycle_logging
 from third_party.mobile_use.utils.logger import get_logger
 
@@ -128,9 +132,9 @@ class OperatorNode:
             self._transcript_cfg = transcript_config
         else:
             try:
-                from artemis.config import load_agent_config
+                from artemis.config.task import get_task_agent_config
 
-                self._transcript_cfg = load_agent_config().memory.transcript
+                self._transcript_cfg = get_task_agent_config(self.ctx).memory.transcript
             except Exception:
                 from artemis.config.agent import MemoryTranscriptConfig
 
@@ -319,9 +323,9 @@ class OperatorNode:
 
                 chunking_cfg = None
                 try:
-                    from artemis.config import load_agent_config
+                    from artemis.config.task import get_task_agent_config
 
-                    chunking_cfg = load_agent_config().memory.chunking
+                    chunking_cfg = get_task_agent_config(self.ctx).memory.chunking
                 except Exception as exc:
                     logger.debug(
                         "Chunking config unavailable; using chunker defaults: %s",
@@ -390,6 +394,7 @@ class OperatorNode:
                 task_plan,
                 steps,
                 self._get_active_subgoal_hash(),
+                ctx=self.ctx,
             )
             ledger.set_restored_history(
                 "[Restored history] Rebuilt from the step records of this task"
@@ -486,13 +491,31 @@ class OperatorNode:
         tool_limit_exceeded = False
         plan_gate_bounced = False
 
+        if uses_minimax(self.ctx):
+            current_messages.insert(
+                0,
+                SystemMessage(
+                    content=(
+                        "MiniMax execution contract: emit one screen-changing action, then inspect a fresh "
+                        "observation before selecting another target. Every indexed/coordinate target is "
+                        "checked, including burst members; old targets and invisible/uncertain candidates "
+                        "cannot bypass validation. Unknown dispatch may already have taken effect: observe "
+                        "and diagnose, never replay it. Dispatched does not mean the task goal succeeded. "
+                        "Raw ADB scripts invalidate targets; finish/terminate active scripts and re-observe."
+                    )
+                ),
+            )
+            if self._transcript_turn_base is not None:
+                self._transcript_turn_base += 1
+
         for iteration in range(max_iterations):
             if iteration == max_iterations - 1:
                 logger.warning(
                     "Operator has reached the maximum number of tool calls. Adding reminder."
                 )
+                reminder_message = HumanMessage if uses_minimax(self.ctx) else SystemMessage
                 current_messages.append(
-                    SystemMessage(
+                    reminder_message(
                         content=(
                             "You have reached the maximum number of tool calls"
                             " for this turn. You must make a final action, or"
@@ -898,6 +921,11 @@ class OperatorNode:
             except (AttributeError, TypeError):
                 pass
         minimal_list, elements, labels = format_minimal_list_with_elements(fused_xml, width, height)
+        raw_snapshot = operator_raw_data.get("snapshot")
+        if isinstance(raw_snapshot, dict):
+            snapshot = SnapshotRef.model_validate(raw_snapshot)
+            if snapshot.width > 0 and snapshot.height > 0:
+                stamp_elements(elements, snapshot)
 
         # Save transient indexed_points and indexed_elements on the state instance
         state.indexed_points = [el["center"] for el in elements]
@@ -914,6 +942,10 @@ class OperatorNode:
         all_tools = [
             operator_shell_tool(name) for name in OPERATOR_SHELL_ORDER if name in available_actions
         ] + self.tools
+        from artemis.tools.web_search import get_web_search_tools
+
+        if not any(t.name == "web_search" for t in all_tools):
+            all_tools.extend(get_web_search_tools(self.ctx, "operator"))
 
         # 5. Mount the task-output analyzer and collect background ADB task state.
         # The analyzer is always available: the "output truncated, use
@@ -981,9 +1013,9 @@ class OperatorNode:
 
     def _plan_ledger_gate_enabled(self) -> bool:
         try:
-            from artemis.config import load_agent_config
+            from artemis.config.task import get_task_agent_config
 
-            return bool(load_agent_config().pro.execution.plan_ledger_gate)
+            return bool(get_task_agent_config(self.ctx).pro.execution.plan_ledger_gate)
         except (AttributeError, OSError, TypeError, ValueError):
             return True
 
@@ -1011,9 +1043,9 @@ class OperatorNode:
 
     def _plan_ledger_stale_turns(self) -> int:
         try:
-            from artemis.config import load_agent_config
+            from artemis.config.task import get_task_agent_config
 
-            return int(load_agent_config().pro.execution.plan_ledger_stale_turns)
+            return int(get_task_agent_config(self.ctx).pro.execution.plan_ledger_stale_turns)
         except (AttributeError, OSError, TypeError, ValueError):
             return 4
 
@@ -1067,14 +1099,15 @@ class OperatorNode:
             steps,
             active_subgoal_hash,
             last_n_detailed=self.last_n_detailed,
+            ctx=self.ctx,
         )
 
     def _max_burst_actions(self) -> int:
         """Configured ceiling for actions in one fast-action burst (default 4)."""
         try:
-            from artemis.config import load_agent_config
+            from artemis.config.task import get_task_agent_config
 
-            return int(load_agent_config().pro.execution.max_burst_actions)
+            return int(get_task_agent_config(self.ctx).pro.execution.max_burst_actions)
         except Exception:
             return 4
 
@@ -1111,6 +1144,14 @@ class OperatorNode:
             except (AttributeError, TypeError):
                 pass
 
+        if tool_name in {"click", "long_press", "input_text", "swipe"} and uses_minimax(self.ctx):
+            from artemis.agents.explorer.geometry import resolve_screen_size
+
+            try:
+                width, height = resolve_screen_size(self.ctx, state)
+            except ValueError as error:
+                return [], f"Error: {error}"
+
         def resolve_target_element(target: Any, description: Any) -> tuple[dict | None, str | None]:
             """Resolves a target to ``{"center": [x, y], **semantics}``.
 
@@ -1119,6 +1160,13 @@ class OperatorNode:
             model's own ``target_description``. The two never mix.
             """
             if isinstance(target, (int, float)):
+                if uses_minimax(self.ctx) and (
+                    isinstance(target, bool) or not float(target).is_integer()
+                ):
+                    return (
+                        None,
+                        "Error: Target index must be an integer from the current observation.",
+                    )
                 try:
                     target_int = int(target)
                 except (ValueError, TypeError):
@@ -1126,12 +1174,26 @@ class OperatorNode:
                 indexed_elements = getattr(state, "indexed_elements", None) or []
                 if 1 <= target_int <= len(indexed_elements):
                     el = indexed_elements[target_int - 1]
+                    center = el.get("center")
+                    normalized_target = None
+                    if uses_minimax(self.ctx):
+                        from artemis.utils.coordinates import normalize_target_point
+
+                        try:
+                            normalized_target = normalize_target_point(
+                                center, el.get("bounds"), width, height
+                            )
+                            center = denormalize_point(*normalized_target, width, height)
+                        except ValueError as error:
+                            return None, f"Error: {error}"
                     return {
-                        "center": el.get("center"),
+                        "center": center,
+                        "_normalized_target": normalized_target,
                         "target_text": el.get("text"),
                         "target_bounds": el.get("bounds"),
                         "target_resource_id": el.get("resource_id"),
                         "target_class": el.get("class"),
+                        **{k: v for k, v in copy_provenance(el).items() if k != "coordinate_space"},
                     }, None
                 return (
                     None,
@@ -1141,6 +1203,13 @@ class OperatorNode:
                     ),
                 )
             elif isinstance(target, list) and len(target) == 2:
+                if uses_minimax(self.ctx):
+                    from artemis.utils.coordinates import validate_normalized_point
+
+                    try:
+                        target = validate_normalized_point(target)
+                    except ValueError as error:
+                        return None, f"Error: {error}"
                 described = _described(description)
                 if described is None:
                     return (
@@ -1152,10 +1221,11 @@ class OperatorNode:
                         ),
                     )
                 try:
-                    nx, ny = map(float, target)
-                    x = int(max(0, min(width - 1, nx * width / 1000)))
-                    y = int(max(0, min(height - 1, ny * height / 1000)))
-                    return {"center": [x, y], "target_description": described}, None
+                    x, y = denormalize_point(target[0], target[1], width, height)
+                    result = {"center": [x, y], "target_description": described}
+                    if uses_minimax(self.ctx):
+                        result["snapshot"] = operator_raw_data.get("snapshot")
+                    return result, None
                 except (ValueError, TypeError):
                     return (
                         None,
@@ -1171,7 +1241,7 @@ class OperatorNode:
 
         def target_fields(el: dict) -> dict:
             """The recorded target semantics: observed (index) or described (coords)."""
-            return {k: v for k, v in el.items() if k != "center"}
+            return {k: v for k, v in el.items() if k not in {"center", "_normalized_target"}}
 
         if tool_name == "click":
             target = args.get("target")
@@ -1180,10 +1250,7 @@ class OperatorNode:
             el, err = resolve_target_element(target, args.get("target_description"))
             if err:
                 return [], err
-            norm_c = [
-                int(round(el["center"][0] * 1000.0 / width)),
-                int(round(el["center"][1] * 1000.0 / height)),
-            ]
+            norm_c = el.get("_normalized_target") or normalize_point(*el["center"], width, height)
             return [
                 {
                     "action": "tap",
@@ -1202,10 +1269,7 @@ class OperatorNode:
             el, err = resolve_target_element(target, args.get("target_description"))
             if err:
                 return [], err
-            norm_c = [
-                int(round(el["center"][0] * 1000.0 / width)),
-                int(round(el["center"][1] * 1000.0 / height)),
-            ]
+            norm_c = el.get("_normalized_target") or normalize_point(*el["center"], width, height)
             return [
                 {
                     "action": "long_press_on",
@@ -1234,10 +1298,7 @@ class OperatorNode:
             if err:
                 return [], err
 
-            norm_c = [
-                int(round(el["center"][0] * 1000.0 / width)),
-                int(round(el["center"][1] * 1000.0 / height)),
-            ]
+            norm_c = el.get("_normalized_target") or normalize_point(*el["center"], width, height)
             actions = []
             actions.append(
                 {
@@ -1253,7 +1314,12 @@ class OperatorNode:
             return actions, None
 
         elif tool_name == "swipe":
-            kind, target, parsed_duration = parse_swipe_parameters(args, default_duration=None)
+            try:
+                kind, target, parsed_duration = parse_swipe_parameters(
+                    args, default_duration=None, strict=uses_minimax(self.ctx)
+                )
+            except ValueError as error:
+                return [], f"Error: {error}"
             duration = args.get("duration")
 
             if duration is not None:
@@ -1273,7 +1339,13 @@ class OperatorNode:
             # Only a coordinate gesture needs the model to say what it drags; a
             # directional scroll targets the page, not an element.
             described: str | None = None
+            swipe_semantics = {}
             if kind == "direction":
+                if uses_minimax(self.ctx) and isinstance(args.get("target"), (int, float)):
+                    element, error = resolve_target_element(args["target"], None)
+                    if error:
+                        return [], error
+                    swipe_semantics = target_fields(element)
                 x1, y1, x2, y2, smart_dur = compute_smart_swipe_coordinates(
                     direction=target,
                     target=args.get("target"),
@@ -1298,10 +1370,8 @@ class OperatorNode:
                     )
                 try:
                     nx1, ny1, nx2, ny2 = map(float, target)
-                    x1 = int(max(0, min(width - 1, nx1 * width / 1000)))
-                    y1 = int(max(0, min(height - 1, ny1 * height / 1000)))
-                    x2 = int(max(0, min(width - 1, nx2 * width / 1000)))
-                    y2 = int(max(0, min(height - 1, ny2 * height / 1000)))
+                    x1, y1 = denormalize_point(nx1, ny1, width, height)
+                    x2, y2 = denormalize_point(nx2, ny2, width, height)
                 except (ValueError, TypeError):
                     return (
                         [],
@@ -1328,8 +1398,8 @@ class OperatorNode:
                 else:
                     duration = 900
 
-            nx1, ny1 = int(round(x1 * 1000.0 / width)), int(round(y1 * 1000.0 / height))
-            nx2, ny2 = int(round(x2 * 1000.0 / width)), int(round(y2 * 1000.0 / height))
+            nx1, ny1 = normalize_point(x1, y1, width, height)
+            nx2, ny2 = normalize_point(x2, y2, width, height)
             return [
                 {
                     "action": "swipe",
@@ -1344,6 +1414,12 @@ class OperatorNode:
                     # bare coordinate path.
                     **({"direction": str(target)} if kind == "direction" else {}),
                     **({"target_description": described} if described else {}),
+                    **swipe_semantics,
+                    **(
+                        {"snapshot": operator_raw_data.get("snapshot")}
+                        if uses_minimax(self.ctx)
+                        else {}
+                    ),
                 }
             ], None
 

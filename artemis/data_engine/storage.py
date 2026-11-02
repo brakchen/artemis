@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 from collections.abc import Iterator
 from contextlib import contextmanager
 import difflib
@@ -59,6 +61,21 @@ class SafeJSONEncoder(json.JSONEncoder):
 
 
 logger = get_logger(__name__)
+
+
+def _image_metadata(raw: str | None) -> dict[str, Any]:
+    """Old images may have no metadata; malformed history is preserved as data.
+
+    Neither a NULL nor an unversioned/corrupt value constitutes an OCR cache hit.
+    Subsequent source-versioned merges retain the original historical value.
+    """
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return {"legacy_extra_metadata_raw": raw}
+    return value if isinstance(value, dict) else {"legacy_extra_metadata": value}
 
 
 class StorageManager:
@@ -419,7 +436,7 @@ class StorageManager:
                 (
                     image.image_name,
                     image.timestamp,
-                    json.dumps(image.ocr_result) if image.ocr_result else None,
+                    json.dumps(image.ocr_result) if image.ocr_result is not None else None,
                     json.dumps(image.ui_tree) if image.ui_tree else None,
                     json.dumps(image.extra_metadata),
                 ),
@@ -437,7 +454,7 @@ class StorageManager:
                     timestamp=row["timestamp"],
                     ocr_result=json.loads(row["ocr_result"]) if row["ocr_result"] else None,
                     ui_tree=json.loads(row["ui_tree"]) if row["ui_tree"] else None,
-                    extra_metadata=json.loads(row["extra_metadata"]),
+                    extra_metadata=_image_metadata(row["extra_metadata"]),
                 )
         return None
 
@@ -455,6 +472,34 @@ class StorageManager:
                 WHERE image_name = ?
                 """,
                 (ocr_json, ui_tree_json, image_name),
+            )
+            conn.commit()
+
+    def merge_image_metadata(self, image_name: str, metadata: dict[str, Any]) -> None:
+        """Atomically merge source-versioned OCR entries, preserving other metadata.
+
+        BEGIN IMMEDIATE serializes read/merge/write across processes as well as
+        connections. Existing historical ocr_result remains untouched.
+        """
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT extra_metadata FROM images WHERE image_name = ?", (image_name,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("Image record must exist before metadata merge")
+            current = _image_metadata(row["extra_metadata"])
+            for key, value in metadata.items():
+                if key == "ocr_cache":
+                    current[key] = {
+                        **(current[key] if isinstance(current.get(key), dict) else {}),
+                        **value,
+                    }
+                else:
+                    current[key] = value
+            conn.execute(
+                "UPDATE images SET extra_metadata = ? WHERE image_name = ?",
+                (json.dumps(current), image_name),
             )
             conn.commit()
 

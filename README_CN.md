@@ -85,7 +85,8 @@
 
 ```bash
 # 1. 克隆代码仓库并进入目录
-git clone https://github.com/google/artemis.git && cd artemis
+git clone --branch feat/model-config https://github.com/brakchen/artemis.git
+cd artemis
 
 # 2. 一键启动
 ./start.sh
@@ -95,7 +96,7 @@ git clone https://github.com/google/artemis.git && cd artemis
 
 ```powershell
 # 1. 克隆代码仓库并进入目录
-git clone https://github.com/google/artemis.git
+git clone --branch feat/model-config https://github.com/brakchen/artemis.git
 cd artemis
 
 # 2. 一键启动
@@ -105,6 +106,34 @@ cd artemis
 > PowerShell 默认不会从当前目录查找可执行脚本，因此必须使用 `.\start.bat`，且命令末尾不要添加 `\`。如果使用传统命令提示符（CMD），则运行 `start.bat`。
 
 > **提示**：启动后将自动在默认浏览器中打开 Web 控制台（`http://localhost:8000`），提供设备连接向导、实时投屏、任务演练与状态回放面板。你也可以通过命令行直接运行：`uv run artemis run "打开系统设置，找到电池选项并告诉我当前电量" --profile flash`。
+
+### 配置 MiniMax
+
+MiniMax 实现目前位于本 fork 的 [feat/model-config 分支](https://github.com/brakchen/artemis/tree/feat/model-config)。
+
+通过 Anthropic Messages 接口迁移全部生效的模型角色：
+
+```bash
+uv run artemis init --provider minimax
+```
+
+命令会隐藏输入 Key。默认模型是 `MiniMax-M3.1-Flash`，地址为 `https://api.minimax.cn/anthropic`；可用 `--base-url` 指定其他支持的 Messages 地址。若已在当前进程中设置 `MINIMAX_API_KEY` 和可选的 `MINIMAX_BASE_URL`，加 `--import-env` 显式导入。已有注册表 Key 默认优先，只有再加 `--replace-key` 才会被环境值替换。这些变量只用于初始化导入，运行时从 Provider 注册表读取凭据。
+
+初始化会迁移生效角色的主备、utility 和辅助模型，保留无关设置及未选中的 presets。`--name` 指定注册名称，`--config` 指定主配置文件。已有条目在替换 Key 提示中留空会保留原 Key。切换 `MiniMax-M3` 时用 `--model MiniMax-M3` 同步迁移思考参数。仅在控制台保存 Provider 后，仍需完成角色迁移，才能运行全部任务。
+
+若兼容的 Messages 网关不提供模型目录，可手填模型 ID，关闭“保存前验证模型目录鉴权”，选择“跳过验证并保存”。此操作只保存配置，凭据和模型权限仍标为未验证。
+
+Key 保存在受保护的 Provider 注册表，主配置只引用别名。运行 `artemis providers list` 可查看脱敏条目和实际注册表位置。wheel 安装使用可写的应用配置，不修改随包模板。模型目录鉴权成功不代表图像、搜索或原生语音权限已验证；MiniMax OCR 使用任务模型的凭据，无需独立 Google Vision Key。
+
+CLI、控制台和 SDK 应使用一致的 `ARTEMIS_APP_DIR` 及主配置选择。修改环境变量或选中的配置路径后，重启已有控制台、MCP 和 worker 进程；SDK 应用需重新构造 Agent 配置。正在执行的任务保留自己的配置快照。
+
+已有文件会在原位置生成受保护的 `<文件名>.backup-<UTC时间戳>` 备份，命令会输出备份和原文件对应关系。回滚前停止新任务、比较当前文件；在保留后续编辑的前提下，一起恢复对应的配置、注册表和环境文件备份。发布采用逐文件原子替换和条件回滚，不是多文件原子事务。
+
+容器需显式挂载配置。先在仓库根目录执行 `docker build -t artemis-runtime:latest .`；两个 Playground 镜像复用其中的 UI 与 client/core wheel。Compose 示例要求将 `ARTEMIS_MAIN_CONFIG`、`ARTEMIS_PROVIDER_REGISTRY`、`ARTEMIS_SELECTED_ENV_FILE` 设为源文件的绝对路径（只用注册表的 MiniMax 可提供受保护的空 dotenv 文件）。backend manager 还要求 `ARTEMIS_EXPORT_HOST_ROOT` 指向 Docker 宿主机的绝对目录，并挂到 manager 的 `ARTEMIS_EXPORT_ROOT`；它只向子容器导出选中 profile 使用的凭据。注入文件只读，修改配置返回 403，运行状态目录仍可写。路径与清理约定见[技术方案](docs/designs/2026-11-01-minimax-anthropic.md#9-控制台cli-与兼容迁移)。本机尚未验证真实 Docker 运行。
+
+MiniMax 任务使用固定图像操作及受门禁保护的设备动作。自动生成 Python 的图像处理和任意 Agent 生成的 shell 脚本返回不支持错误；裁剪、缩放、检测和 OCR 仍可使用。
+
+本分支的 MiniMax 验证使用合成输入和 SDK HTTP 模拟响应。账号能力、定位精度及真实设备表现仍需单独验证；本文其他位置的上游基准完成率和单步耗时不代表已实测的 MiniMax 结果。
 
 <a id="mcp-setup"></a>
 <a id="mcp"></a>

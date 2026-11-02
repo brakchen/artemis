@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict
 
 from artemis.utils.video import (
     clip_has_frames,
+    communicate_process,
     get_ffmpeg_path,
     get_ffprobe_path,
     is_ffmpeg_drawtext_supported,
@@ -202,7 +203,11 @@ async def probe_duration(input_path: Path) -> float:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await proc.communicate()
+    stdout, stderr = await communicate_process(proc)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe duration inspection failed: {stderr.decode(errors='replace')[-500:]}"
+        )
     return float(stdout.decode().strip())
 
 
@@ -315,7 +320,7 @@ async def compress_video_for_api(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await proc.communicate()
+        _, stderr = await communicate_process(proc)
 
         if proc.returncode != 0:
             err_msg = stderr.decode().strip()
@@ -340,7 +345,11 @@ async def compress_video_for_api(
         return input_path  # Return original if compression fails and was optional
 
 
-async def extract_audio_from_video(input_path: Path) -> Path:
+class NoAudioTrackError(ValueError):
+    """The container was inspected successfully and contains no audio track."""
+
+
+async def extract_audio_from_video(input_path: Path, output_path: Path | None = None) -> Path:
     """Extract audio from a video file using ffmpeg.
 
     Saves as .mp3.
@@ -365,11 +374,15 @@ async def extract_audio_from_video(input_path: Path) -> Path:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    probe_stdout, _ = await probe.communicate()
-    if probe.returncode != 0 or not probe_stdout.strip():
-        raise ValueError("Video has no audio stream")
+    probe_stdout, probe_stderr = await communicate_process(probe)
+    if probe.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe audio inspection failed: {probe_stderr.decode(errors='replace')[-500:]}"
+        )
+    if not probe_stdout.strip():
+        raise NoAudioTrackError("Video has no audio stream")
 
-    output_path = input_path.parent / f"audio_{input_path.stem}.mp3"
+    output_path = output_path or input_path.parent / f"audio_{input_path.stem}.mp3"
     logger.info(f"Extracting audio from {input_path} to {output_path}")
 
     cmd = [
@@ -391,7 +404,7 @@ async def extract_audio_from_video(input_path: Path) -> Path:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await proc.communicate()
+        _, stderr = await communicate_process(proc)
 
         if proc.returncode != 0:
             err_msg = stderr.decode(errors="replace").strip()

@@ -14,6 +14,8 @@
 
 """Task execution command (artemis run)."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 from typing import Annotated
@@ -39,6 +41,78 @@ from rich.panel import Panel
 import typer
 
 logger = get_logger(__name__)
+
+
+def _build_run_config(
+    *,
+    video_recording_tools_enabled=None,
+    enable_planner_validation=None,
+    enable_committee=None,
+    enable_checker=None,
+    enable_step_summarizer=None,
+    enable_outputter=None,
+    force_output_synthesis=None,
+    explorer_version=None,
+    explorer_flash_mode=None,
+    explorer_pro_mode=None,
+    verification_level=None,
+):
+    config = new_default_config_builder()
+
+    if video_recording_tools_enabled is not None:
+        config.with_video_recording_tools(enabled=video_recording_tools_enabled)
+
+    if enable_planner_validation is not None:
+        config.with_planner_validation(enabled=enable_planner_validation)
+
+    if enable_committee is not None:
+        config.with_committee(enabled=enable_committee)
+
+    if verification_level is not None:
+        config.with_checker(**checker_overrides_for_level(verification_level))
+
+    if enable_checker is not None:
+        config.with_checker(enabled=enable_checker)
+
+    if enable_step_summarizer is not None:
+        config.with_flash_step_summarizer(enabled=enable_step_summarizer)
+
+    if enable_outputter is not None or force_output_synthesis is not None:
+        config.with_outputter(
+            enabled=enable_outputter if enable_outputter is not None else True,
+            force_synthesis=bool(force_output_synthesis),
+        )
+
+    if (
+        explorer_version is not None
+        or explorer_flash_mode is not None
+        or explorer_pro_mode is not None
+    ):
+        config.with_explorer(
+            version=explorer_version,
+            flash_mode=explorer_flash_mode,
+            pro_mode=explorer_pro_mode,
+        )
+
+    return config
+
+
+def _preflight_run_config(config, profile):
+    from artemis.sdk.agent import Agent
+
+    agent = Agent(config=config.build(validate_profiles=False))
+    try:
+        return agent.prepare_task_config(profile)
+    except (ValueError, OSError) as error:
+        # Recover only public routing identity with the same canonical selector.
+        # Validation inputs and private endpoint snapshots never enter CLI output.
+        try:
+            selected = agent._select_agent_profile(profile)
+            configured = selected.llm_config.default or selected.llm_config.operator
+            setattr(error, "configured_provider", str(configured.provider))
+        except (AttributeError, ValueError, TypeError) as identity_error:
+            logger.debug("Could not recover configured provider: %s", type(identity_error).__name__)
+        raise
 
 
 async def execute_task(
@@ -97,42 +171,20 @@ async def execute_task(
         session_id=str(effective_sid) if effective_sid else None,
     )
 
-    config = new_default_config_builder()
-
-    if video_recording_tools_enabled is not None:
-        config.with_video_recording_tools(enabled=video_recording_tools_enabled)
-
-    if enable_planner_validation is not None:
-        config.with_planner_validation(enabled=enable_planner_validation)
-
-    if enable_committee is not None:
-        config.with_committee(enabled=enable_committee)
-
-    if verification_level is not None:
-        config.with_checker(**checker_overrides_for_level(verification_level))
-
-    if enable_checker is not None:
-        config.with_checker(enabled=enable_checker)
-
-    if enable_step_summarizer is not None:
-        config.with_flash_step_summarizer(enabled=enable_step_summarizer)
-
-    if enable_outputter is not None or force_output_synthesis is not None:
-        config.with_outputter(
-            enabled=enable_outputter if enable_outputter is not None else True,
-            force_synthesis=bool(force_output_synthesis),
-        )
-
-    if (
-        explorer_version is not None
-        or explorer_flash_mode is not None
-        or explorer_pro_mode is not None
-    ):
-        config.with_explorer(
-            version=explorer_version,
-            flash_mode=explorer_flash_mode,
-            pro_mode=explorer_pro_mode,
-        )
+    config = _build_run_config(
+        video_recording_tools_enabled=video_recording_tools_enabled,
+        enable_planner_validation=enable_planner_validation,
+        enable_committee=enable_committee,
+        enable_checker=enable_checker,
+        enable_step_summarizer=enable_step_summarizer,
+        enable_outputter=enable_outputter,
+        force_output_synthesis=force_output_synthesis,
+        explorer_version=explorer_version,
+        explorer_flash_mode=explorer_flash_mode,
+        explorer_pro_mode=explorer_pro_mode,
+        verification_level=verification_level,
+    )
+    _preflight_run_config(config, profile)
 
     target_serial = (
         device_serial or settings.ADB_DEVICE_SERIAL or os.environ.get("ADB_DEVICE_SERIAL")
@@ -297,9 +349,40 @@ def run_command(
     ] = False,
 ) -> None:
     """Run an autonomous UI automation task on the connected Android device."""
-    ensure_video_recording_available(with_video_recording_tools)
-
     console = Console()
+    try:
+        config = _build_run_config(
+            video_recording_tools_enabled=with_video_recording_tools,
+            enable_planner_validation=enable_planner_validation,
+            enable_committee=enable_committee,
+            enable_checker=enable_checker,
+            enable_step_summarizer=enable_step_summarizer,
+            enable_outputter=enable_outputter,
+            force_output_synthesis=force_output_synthesis,
+            explorer_version=explorer_version,
+            explorer_flash_mode=explorer_flash_mode,
+            explorer_pro_mode=explorer_pro_mode,
+            verification_level=verification_level,
+        )
+        _preflight_run_config(config, profile)
+    except Exception as error:
+        from artemis.config.paths import get_main_config_path
+
+        try:
+            path = str(get_main_config_path("llm-config.json"))
+        except (OSError, ValueError, TypeError):
+            path = "the explicitly selected configuration path"
+        console.print(
+            f"Task configuration preflight failed in {path} (profile: {profile or 'default'}, provider: {getattr(error, 'configured_provider', 'selected configuration')}).",
+            markup=False,
+        )
+        console.print(
+            "Check the configured provider and role parameters. Use artemis providers list/test and artemis init --provider minimax --name <provider> for a complete MiniMax migration.",
+            markup=False,
+        )
+        raise typer.Exit(code=1) from None
+
+    ensure_video_recording_available(with_video_recording_tools)
 
     is_worker = (
         os.environ.get("ARTEMIS_TASK_WORKER") == "1"
@@ -436,17 +519,13 @@ def run_command(
         cancelled = True
     except Exception as e:
         err_msg = str(e)
-        if "API_KEY" in err_msg or "requires" in err_msg:
+        if "API_KEY" in err_msg or "no configured API key" in err_msg:
             console.print()
             console.print(
                 Panel(
                     f"[bold red]✖ Authentication Error:[/bold red] {err_msg}\n\n"
-                    "💡 [bold cyan]Quick Fix (pick one):[/bold cyan]\n"
-                    "  1. Run [bold green]artemis init[/bold green] to configure an API key in 10 seconds,\n"
-                    "     or add [bold]GEMINI_API_KEY=your_key[/bold] to [dim].env[/dim].\n"
-                    "  2. Use your own LLM instead (no built-in key needed):\n"
-                    "     [bold]artemis providers add --name my-llm --base-url https://host/v1 --model <model>[/bold]\n"
-                    "     Registering the first provider makes it the default, and the default is used by every node.",
+                    "Check the selected provider/configuration with [bold]artemis providers list/test[/bold].\n"
+                    "For a complete MiniMax migration: [bold]artemis init --provider minimax --name <provider>[/bold].",
                     title="Missing LLM Credentials",
                     expand=False,
                 )

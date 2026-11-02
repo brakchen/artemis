@@ -93,13 +93,13 @@ def test_device_dimensions_fall_back_independently():
 def test_norm_to_pixel_scales_on_the_0_1000_grid():
     assert norm_to_pixel(500, 500, 1080, 2400) == (540, 1200)
     assert norm_to_pixel(0, 0, 1080, 2400) == (0, 0)
-    assert norm_to_pixel(NORMALIZED_MAX, NORMALIZED_MAX, 1080, 2400) == (1080, 2400)
+    assert norm_to_pixel(NORMALIZED_MAX, NORMALIZED_MAX, 1080, 2400) == (1079, 2399)
     assert norm_to_pixel(250, 750, 1080, 2400) == (270, 1800)
 
 
 def test_norm_to_pixel_clamps_out_of_range_inputs():
     assert norm_to_pixel(-50, -1, 1080, 2400) == (0, 0)
-    assert norm_to_pixel(1500, 2000, 1080, 2400) == (1080, 2400)
+    assert norm_to_pixel(1500, 2000, 1080, 2400) == (1079, 2399)
 
 
 def test_pixel_to_norm_scales_back_to_the_0_1000_grid():
@@ -114,7 +114,7 @@ def test_pixel_to_norm_clamps_out_of_range_inputs():
 
 
 def test_conversions_round_trip_on_grid_points():
-    for nx, ny in [(0, 0), (500, 500), (1000, 1000), (250, 750)]:
+    for nx, ny in [(0, 0), (500, 500), (250, 750)]:
         px, py = norm_to_pixel(nx, ny, 1000, 2000)
         assert pixel_to_norm(px, py, 1000, 2000) == (nx, ny)
 
@@ -148,3 +148,18 @@ def test_valid_norm_points(coords):
 )
 def test_invalid_norm_points(coords):
     assert not is_valid_norm_point(coords)
+
+
+def test_point_endpoints_are_in_bounds_and_rounding_is_shared():
+    from artemis.utils.coordinates import denormalize_bbox, denormalize_point
+
+    assert norm_to_pixel(800, 200, 1080, 2400) == (864, 480)
+    assert norm_to_pixel(333.5, 333.5, 100, 100) == tuple(denormalize_point(333.5, 333.5, 100, 100))
+    assert norm_to_pixel(1000, 1000, 1, 1) == (0, 0)
+    assert denormalize_bbox([0, 0, 1000, 1000], 1080, 2400) == [0, 0, 1080, 2400]
+    for value in (True, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            norm_to_pixel(value, 200, 1080, 2400)
+    for size in ((0, 100), (100, -1), (True, 100)):
+        with pytest.raises(ValueError):
+            norm_to_pixel(500, 500, *size)

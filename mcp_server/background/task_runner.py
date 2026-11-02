@@ -69,45 +69,7 @@ async def _initialize_agent(
         ) from error
 
 
-def resolve_profile_file() -> str | None:
-    """Resolves the LLM configuration profile across multiple locations."""
-    candidates = []
-    artemis_config_dir = os.getenv("ARTEMIS_CONFIG_DIR")
-    if artemis_config_dir:
-        candidates.extend(
-            [
-                os.path.join(artemis_config_dir, "llm-config.override.jsonc"),
-                os.path.join(artemis_config_dir, "llm-config.json"),
-            ]
-        )
-    try:
-        # Deliberate guarded import mirroring the module-level bootstrap above:
-        # profile resolution must degrade to repo-relative candidates when the
-        # artemis config package cannot be loaded.
-        from artemis.config.paths import get_app_dir
-
-        app_dir = str(get_app_dir())
-        candidates.extend(
-            [
-                os.path.join(app_dir, "llm-config.override.jsonc"),
-                os.path.join(app_dir, "llm-config.json"),
-            ]
-        )
-    except (ImportError, OSError):
-        pass
-
-    candidates.extend(
-        [
-            os.path.join(PROJECT_ROOT, "llm-config.override.jsonc"),
-            os.path.join(PROJECT_ROOT, "llm-config.json"),
-            os.path.join(PROJECT_ROOT, "config", "llm-config.json"),
-        ]
-    )
-
-    for cand in candidates:
-        if os.path.exists(cand):
-            return cand
-    return None
+from mcp_server.utils.task_config import build_task_config, resolve_profile_file
 
 
 async def run_task(
@@ -154,7 +116,7 @@ async def run_task(
     print("--------------------------------------------------")
 
     agent = None
-    adb_path = device_utils.resolve_adb_path()
+    adb_path = None
     target_serial = device_serial
 
     try:
@@ -165,8 +127,13 @@ async def run_task(
         # before status.json is ever updated.
         from artemis.config import settings
         from artemis.sdk import Agent
-        from artemis.sdk.builders import Builders
-        from artemis.sdk.types import AgentProfile
+
+        config = build_task_config(
+            verification_level=verification_level, explorer_mode=explorer_pro_mode
+        )
+        agent = Agent(config=config)
+        agent.prepare_task_config("flash" if model.lower() == "flash" else None)
+        adb_path = device_utils.resolve_adb_path()
 
         connected_devices = device_utils.get_connected_devices(adb_path)
 
@@ -205,30 +172,13 @@ async def run_task(
             trace_store.update_trace_device_serial(trace_id, target_serial)
 
         print("Initializing Artemis Agent...")
-        from artemis.config import initialize_llm_config, settings
-
-        profile_file = resolve_profile_file()
-        if profile_file:
-            profile = AgentProfile(name="default", from_file=profile_file)
-        else:
-            profile = AgentProfile(name="default", llm_config=initialize_llm_config())
-
-        config_builder = Builders.AgentConfig.with_default_profile(profile)
-        if verification_level:
-            config_builder.with_verification_level(verification_level)
-        if explorer_pro_mode:
-            config_builder.with_explorer(pro_mode=explorer_pro_mode)
-        if settings.ADB_HOST:
-            config_builder.with_adb_server(host=settings.ADB_HOST, port=settings.ADB_PORT)
-
         if target_serial:
             from artemis.context import DevicePlatform
 
-            config_builder.for_device(DevicePlatform.ANDROID, target_serial)
-
-        config = config_builder.build()
-
-        agent = Agent(config=config)
+            # Preserve the preflighted model objects; only bind the selected device.
+            agent._config = config.model_copy(
+                update={"device_platform": DevicePlatform.ANDROID, "device_id": target_serial}
+            )
         await _initialize_agent(
             agent,
             retry_count=int(os.getenv("ARTEMIS_HEALTH_RETRIES", 5)),

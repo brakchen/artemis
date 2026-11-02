@@ -296,14 +296,14 @@
       <div class="step-title-row">
         <h3 class="step-title">{{ 'AI Model Setup' | t }}</h3>
       </div>
-      <p class="step-desc">{{ 'Google Gemini or custom LLM providers (OpenAI, Claude, Ollama)' | t }}</p>
+      <p class="step-desc">{{ 'MiniMax, Google Gemini, and custom providers using OpenAI or Anthropic Messages' | t }}</p>
     </div>
   </div>
 
   <div class="guide-card-body">
     <!-- 2 Big Visual Choice Cards -->
     <div class="model-choice-cards-row">
-      <!-- Card 1: Gemini (Recommended) -->
+      <!-- Card 1: Built-in Gemini provider -->
       <div class="choice-card" [class.selected]="modelSetupMode() === 'gemini'" (click)="setModelSetupMode('gemini')">
         <div class="choice-card-top">
           <div class="choice-radio">
@@ -326,7 +326,7 @@
           <div class="choice-text">
             <div class="choice-title-row">
               <span class="choice-title">{{ 'Google Gemini' | t }}</span>
-              <span class="tag-badge tag-rec">{{ 'Recommended' | t }}</span>
+              <span class="tag-badge tag-rec">{{ 'Built-in provider' | t }}</span>
             </div>
             <p class="choice-desc">{{ 'Fast multimodal reasoning with free API key from Google AI Studio.' | t }}</p>
           </div>
@@ -346,7 +346,7 @@
             <div class="choice-title-row">
               <span class="choice-title">{{ 'Custom Configuration' | t }}</span>
             </div>
-            <p class="choice-desc">{{ 'Define models in' | t }}<code>{{ 'config/artemis.jsonc' | t }}</code>{{ '& keys in' | t }}<code>.env</code>{{ '(OpenAI, Claude, Ollama).' | t }}</p>
+            <p class="choice-desc">{{ 'Task models use the selected config file. Custom provider keys use the protected registry; built-in keys can also use .env.' | t }}</p>
           </div>
         </div>
       </div>
@@ -572,9 +572,9 @@
               <span class="metric-label">{{ 'Default Model' | t }}</span>
               <div class="metric-val-pill">
                 <span class="provider-dot"></span>
-                <span class="provider-name">{{ effectiveDefaultModel()?.provider || 'google' }}</span>
+                <span class="provider-name" data-testid="active-model-provider">{{ effectiveDefaultModel()?.provider || ('Unavailable' | t) }}</span>
                 <span class="model-divider">/</span>
-                <span class="model-name">{{ effectiveDefaultModel()?.model || 'gemini-3.8-flash' }}</span>
+                <span class="model-name" data-testid="active-model-name">{{ effectiveDefaultModel()?.model || ('Unavailable' | t) }}</span>
               </div>
             </div>
           
@@ -582,7 +582,7 @@
             <div class="summary-metric">
               <span class="metric-label">{{ 'Fallback Model' | t }}</span>
               <div class="metric-val-pill secondary">
-                <span>{{ effectiveDefaultModel()?.fallback?.provider }}/{{ effectiveDefaultModel()?.fallback?.model }}</span>
+                <span>{{ effectiveDefaultModel()?.fallback?.provider || ('Unavailable' | t) }}/{{ effectiveDefaultModel()?.fallback?.model || ('Unavailable' | t) }}</span>
               </div>
             </div>
             }
@@ -592,7 +592,7 @@
           @if (effectiveOverrideActive()) {
           <div class="config-effective-hint">
             <span class="material-symbols-outlined">info</span>
-            <span>{{ 'Using default LLM provider' | t }}<code>{{ effectiveDefaultModel()?.provider }}</code>{{ '— the configured' | t }}<code>{{ configuredDefaultLabel() }}</code>{{ (effectiveDefaultModel()?.resolved_via === 'default' ? ('is overridden by the default provider.' | t) : ('has no API key registered.' | t)) | t }}</span>
+            <span>{{ 'Using default LLM provider' | t }}<code>{{ effectiveDefaultModel()?.provider }}</code>{{ '— the configured' | t }}<code data-testid="configured-model-label">{{ configuredDefaultLabel() }}</code>{{ (effectiveDefaultModel()?.resolved_via === 'default' ? ('is overridden by the default provider.' | t) : ('has no API key registered.' | t)) | t }}</span>
           </div>
           }
 
@@ -660,13 +660,13 @@
         </div>
         </div>
 
-      <!-- Section 3: Custom LLM Providers (OpenAI-compatible) -->
+      <!-- Section 3: Custom LLM Providers (OpenAI / Anthropic Messages) -->
       <div class="inspector-card">
         <div class="inspector-card-header">
           <div class="inspector-header-left">
             <span class="material-symbols-outlined header-icon">lan</span>
             <div class="inspector-header-titles">
-              <span class="inspector-title">{{ 'Custom LLM Providers (OpenAI-compatible)' | t }}</span>
+              <span class="inspector-title">{{ 'Custom LLM Providers (OpenAI / Anthropic Messages)' | t }}</span>
               <span class="inspector-subtitle">{{ 'Register several providers, pick one default · stored in' | t }}<code>{{ llmRegistryPath() || 'llm_providers.json' }}</code></span>
             </div>
           </div>
@@ -696,6 +696,7 @@
                   <span class="material-symbols-outlined">star</span>
                 </button>
                 }
+                <button type="button" class="btn-icon-action" data-testid="provider-edit" [disabled]="providerBusy()" title="{{ 'Edit provider' | t }}" (click)="editLlmProvider(p)"><span class="material-symbols-outlined">edit</span></button>
                 <button type="button" class="btn-icon-action" title="{{ 'Remove provider' | t }}"
                   (click)="removeLlmProvider(p.name)">
                   <span class="material-symbols-outlined">delete_outline</span>
@@ -731,18 +732,35 @@
         </div>
 
         <!-- Add / update a provider -->
-        <div class="credentials-input-box ocr-box">
+        <div class="credentials-input-box ocr-box" data-testid="provider-form">
           <div class="input-box-header">
             <div class="header-label">
               <span class="material-symbols-outlined label-icon">add_circle</span>
-              <span>{{ 'Add Provider (OpenAI-compatible):' | t }}</span>
+              <span>{{ 'Add or edit provider:' | t }}</span>
             </div>
           </div>
 
+          <fieldset class="provider-form" [disabled]="providerBusy()">
+          <div class="unified-key-row">
+            <button type="button" class="btn-unified-test" data-testid="minimax-preset" (click)="useMiniMaxPreset()">{{ 'MiniMax China preset' | t }}</button>
+            <label>{{ 'Protocol' | t }}
+              <select data-testid="provider-kind" [ngModel]="newProviderKind()" (ngModelChange)="newProviderKind.set($event); newProviderVendor.set('')">
+                <option value="openai">{{ 'OpenAI compatible' | t }}</option>
+                <option value="anthropic">{{ 'Anthropic Messages' | t }}</option>
+              </select>
+            </label>
+            <label>{{ 'Vendor' | t }}
+              <select data-testid="provider-vendor" [ngModel]="newProviderVendor()" (ngModelChange)="newProviderVendor.set($event)">
+                <option value="">{{ 'Generic' | t }}</option>
+                @if (newProviderKind() === 'anthropic') { <option value="minimax">MiniMax</option> }
+              </select>
+            </label>
+          </div>
+          <p class="provider-check-hint">{{ 'Enter model IDs manually when the catalog is unavailable. Catalog access does not verify image, tools or search permissions.' | t }}</p>
           <div class="unified-key-row">
             <div class="unified-key-wrapper">
               <span class="material-symbols-outlined key-prefix-icon">badge</span>
-              <input type="text" class="unified-key-input" [ngModel]="newProviderName()"
+              <input type="text" class="unified-key-input" data-testid="provider-name" [readonly]="!!editingProvider()" [ngModel]="newProviderName()"
                 (ngModelChange)="newProviderName.set($event)" placeholder="{{ 'Provider name (e.g. my-proxy)' | t }}"
                 spellcheck="false" autocomplete="off" />
             </div>
@@ -751,13 +769,13 @@
           <div class="unified-key-row">
             <div class="unified-key-wrapper">
               <span class="material-symbols-outlined key-prefix-icon">link</span>
-              <input type="text" class="unified-key-input" [ngModel]="newProviderBaseUrl()"
+              <input type="text" class="unified-key-input" data-testid="provider-base" [ngModel]="newProviderBaseUrl()"
                 (ngModelChange)="newProviderBaseUrl.set($event)"
                 placeholder="{{ 'Base URL (e.g. https://api.example.com/v1)' | t }}" spellcheck="false" autocomplete="off" />
             </div>
 
             <button type="button" class="btn-unified-test" title="{{ 'Fetch the model list this endpoint exposes' | t }}"
-              [disabled]="isDiscoveringModels() || isSavingProvider() || !newProviderBaseUrl().trim()"
+              data-testid="provider-models" [disabled]="providerBusy() || !newProviderBaseUrl().trim() || !canUseProviderKey()"
               (click)="discoverProviderModels()">
               @if (isDiscoveringModels()) {
               <span class="material-symbols-outlined spin">sync</span>
@@ -776,9 +794,9 @@
           <div class="unified-key-row">
             <div class="unified-key-wrapper">
               <span class="material-symbols-outlined key-prefix-icon">deployed_code</span>
-              <input type="text" class="unified-key-input" [ngModel]="newProviderModel()"
+              <input type="text" class="unified-key-input" data-testid="provider-model" [ngModel]="newProviderModel()"
                 (ngModelChange)="newProviderModel.set($event)"
-                placeholder="{{ 'Default model (Fetch Models to pick one)' | t }}" spellcheck="false" autocomplete="off" />
+                placeholder="{{ 'Default model ID (type or pick from catalog)' | t }}" spellcheck="false" autocomplete="off" />
             </div>
             <button type="button" class="btn-unified-test" title="{{ 'Pick the default model from the fetched list' | t }}"
               [disabled]="!discoveredModels().length" (click)="toggleModelPicker('default')">
@@ -790,7 +808,7 @@
           <div class="unified-key-row">
             <div class="unified-key-wrapper">
               <span class="material-symbols-outlined key-prefix-icon">swap_horiz</span>
-              <input type="text" class="unified-key-input" [ngModel]="newProviderFallbackModel()"
+              <input type="text" class="unified-key-input" data-testid="provider-fallback" [ngModel]="newProviderFallbackModel()"
                 (ngModelChange)="newProviderFallbackModel.set($event)"
                 placeholder="{{ 'Fallback model (optional)' | t }}" spellcheck="false" autocomplete="off" />
             </div>
@@ -857,12 +875,12 @@
           <div class="unified-key-row">
             <div class="unified-key-wrapper">
               <span class="material-symbols-outlined key-prefix-icon">key</span>
-              <input [type]="showNewProviderKey() ? 'text' : 'password'" class="unified-key-input"
+              <input [type]="showNewProviderKey() ? 'text' : 'password'" class="unified-key-input" data-testid="provider-key"
                 [class.is-masked]="!showNewProviderKey()" [ngModel]="newProviderApiKey()"
                 (ngModelChange)="newProviderApiKey.set($event)"
-                placeholder="{{ 'API key (OpenAI-compatible, e.g. sk-...)' | t }}" spellcheck="false" autocomplete="off" />
+                placeholder="{{ 'API key (blank keeps the stored key when editing)' | t }}" spellcheck="false" autocomplete="off" />
               <button type="button" class="btn-icon-action"
-                [title]="showNewProviderKey() ? 'Mask Key' : 'Show Plaintext'" (click)="toggleNewProviderKeyVisibility()">
+                [title]="showNewProviderKey() ? ('Mask Key' | t) : ('Show Plaintext' | t)" (click)="toggleNewProviderKeyVisibility()">
                 <span class="material-symbols-outlined">
                   {{ showNewProviderKey() ? 'visibility_off' : 'visibility' }}
                 </span>
@@ -870,7 +888,7 @@
             </div>
 
             <button type="button" class="btn-unified-test" title="{{ 'Test endpoint + key without saving' | t }}"
-              [disabled]="isTestingProvider() || isSavingProvider() || !newProviderApiKey().trim()"
+              data-testid="provider-test" [disabled]="providerBusy() || !canUseProviderKey()"
               (click)="testLlmProviderKey()">
               @if (isTestingProvider()) {
               <span class="material-symbols-outlined spin">sync</span>
@@ -883,17 +901,23 @@
 
             <button type="button" class="btn-unified-save"
               [class.btn-dirty]="!!newProviderName().trim() && !!newProviderApiKey().trim()"
-              [disabled]="isSavingProvider() || isTestingProvider() || !newProviderName().trim() || !newProviderApiKey().trim()"
+              data-testid="provider-save" [disabled]="providerBusy() || !newProviderName().trim() || !canUseProviderKey()"
               (click)="saveLlmProvider()">
               @if (isSavingProvider()) {
               <span class="material-symbols-outlined spin">sync</span>
-              <span>{{ 'Verifying & Saving...' | t }}</span>
+              <span>{{ verifyProviderCatalog() ? ('Verifying & Saving...' | t) : ('Saving...' | t) }}</span>
               } @else {
               <span class="material-symbols-outlined">save</span>
-              <span>{{ 'Verify & Save' | t }}</span>
+              <span>{{ verifyProviderCatalog() ? ('Verify & Save' | t) : ('Save without verification' | t) }}</span>
               }
             </button>
           </div>
+
+          <label class="provider-check-row">
+            <input type="checkbox" data-testid="provider-verify-catalog" [ngModel]="verifyProviderCatalog()" (ngModelChange)="verifyProviderCatalog.set($event)" />
+            <span class="provider-check-title">{{ 'Verify catalog authentication before saving' | t }}</span>
+          </label>
+          <p class="provider-check-hint">{{ 'Turn off if this endpoint has no model catalog. Saving without verification does not confirm credentials or model permissions.' | t }}</p>
 
           <label class="provider-check-row">
             <input type="checkbox" [ngModel]="newProviderMakeDefault()" (ngModelChange)="newProviderMakeDefault.set($event)" />
@@ -901,6 +925,14 @@
             <span class="provider-check-hint">{{ 'used whenever a model config doesn’t name a provider' | t }}</span>
           </label>
 
+          </fieldset>
+          <div class="unified-key-row">
+            <button type="button" class="btn-unified-test" data-testid="provider-cancel" [disabled]="providerBusy()" (click)="resetProviderForm()">{{ 'Cancel editing' | t }}</button>
+            @if (editingProvider()) {
+              <button type="button" class="btn-unified-test" data-testid="provider-clear" [disabled]="providerBusy()" (click)="clearAndDisableProvider()">{{ 'Clear key and disable' | t }}</button>
+            }
+          </div>
+          <p class="provider-check-hint" data-testid="migration-guidance">{{ 'Saving a provider does not migrate all roles or mark tasks ready. Complete MiniMax setup in the terminal, then refresh configuration:' | t }} <code>{{ minimaxMigrationCommand() }}</code></p>
           @if (providerSaveMessage()) {
           <div class="feedback-msg success">
             <span class="material-symbols-outlined">check_circle</span>

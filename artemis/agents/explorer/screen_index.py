@@ -19,15 +19,18 @@ Engine having persisted the frame. Supports fuzzy text search, exact matches
 and coordinate hit testing.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 import difflib
 import re
-from typing import Any, Literal
+from typing import Any
 
 from artemis.utils.visualization import parse_bounds
+from artemis.utils.vision import copy_provenance
 
 Bounds = tuple[int, int, int, int]
-ElementSource = Literal["xml", "ocr"]
+ElementSource = str
 
 #: Attributes that mark an XML node as something the user can interact with.
 INTERACTION_KEYS = (
@@ -81,6 +84,19 @@ class ScreenElement:
     resource_id: str | None = None
     interactive: bool = False
     node: dict[str, Any] = field(default_factory=dict, compare=False, hash=False, repr=False)
+    metadata: dict[str, Any] = field(default_factory=dict, compare=False, hash=False, repr=False)
+
+    @property
+    def actionable(self) -> bool:
+        return (
+            self.source == "xml"
+            and any(
+                _is_truthy_attr(self.node.get(key))
+                for key in ("clickable", "long-clickable", "checkable", "editable")
+            )
+            and str(self.node.get("enabled", "true")).lower() != "false"
+            and str(self.node.get("visible", "true")).lower() != "false"
+        )
 
     @property
     def center(self) -> tuple[int, int]:
@@ -96,7 +112,7 @@ class ScreenElement:
         left, top, right, bottom = self.bounds
         return left <= x <= right and top <= y <= bottom
 
-    def overlap_ratio(self, other: "ScreenElement") -> float:
+    def overlap_ratio(self, other: ScreenElement) -> float:
         """Intersection over the smaller area; 1.0 when one box covers the other."""
         l1, t1, r1, b1 = self.bounds
         l2, t2, r2, b2 = other.bounds
@@ -146,13 +162,13 @@ class ScreenIndex:
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def empty(cls, width: int, height: int) -> "ScreenIndex":
+    def empty(cls, width: int, height: int) -> ScreenIndex:
         return cls([], width, height)
 
     @classmethod
     def from_hierarchy(
         cls, fused_xml: list[dict[str, Any]] | None, width: int, height: int
-    ) -> "ScreenIndex":
+    ) -> ScreenIndex:
         """Builds the index from a fused UI hierarchy (XML nodes plus OCR text).
 
         Off-screen and zero-area boxes are dropped, and the same label at the
@@ -190,6 +206,7 @@ class ScreenIndex:
                             resource_id=str(resource_id) if resource_id else None,
                             interactive=interactive,
                             node=node,
+                            metadata=copy_provenance(ocr),
                         )
                     )
 
@@ -205,6 +222,7 @@ class ScreenIndex:
                         resource_id=str(resource_id) if resource_id else None,
                         interactive=interactive,
                         node=node,
+                        metadata=copy_provenance(node),
                     )
                 )
         return cls(elements, width, height)

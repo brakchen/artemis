@@ -14,10 +14,22 @@
 
 """Environment and runtime discovery utilities for MCP."""
 
+from __future__ import annotations
+
+import importlib
 import os
 import subprocess
 import sys
 from typing import Any
+
+
+def import_artemis_package() -> None:
+    """Finish the root import before execution paths acquire leaf module locks.
+
+    The package's eager public exports also import runtime modules. Starting at
+    the root lets Python serialize that bootstrap across tools and awake startup.
+    """
+    importlib.import_module("artemis")
 
 
 def get_project_root() -> str:
@@ -26,6 +38,7 @@ def get_project_root() -> str:
     # package (or its config bootstrap) is unavailable or broken, falling back
     # to filesystem-relative resolution below.
     try:
+        import_artemis_package()
         from artemis.config.paths import ROOT_DIR
 
         return str(ROOT_DIR)

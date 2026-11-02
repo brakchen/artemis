@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CLI for the user-configured LLM provider registry (OpenAI-compatible)."""
+"""CLI for registered OpenAI-compatible and Anthropic Messages providers."""
 
-from typing import Annotated, Optional
+from __future__ import annotations
+
+from typing import Annotated
 
 from rich.console import Console
 from rich.table import Table
@@ -24,7 +26,7 @@ from artemis.llm.providers import provider_registry
 
 providers_app = typer.Typer(
     name="providers",
-    help="Manage OpenAI-compatible LLM providers (API keys, base URLs, default provider).",
+    help="Manage OpenAI-compatible and Anthropic Messages providers (API keys, base URLs, default provider).",
     add_completion=False,
     pretty_exceptions_enable=False,
     no_args_is_help=True,
@@ -73,122 +75,136 @@ def list_command() -> None:
     _print_table(provider_registry.default_provider_name)
 
 
-@providers_app.command(name="add", help="Register (or update) an OpenAI-compatible LLM provider.")
-def add_command(
-    name: Annotated[str, typer.Option("--name", "-n", help="Provider name, e.g. my-proxy.")],
-    api_key: Annotated[
-        str | None,
-        typer.Option("--api-key", "-k", help="API key (prompted when omitted).", hide_input=True),
-    ] = None,
-    base_url: Annotated[
-        str | None,
-        typer.Option(
-            "--base-url",
-            "-b",
-            help="OpenAI-compatible base URL, e.g. https://api.example.com/v1",
-        ),
-    ] = None,
-    model: Annotated[
-        str | None,
-        typer.Option("--model", "-m", help="Default model for this provider, e.g. gpt-4o."),
-    ] = None,
-    fallback_model: Annotated[
-        str | None,
-        typer.Option(
-            "--fallback-model", help="Fallback model (like artemis.jsonc default.fallback)."
-        ),
-    ] = None,
-    kind: Annotated[
-        str,
-        typer.Option("--kind", help="Wire format. Only 'openai' (OpenAI-compatible) today."),
-    ] = "openai",
-    temperature: Annotated[
-        float | None, typer.Option("--temperature", help="Optional sampling temperature.")
-    ] = None,
-    timeout: Annotated[
-        float | None, typer.Option("--timeout", help="Optional request timeout in seconds.")
-    ] = None,
-    make_default: Annotated[
-        bool,
-        typer.Option("--default/--no-default", help="Make this the default LLM provider."),
-    ] = False,
-    test: Annotated[
-        bool,
-        typer.Option("--test/--no-test", help="Verify the key against the endpoint before saving."),
-    ] = True,
-) -> None:
-    if not api_key:
-        api_key = typer.prompt("API key", hide_input=True)
-    api_key = api_key.strip()
-    if not api_key:
-        console.print("[red]API key must not be empty.[/red]")
-        raise typer.Exit(code=1)
+def _draft_values(draft: dict) -> dict:
+    values = {key: value for key, value in draft.items() if value is not None}
+    if "vendor" in values and str(values["vendor"]).lower() in {"generic", "none", ""}:
+        values["vendor"] = None
+    return values
 
-    if test:
-        _test_credentials(name=name, api_key=api_key, base_url=base_url)
 
+def _candidate(name: str | None, **draft):
     try:
-        entry = provider_registry.add(
-            name=name,
-            api_key=api_key,
-            api_base=base_url,
-            model=model,
-            fallback_model=fallback_model,
-            kind=kind,
-            temperature=temperature,
-            timeout_seconds=timeout,
-            make_default=make_default,
+        return provider_registry.candidate(name=name, **_draft_values(draft))
+    except ValueError:
+        console.print(
+            "[red]Invalid provider configuration. Check protocol, vendor, endpoint and key.[/red]"
         )
-    except ValueError as exc:
-        console.print(f"[red]Could not save provider: {exc}[/red]")
-        raise typer.Exit(code=1) from exc
+        raise typer.Exit(code=1) from None
 
-    console.print(f"[green]✔ Provider '{entry.name}' saved.[/green]")
+
+@providers_app.command(
+    name="edit", help="Edit a provider; omitted fields and blank keys are retained."
+)
+@providers_app.command(
+    name="add", help="Register or update an OpenAI or Anthropic Messages provider."
+)
+def add_command(
+    name: Annotated[str, typer.Option("--name", "-n")],
+    api_key: Annotated[str | None, typer.Option("--api-key", "-k", hide_input=True)] = None,
+    base_url: Annotated[str | None, typer.Option("--base-url", "-b")] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m")] = None,
+    fallback_model: Annotated[str | None, typer.Option("--fallback-model")] = None,
+    kind: Annotated[str | None, typer.Option("--kind", help="openai or anthropic")] = None,
+    vendor: Annotated[
+        str | None,
+        typer.Option(
+            "--vendor", help="minimax for MiniMax capabilities; generic clears the vendor"
+        ),
+    ] = None,
+    temperature: Annotated[float | None, typer.Option("--temperature")] = None,
+    timeout: Annotated[float | None, typer.Option("--timeout")] = None,
+    enabled: Annotated[bool | None, typer.Option("--enabled/--disabled")] = None,
+    is_multimodal: Annotated[bool | None, typer.Option("--multimodal/--text-only")] = None,
+    clear_api_key: Annotated[
+        bool, typer.Option("--clear-api-key", help="Explicitly clear the stored key.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Confirm key clearing.")] = False,
+    make_default: Annotated[bool, typer.Option("--default/--no-default")] = False,
+    test: Annotated[bool, typer.Option("--test/--no-test")] = True,
+) -> None:
+    if clear_api_key and api_key and api_key.strip():
+        console.print("[red]--api-key and --clear-api-key are mutually exclusive.[/red]")
+        raise typer.Exit(code=1)
+    if clear_api_key and not yes:
+        typer.confirm(f"Clear the stored API key for '{name}'?", abort=True)
+    if api_key is None and provider_registry.get(name) is None and not clear_api_key:
+        api_key = typer.prompt("API key", hide_input=True)
+    entry = _candidate(
+        name,
+        api_key=api_key,
+        api_base=base_url,
+        model=model,
+        fallback_model=fallback_model,
+        kind=kind,
+        vendor=vendor,
+        temperature=temperature,
+        timeout_seconds=timeout,
+        enabled=enabled,
+        is_multimodal=is_multimodal,
+        clear_api_key=clear_api_key,
+    )
+    if test and not clear_api_key:
+        _test_credentials(entry)
+    try:
+        draft = {
+            "api_key": api_key,
+            "api_base": base_url,
+            "model": model,
+            "fallback_model": fallback_model,
+            "kind": kind,
+            "vendor": vendor,
+            "temperature": temperature,
+            "timeout_seconds": timeout,
+            "enabled": enabled,
+            "is_multimodal": is_multimodal,
+            "clear_api_key": clear_api_key,
+        }
+        entry = provider_registry.save_candidate(
+            name=name,
+            make_default=make_default,
+            **_draft_values(draft),
+        )
+    except ValueError:
+        console.print("[red]Could not save provider configuration.[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"[green]Provider '{entry.name}' saved.[/green]")
+    if entry.vendor == "minimax":
+        console.print(
+            f"Complete the role migration with: artemis init --provider minimax --name {entry.name}"
+        )
     _print_table(provider_registry.default_provider_name)
 
 
 @providers_app.command(
-    name="models",
-    help="List the models an OpenAI-compatible endpoint exposes (GET {base}/models).",
+    name="models", help="List catalog models; does not prove image/tools/search permissions."
 )
 def models_command(
-    name: Annotated[
-        str | None,
-        typer.Argument(help="Registered provider name. Omit to use --base-url/--api-key."),
-    ] = None,
-    base_url: Annotated[
-        str | None, typer.Option("--base-url", "-b", help="OpenAI-compatible base URL.")
-    ] = None,
-    api_key: Annotated[
-        str | None,
-        typer.Option("--api-key", "-k", help="API key (only needed for unregistered endpoints)."),
-    ] = None,
+    name: Annotated[str | None, typer.Argument()] = None,
+    base_url: Annotated[str | None, typer.Option("--base-url", "-b")] = None,
+    api_key: Annotated[str | None, typer.Option("--api-key", "-k", hide_input=True)] = None,
+    kind: Annotated[str | None, typer.Option("--kind")] = None,
+    vendor: Annotated[str | None, typer.Option("--vendor")] = None,
 ) -> None:
     import asyncio
-
     from artemis.llm.providers import discover_models
 
-    kind = "openai"
-    if name:
-        entry = provider_registry.get(name)
-        if entry is None:
-            console.print(f"[red]Unknown provider '{name}'.[/red]")
-            raise typer.Exit(code=1)
-        base_url = base_url or entry.api_base
-        api_key = api_key or entry.api_key.get_secret_value()
-        kind = entry.kind
-
-    if not base_url:
+    entry = _candidate(name, api_base=base_url, api_key=api_key, kind=kind, vendor=vendor)
+    if not entry.api_base:
         console.print("[red]Provide a registered provider name or --base-url.[/red]")
         raise typer.Exit(code=1)
-
     try:
-        models, endpoint = asyncio.run(discover_models(base_url, api_key, kind=kind))
+        models, endpoint = asyncio.run(
+            discover_models(
+                entry.api_base,
+                entry.api_key.get_secret_value(),
+                kind=entry.kind,
+                vendor=entry.vendor,
+            )
+        )
     except (ValueError, RuntimeError) as exc:
         console.print(f"[red]Model discovery failed: {exc}[/red]")
-        raise typer.Exit(code=1) from exc
-
-    console.print(f"[green]✔ {len(models)} model(s) from[/green] {endpoint}")
+        raise typer.Exit(code=1) from None
+    console.print(f"[green]{len(models)} model(s) from[/green] {endpoint}")
     for model in models:
         console.print(f"  • {model.id}" + (f"  [dim]({model.name})[/dim]" if model.name else ""))
 
@@ -219,30 +235,33 @@ def remove_command(
         raise typer.Exit(code=1)
 
 
-@providers_app.command(name="test", help="Verify a registered provider's key against its endpoint.")
+@providers_app.command(
+    name="test", help="Verify catalog authentication using the complete provider draft."
+)
 def test_command(
-    name: Annotated[str, typer.Argument(help="Provider name to test.")],
+    name: Annotated[str | None, typer.Argument()] = None,
+    base_url: Annotated[str | None, typer.Option("--base-url", "-b")] = None,
+    api_key: Annotated[str | None, typer.Option("--api-key", "-k", hide_input=True)] = None,
+    kind: Annotated[str | None, typer.Option("--kind")] = None,
+    vendor: Annotated[str | None, typer.Option("--vendor")] = None,
 ) -> None:
-    entry = provider_registry.get(name)
-    if entry is None:
-        console.print(f"[red]Unknown provider '{name}'.[/red]")
-        raise typer.Exit(code=1)
     _test_credentials(
-        name=entry.name, api_key=entry.api_key.get_secret_value(), base_url=entry.api_base
+        _candidate(name, api_base=base_url, api_key=api_key, kind=kind, vendor=vendor)
     )
 
 
-def _test_credentials(*, name: str, api_key: str, base_url: str | None) -> None:
+def _test_credentials(entry) -> None:
     import asyncio
-
     from artemis.utils.credentials_validator import validate_api_key
 
-    console.print(f"[dim]Testing provider '{name}' against {base_url or 'api.openai.com'}...[/dim]")
     ok, message = asyncio.run(
-        validate_api_key(provider="openai", api_key=api_key, base_url=base_url)
+        validate_api_key(
+            provider=entry.kind,
+            api_key=entry.api_key.get_secret_value(),
+            base_url=entry.api_base,
+            vendor=entry.vendor,
+        )
     )
-    if ok:
-        console.print(f"[green]✔ {message}[/green]")
-    else:
-        console.print(f"[red]✘ {message}[/red]")
+    console.print(message, markup=False)
+    if not ok:
         raise typer.Exit(code=1)

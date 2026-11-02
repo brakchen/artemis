@@ -71,9 +71,9 @@
     "video_analyzer": {},
 
     // 👁️ Object Detector & Explorer (Flash Mode): Visual coordinates grounding and bounding boxes
-    // CRITICAL REQUIREMENT: Standard LLMs (including standard Gemini Flash, GPT-4o, Claude 3.7) lack sub-pixel spatial coordinate fine-tuning.
-    // To achieve accurate [x, y] point and bounding box localization, this node MUST use specialized Gemini ER (Embodied Reasoning / Robotics) models:
-    // e.g., "gemini-robotics-er-2-preview". Non-ER models will fail spatial coordinate detection.
+    // Gemini ER is the legacy default for spatial grounding. MiniMax can use the
+    // shared finite-coordinate/provenance gate; its real localization quality
+    // remains unverified and strict verification still applies.
     "object_detector": {
       "model": "gemini-robotics-er-2-preview",
       "fallback": {
@@ -84,7 +84,7 @@
 
     // 🔍 Explorer: Deep element grounding and multi-candidate visual search
     // NOTE:
-    //  - "flash" version delegates directly to object_detector (requires Gemini ER model above).
+    //  - "flash" version delegates directly to the configured object_detector with strict coordinate validation.
     //  - "pro" / "ultra" versions run multi-turn ReAct loops (supports both Native Gemini and Universal Multi-Model LangChain engines).
     "explorer": {
       "thinking_level": "medium"

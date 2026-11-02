@@ -28,6 +28,8 @@ computed so the canonical surface never needs a pixel escape hatch.
 
 from typing import Any
 
+from artemis.utils.coordinates import validate_normalized_point
+
 __all__ = ["OPERATOR_ACTION_TO_CANONICAL", "to_canonical_call"]
 
 #: Operator-internal action verb -> canonical tool name.
@@ -69,7 +71,7 @@ def _norm_pair(
 
 
 def to_canonical_call(
-    action_item: dict[str, Any], dims: tuple[int, int] | None = None
+    action_item: dict[str, Any], dims: tuple[int, int] | None = None, *, strict: bool = False
 ) -> tuple[str, dict[str, Any]]:
     """Translates a Validator action item into a canonical (tool, kwargs) call.
 
@@ -86,6 +88,16 @@ def to_canonical_call(
     canonical = OPERATOR_ACTION_TO_CANONICAL.get(verb)
     if canonical is None:
         raise ValueError(f"Unsupported action: {verb}")
+
+    if strict:
+        if verb in {"tap", "long_press_on", "focus_and_input_text", "focus_and_clear_text"}:
+            validate_normalized_point(action_item.get("normalized_coordinates"))
+        elif verb == "swipe":
+            coords = action_item.get("normalized_coordinates")
+            if not isinstance(coords, (list, tuple)) or len(coords) != 4:
+                raise ValueError("Swipe requires complete normalized endpoints")
+            validate_normalized_point(coords[:2])
+            validate_normalized_point(coords[2:])
 
     if verb == "tap":
         pair = _norm_pair(action_item, dims)

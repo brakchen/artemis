@@ -14,8 +14,8 @@
 
 """User-configured LLM provider registry.
 
-Lets operators register named model providers (OpenAI-compatible endpoints:
-``base_url`` + ``api_key`` + optional default ``model``), keep several of them
+Lets operators register named OpenAI-compatible or Anthropic Messages providers:
+``base_url`` + ``api_key`` + optional default ``model``. Keep several of them
 side by side, and pick one as the default provider used whenever a model config
 does not name an explicit provider.
 
@@ -42,12 +42,17 @@ one, or registering another one as default) restores built-in behaviour.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from copy import deepcopy
 import os
 import re
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from filelock import FileLock
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from artemis.config.paths import get_app_dir
 from third_party.mobile_use.utils.logger import get_logger
@@ -58,7 +63,7 @@ PROVIDERS_FILENAME = "llm_providers.json"
 
 #: Transport kind. ``openai`` (and its alias ``openai_compatible``) speaks the
 #: OpenAI chat-completions wire format and is what custom gateways usually use.
-SUPPORTED_KINDS: tuple[str, ...] = ("openai", "openai_compatible")
+SUPPORTED_KINDS: tuple[str, ...] = ("openai", "openai_compatible", "anthropic")
 
 #: Names that must stay reserved so a registry entry can never shadow or be
 #: confused with a built-in provider.
@@ -87,6 +92,67 @@ RESERVED_NAMES: frozenset[str] = frozenset(
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
+
+def _protect_registry_file(path: Path) -> Any:
+    """Restrict a still-empty secret file before writing, returning its Windows SID."""
+    if os.name != "nt":
+        path.chmod(0o600)
+        return None
+    # pywin32's maintained WinAPI bindings (PSF license), using the documented
+    # protected DACL API: https://mhammond.github.io/pywin32/win32security__SetNamedSecurityInfo_meth.html
+    import ntsecuritycon
+    import win32api
+    import win32con
+    import win32security
+
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+    try:
+        user_sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+    finally:
+        token.Close()
+    dacl = win32security.ACL()
+    dacl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, user_sid)
+    win32security.SetNamedSecurityInfo(
+        str(path),
+        win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        dacl,
+        None,
+    )
+    _verify_registry_file_permissions(path, user_sid)
+    return user_sid
+
+
+def _verify_registry_file_permissions(path: Path, user_sid: Any) -> None:
+    """Fail closed if a temporary or published registry permits another principal."""
+    if os.name != "nt":
+        if path.stat().st_mode & 0o077:
+            raise PermissionError("LLM provider registry must be owner-only")
+        return
+    import ntsecuritycon
+    import win32security
+
+    descriptor = win32security.GetNamedSecurityInfo(
+        str(path),
+        win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION,
+    )
+    dacl = descriptor.GetSecurityDescriptorDacl()
+    control, _ = descriptor.GetSecurityDescriptorControl()
+    if not control & win32security.SE_DACL_PROTECTED or dacl is None or dacl.GetAceCount() != 1:
+        raise PermissionError("LLM provider registry requires a protected current-user DACL")
+    (ace_type, flags), mask, allowed_sid = dacl.GetAce(0)
+    if (
+        ace_type != win32security.ACCESS_ALLOWED_ACE_TYPE
+        or flags != 0
+        or mask != ntsecuritycon.FILE_ALL_ACCESS
+        or allowed_sid != user_sid
+    ):
+        raise PermissionError("LLM provider registry DACL is not restricted to the current user")
+
+
 #: Built-in providers that require an API key to be usable at all. Used for the
 #: "configured provider is missing a key → fall back to the default provider"
 #: rule.
@@ -111,8 +177,10 @@ _BUILTIN_ENV_KEYS: dict[str, tuple[str, ...]] = {
 class LLMProvider(BaseModel):
     """A named, user-registered LLM endpoint."""
 
+    model_config = {"extra": "forbid", "hide_input_in_errors": True}
     name: str = Field(description="Unique provider name, e.g. 'my-proxy'")
-    kind: str = Field(default="openai", description="Wire format: openai (OpenAI-compatible)")
+    kind: str = Field(default="openai", description="Wire format: openai or anthropic Messages")
+    vendor: Literal["minimax"] | None = None
     api_base: str | None = Field(
         default=None,
         description="Base URL of an OpenAI-compatible endpoint, e.g. https://api.example.com/v1",
@@ -126,9 +194,27 @@ class LLMProvider(BaseModel):
         description="Fallback model name, mirrors artemis.jsonc default.fallback.model",
     )
     temperature: float | None = Field(default=None, description="Optional sampling temperature")
-    timeout_seconds: float | None = Field(default=None, description="Optional request timeout")
+    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     is_multimodal: bool = Field(default=True, description="Whether image inputs are supported")
     enabled: bool = Field(default=True, description="Disabled entries are ignored at resolution")
+
+    @model_validator(mode="after")
+    def _validate_vendor(self) -> LLMProvider:
+        if self.vendor == "minimax" and self.kind != "anthropic":
+            raise ValueError("vendor=minimax requires kind=anthropic")
+        if self.kind == "anthropic" and self.api_base:
+            parts = urlsplit(self.api_base)
+            path = parts.path.rstrip("/")
+            if path.endswith("/v1"):
+                path = path[:-3]
+            if (
+                self.vendor == "minimax"
+                and parts.hostname in {"api.minimax.cn", "api.minimax.io"}
+                and not path
+            ):
+                path = "/anthropic"
+            self.api_base = urlunsplit(parts._replace(path=path))
+        return self
 
     @field_validator("name")
     @classmethod
@@ -172,6 +258,7 @@ class LLMProvider(BaseModel):
         return {
             "name": self.name,
             "kind": self.kind,
+            "vendor": self.vendor,
             "api_base": self.api_base,
             "model": self.model,
             "fallback_model": self.fallback_model,
@@ -211,6 +298,25 @@ class LLMProviderRegistry:
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = path
+        self._snapshot_data: dict[str, Any] | None = None
+
+    def snapshot(self) -> LLMProviderRegistry:
+        """Freeze one atomic registry revision for a task's endpoint preflight."""
+        registry = LLMProviderRegistry(self.path)
+        registry._snapshot_data = self._read()
+        return registry
+
+    @contextmanager
+    def _locked(self):
+        # filelock 3.32.3 (MIT), https://py-filelock.readthedocs.io/:
+        # use its maintained Windows/POSIX process lock for the whole transaction.
+        if os.getenv("ARTEMIS_CONFIG_READ_ONLY") == "1":
+            raise PermissionError(
+                "Injected model configuration is read-only; update it on the host"
+            )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(self.path) + ".lock", mode=0o600):
+            yield
 
     # ------------------------------------------------------------------ file
     @property
@@ -218,6 +324,8 @@ class LLMProviderRegistry:
         return self._path if self._path is not None else get_providers_file()
 
     def _read(self) -> dict[str, Any]:
+        if self._snapshot_data is not None:
+            return deepcopy(self._snapshot_data)
         path = self.path
         if not path.exists():
             return {"version": 1, "default_provider": None, "providers": []}
@@ -235,13 +343,20 @@ class LLMProviderRegistry:
     def _write(self, data: dict[str, Any]) -> None:
         path = self.path
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        # mkstemp is unique and owner-only on POSIX. Windows also needs a
+        # protected DACL; inherited directory permissions are insufficient.
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        tmp = Path(tmp_name)
         try:
-            path.chmod(0o600)
-        except OSError:  # pragma: no cover - platform dependent
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                user_sid = _protect_registry_file(tmp)
+                stream.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            tmp.replace(path)
+            _verify_registry_file_permissions(path, user_sid)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ read
     def list(self) -> list[LLMProvider]:
@@ -249,8 +364,10 @@ class LLMProviderRegistry:
         for raw in self._read().get("providers", []):
             try:
                 providers.append(LLMProvider.model_validate(raw))
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                logger.warning(f"Skipping malformed LLM provider entry {raw.get('name')!r}: {exc}")
+            except ValueError:
+                # Invalid storage must not echo a plaintext key in validation errors.
+                name = raw.get("name") if isinstance(raw, dict) else None
+                logger.warning(f"Skipping malformed LLM provider entry {name!r}")
         return providers
 
     def get(self, name: str) -> LLMProvider | None:
@@ -280,60 +397,151 @@ class LLMProviderRegistry:
     def names(self) -> list[str]:
         return [p.name for p in self.list()]
 
+    def candidate(self, *, name: str | None = None, **draft: Any) -> LLMProvider:
+        """Merge explicitly supplied draft fields with stored provider metadata.
+
+        HTTP fields_set and optional CLI arguments feed this same owner. Blank
+        edit keys retain the stored secret; clearing is a separate intent.
+        ``add`` remains the full-replacement storage operation.
+        """
+        existing = self.get(name) if name else None
+        data = existing.to_storage_dict() if existing else {"name": name or "draft"}
+        clear = draft.pop("clear_api_key", False)
+        key = draft.pop("api_key", None)
+        if clear and key and str(key).strip():
+            raise ValueError("api_key and clear_api_key are mutually exclusive")
+        data.update(draft)
+        if name:
+            data["name"] = name
+        if clear:
+            if existing is None:
+                raise ValueError("api_key is required for a new provider")
+            data["api_key"] = ""
+        elif key and str(key).strip():
+            data["api_key"] = str(key).strip()
+        elif not data.get("api_key"):
+            raise ValueError("api_key is required for a new provider")
+        entry = LLMProvider.model_validate(data)
+        if not clear and entry.vendor == "minimax" and not entry.api_base:
+            raise ValueError("MiniMax requires an explicit Messages base URL")
+        return entry
+
+    def with_candidate(
+        self, entry: LLMProvider, *, make_default: bool = False
+    ) -> LLMProviderRegistry:
+        """Return an unpublished registry revision for canonical endpoint preflight."""
+        registry = self.snapshot()
+        data = registry._read()
+        data["providers"] = [raw for raw in data["providers"] if raw.get("name") != entry.name] + [
+            entry.to_storage_dict()
+        ]
+        if make_default or not data.get("default_provider"):
+            data["default_provider"] = entry.name
+        registry._snapshot_data = data
+        return registry
+
+    def save_candidate(self, *, name: str, make_default: bool = False, **draft: Any) -> LLMProvider:
+        """Merge edit fields under the storage lock, preserving concurrent metadata."""
+        with self._locked():
+            entry = self.candidate(name=name, **draft)
+            data = entry.to_storage_dict()
+            data["clear_api_key"] = bool(draft.get("clear_api_key"))
+            return self._add_unlocked(**data, make_default=make_default, replace=True)
+
     # ----------------------------------------------------------------- write
     def add(
         self,
         *,
         name: str,
-        api_key: str,
+        api_key: str | None = None,
         api_base: str | None = None,
         model: str | None = None,
         fallback_model: str | None = None,
         kind: str = "openai",
+        vendor: Literal["minimax"] | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
         is_multimodal: bool = True,
         make_default: bool = False,
         replace: bool = True,
+        enabled: bool | None = None,
+        clear_api_key: bool = False,
     ) -> LLMProvider:
         """Register (or update) a provider. Secrets are stored only here."""
-        entry = LLMProvider(
-            name=name,
-            kind=kind,
-            api_base=api_base,
-            api_key=SecretStr(api_key.strip()),
-            model=model.strip() if model and model.strip() else None,
-            fallback_model=fallback_model.strip()
-            if fallback_model and fallback_model.strip()
-            else None,
-            temperature=temperature,
-            timeout_seconds=timeout_seconds,
-            is_multimodal=is_multimodal,
-        )
+        with self._locked():
+            return self._add_unlocked(
+                name=name,
+                api_key=api_key,
+                api_base=api_base,
+                model=model,
+                fallback_model=fallback_model,
+                kind=kind,
+                vendor=vendor,
+                temperature=temperature,
+                timeout_seconds=timeout_seconds,
+                is_multimodal=is_multimodal,
+                make_default=make_default,
+                replace=replace,
+                enabled=enabled,
+                clear_api_key=clear_api_key,
+            )
+
+    def _add_unlocked(self, **kwargs: Any) -> LLMProvider:
+        name = kwargs["name"]
         data = self._read()
         providers = data.get("providers", [])
         existing_idx = next(
             (
                 i
                 for i, raw in enumerate(providers)
-                if str(raw.get("name", "")).lower() == entry.name
+                if str(raw.get("name", "")).lower() == name.strip().lower()
             ),
             None,
         )
+        existing = providers[existing_idx] if existing_idx is not None else {}
+        api_key = (kwargs["api_key"] or "").strip()
+        if kwargs["clear_api_key"]:
+            if api_key:
+                raise ValueError("api_key and clear_api_key are mutually exclusive")
+            if existing_idx is None:
+                raise ValueError("api_key is required for a new provider")
+        elif not api_key:
+            api_key = str(existing.get("api_key") or "")
+            if not api_key:
+                raise ValueError("api_key is required for a new provider")
+        entry = LLMProvider(
+            name=name,
+            kind=kwargs["kind"],
+            vendor=kwargs["vendor"],
+            api_base=kwargs["api_base"],
+            api_key=SecretStr(api_key),
+            model=(kwargs["model"] or "").strip() or None,
+            fallback_model=(kwargs["fallback_model"] or "").strip() or None,
+            temperature=kwargs["temperature"],
+            timeout_seconds=kwargs["timeout_seconds"],
+            is_multimodal=kwargs["is_multimodal"],
+            enabled=kwargs["enabled"]
+            if kwargs["enabled"] is not None
+            else existing.get("enabled", True),
+        )
         if existing_idx is None:
             providers.append(entry.to_storage_dict())
-        elif replace:
+        elif kwargs["replace"]:
             providers[existing_idx] = entry.to_storage_dict()
         else:
             raise ValueError(f"LLM provider '{entry.name}' already exists")
         data["providers"] = providers
-        if make_default or data.get("default_provider") in (None, ""):
+        if kwargs["make_default"] or data.get("default_provider") in (None, ""):
             data["default_provider"] = entry.name
         self._write(data)
         logger.info(f"LLM provider '{entry.name}' saved to {self.path}")
         return entry
 
     def remove(self, name: str) -> bool:
+        with self._locked():
+            return self._remove_unlocked(name)
+
+    def _remove_unlocked(self, name: str) -> bool:
         wanted = (name or "").strip().lower()
         data = self._read()
         providers = data.get("providers", [])
@@ -348,6 +556,10 @@ class LLMProviderRegistry:
         return True
 
     def set_default(self, name: str) -> LLMProvider:
+        with self._locked():
+            return self._set_default_unlocked(name)
+
+    def _set_default_unlocked(self, name: str) -> LLMProvider:
         wanted = (name or "").strip().lower()
         provider = self.get(wanted)
         if provider is None:
@@ -369,14 +581,14 @@ def get_providers_file() -> Path:
 provider_registry = LLMProviderRegistry()
 
 
-def active_default_provider() -> LLMProvider | None:
+def active_default_provider(registry: LLMProviderRegistry | None = None) -> LLMProvider | None:
     """The registry's default provider when it can actually serve traffic.
 
     Disabled entries count as unset: ``set_default`` can name an entry the
     operator later switched off, and nothing should silently route to a dead
     endpoint.
     """
-    entry = provider_registry.default_provider()
+    entry = (registry or provider_registry).default_provider()
     if entry is None or not entry.enabled:
         return None
     return entry
@@ -397,6 +609,7 @@ def resolve_provider_for_model(
     provider_value: Any,
     *,
     builtin_has_key: bool | None = None,
+    registry: LLMProviderRegistry | None = None,
 ) -> ProviderResolution:
     """Map a configured ``provider`` value onto the registry.
 
@@ -415,14 +628,24 @@ def resolve_provider_for_model(
     the call. ``None`` means "key status unknown" and is treated as ``default``.
     """
     raw = "" if provider_value is None else str(provider_value).strip().lower()
-    entry = provider_registry.resolve(raw)
+    registry = registry or provider_registry
+    entry = registry.resolve(raw)
     if entry is not None:
+        if not entry.enabled:
+            if raw not in ("", "default", "auto"):
+                raise ValueError(f"LLM provider '{raw}' is disabled")
+            entry = None
+    if entry is not None:
+        if not entry.api_key.get_secret_value():
+            raise ValueError(f"LLM provider '{entry.name}' has no API key")
         source = "alias" if raw in ("", "default", "auto") else "explicit"
         return ProviderResolution(provider=entry.kind, entry=entry, source=source)
 
     if raw in KEY_REQUIRED_BUILTINS:
-        default = active_default_provider()
+        default = active_default_provider(registry)
         if default is not None:
+            if not default.api_key.get_secret_value():
+                raise ValueError(f"LLM provider '{default.name}' has no API key")
             # A registered default provider is *the* LLM of the product: it
             # takes every key-carrying built-in, with or without its own key.
             missing_key = isinstance(builtin_has_key, bool) and not builtin_has_key
@@ -441,6 +664,10 @@ def resolve_provider_for_model(
                 source="fallback" if missing_key else "default",
             )
 
+    if raw not in RESERVED_NAMES:
+        raise ValueError(f"Unknown LLM provider '{raw}'")
+    if raw in ("", "default", "auto"):
+        raise ValueError("No enabled default LLM provider is configured")
     return ProviderResolution(provider=provider_value, entry=None, source="builtin")
 
 
@@ -484,13 +711,14 @@ def provider_credentials_available(provider_value: Any) -> bool:
     satisfies every "requires ..._API_KEY in .env" check without a built-in key.
     """
     raw = "" if provider_value is None else str(provider_value).strip().lower()
-    if provider_registry.resolve(raw) is not None:
-        return True
+    entry = provider_registry.resolve(raw)
+    if entry is not None:
+        return entry.enabled and bool(entry.api_key.get_secret_value())
     if raw in KEY_REQUIRED_BUILTINS:
         if active_default_provider() is not None:
             return True
         return builtin_provider_has_key(raw) is True
-    return True
+    return raw in RESERVED_NAMES and raw not in ("default", "auto", "")
 
 
 class ResolvedModelConfig(BaseModel):
@@ -503,8 +731,10 @@ class ResolvedModelConfig(BaseModel):
     provider: Any = Field(description="Wire provider name passed to ModelProvider.from_string")
     display_provider: str = Field(description="Human label: registry entry name or built-in name")
     model: str
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False, exclude=True)
     api_base: str | None = None
+    vendor: Literal["minimax"] | None = None
+    registry_name: str | None = None
     source: str = "builtin"
     entry: LLMProvider | None = None
 
@@ -515,6 +745,7 @@ def resolve_model_config(
     *,
     use_fallback: bool = False,
     builtin_has_key: bool | None = None,
+    registry: LLMProviderRegistry | None = None,
 ) -> ResolvedModelConfig:
     """Resolve a configured provider/model pair onto an effective one.
 
@@ -531,6 +762,7 @@ def resolve_model_config(
         builtin_has_key=(
             builtin_provider_has_key(provider_value) if builtin_has_key is None else builtin_has_key
         ),
+        registry=registry,
     )
     entry = resolution.entry
     model_val = raw_model
@@ -543,7 +775,9 @@ def resolve_model_config(
             # The entry carries its own model pair (default + fallback),
             # mirroring artemis.jsonc's default/fallback block.
             preferred = entry.fallback_model if use_fallback else entry.model
-            model_val = preferred or entry.model or model_val
+            model_val = preferred or entry.model or ""
+            if model_val.lower() in ("", "default", "auto"):
+                raise ValueError(f"LLM provider '{entry.name}' has no default model")
     if not model_val:
         model_val = "gemini-2.5-flash"
 
@@ -553,13 +787,15 @@ def resolve_model_config(
         model=model_val,
         api_key=api_key,
         api_base=api_base,
+        vendor=entry.vendor if entry is not None else None,
+        registry_name=entry.name if entry is not None else None,
         source=resolution.source,
         entry=entry,
     )
 
 
 # ---------------------------------------------------------------------------
-# Model auto-discovery (OpenAI-compatible `GET /models`)
+# Protocol-aware model catalog discovery (OpenAI / Anthropic Messages)
 # Mirrors pi-web's model discovery: build the protocol-correct list URL, call it
 # with the right auth header, and accept the handful of shapes upstreams return.
 # ---------------------------------------------------------------------------
@@ -577,19 +813,31 @@ class DiscoveredModel(BaseModel):
     name: str | None = None
 
 
-def build_models_list_url(api_base: str, *, kind: str = "openai") -> str:
-    """Return the model-list endpoint for an OpenAI-compatible base URL."""
+def build_models_list_url(api_base: str, *, kind: str = "openai", vendor: str | None = None) -> str:
+    """Return the protocol-correct catalog URL (not a model capability test)."""
     base = (api_base or "").strip()
     if not base:
         raise ValueError("api_base is required to discover models")
     if not base.startswith(("http://", "https://")):
         raise ValueError("api_base must be an http(s):// URL")
     base = base.rstrip("/")
+    if kind not in (*SUPPORTED_KINDS, "google"):
+        raise ValueError(f"unsupported provider kind {kind!r}")
+    if vendor not in (None, "minimax"):
+        raise ValueError("unsupported provider vendor")
+    if vendor == "minimax":
+        if kind != "anthropic":
+            raise ValueError("vendor=minimax requires kind=anthropic")
+        parts = urlsplit(base)
+        if parts.hostname in {"api.minimax.cn", "api.minimax.io"} and parts.path in {"", "/v1"}:
+            base = urlunsplit(parts._replace(path="/anthropic"))
     if re.search(r"/models$", base, re.IGNORECASE):
         return base
     path = base
     if kind == "google" and not re.search(r"/v\d+[a-z]*$", path, re.IGNORECASE):
         path += "/v1beta"
+    if kind == "anthropic" and not path.endswith("/v1"):
+        path += "/v1"
     return f"{path}/models"
 
 
@@ -652,34 +900,73 @@ async def discover_models(
     api_key: str | None = None,
     *,
     kind: str = "openai",
+    vendor: str | None = None,
     timeout: float = MODELS_LIST_TIMEOUT_SECONDS,
 ) -> tuple[list[DiscoveredModel], str]:
-    """Fetch the model list an OpenAI-compatible endpoint exposes.
+    """Fetch a protocol-correct catalog without claiming model capabilities.
 
     Returns ``(models, endpoint)``. Raises ``RuntimeError`` with an
     operator-readable message on transport or upstream failures.
     """
     import httpx
 
-    endpoint = build_models_list_url(api_base, kind=kind)
+    endpoint = build_models_list_url(api_base, kind=kind, vendor=vendor)
     headers = {"Accept": "application/json"}
-    if api_key:
+    if kind == "anthropic":
+        headers["anthropic-version"] = "2023-06-01"
+        if api_key:
+            headers["x-api-key"] = api_key
+    elif api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    models: dict[str, DiscoveredModel] = {}
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    failure: str | None = None
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(endpoint, headers=headers)
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        raise RuntimeError(f"Could not reach {endpoint}: {exc}") from exc
+            for _ in range(20):
+                kwargs: dict[str, Any] = {"headers": headers}
+                if cursor:
+                    kwargs["params"] = {"after_id": cursor}
+                response = await client.get(endpoint, **kwargs)
+                if response.status_code >= 400:
+                    # Upstreams may echo credentials or request bodies. Status
+                    # is sufficient recovery information; never relay that body.
+                    failure = f"Upstream returned HTTP {response.status_code}"
+                    break
+                try:
+                    payload = response.json()
+                except ValueError:
+                    failure = "Upstream model list was not valid JSON"
+                    break
+                for model in parse_discovered_models(payload):
+                    models[model.id] = model
+                if (
+                    kind != "anthropic"
+                    or not isinstance(payload, dict)
+                    or not payload.get("has_more")
+                ):
+                    break
+                next_cursor = payload.get("last_id")
+                if (
+                    not isinstance(next_cursor, str)
+                    or not next_cursor
+                    or next_cursor in seen_cursors
+                ):
+                    failure = "Invalid or repeated upstream models cursor"
+                    break
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
+            else:
+                failure = "Upstream models pagination exceeded 20 pages"
+    except Exception:  # Transport exception text may contain headers or keys.
+        failure = "Could not reach the provider model catalog"
 
-    if response.status_code >= 400:
-        detail = response.text.strip()[:300] or response.reason_phrase
-        raise RuntimeError(f"Upstream returned HTTP {response.status_code}: {detail}")
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise RuntimeError("Upstream model list was not valid JSON") from exc
+    # Raise after the transport exception scope has ended, so even the hidden
+    # exception context cannot retain an untrusted body, header or credential.
+    if failure:
+        raise RuntimeError(failure) from None
 
-    models = parse_discovered_models(payload)
     if not models:
         raise RuntimeError("No models found in the upstream response")
-    return models, endpoint
+    return sorted(models.values(), key=lambda m: (m.name or m.id).lower()), endpoint

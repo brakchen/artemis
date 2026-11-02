@@ -22,11 +22,14 @@ Artemis extends it as ``artemis.controllers.unified_controller.UnifiedMobileCont
 with scrcpy video recording and timeline segment extraction.
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 from artemis.context import ArtemisContext
 from artemis.controllers.device_controller import ScreenDataResponse
 from artemis.drivers.base import BaseDeviceDriver
+from artemis.utils.vision import create_snapshot
 from third_party.mobile_use.controllers.types import ElementQuery, TapOutput
 
 
@@ -160,15 +163,22 @@ class UnifiedMobileControllerBase:
         screen_data = await self._driver.get_screen_data()
         return screen_data.ui_elements or []
 
-    async def get_screen_data(self) -> "ScreenDataResponse":
+    async def get_screen_data(self) -> ScreenDataResponse:
         """Get screen data including screenshot, UI hierarchy, dimensions, and platform."""
         data = await self._driver.get_screen_data()
+        snapshot = create_snapshot(self.ctx, data.screenshot_bytes, data, bind=False)
         return ScreenDataResponse(
             base64=data.screenshot_base64,
             elements=data.ui_elements or [],
             width=data.width,
             height=data.height,
             platform=data.platform,
+            device_id=snapshot.device_id,
+            display_id=snapshot.display_id,
+            rotation=snapshot.rotation,
+            capture_valid=snapshot.capture_valid,
+            invalid_reason=snapshot.invalid_reason,
+            snapshot=snapshot,
         )
 
     async def find_element(

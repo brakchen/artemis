@@ -20,21 +20,60 @@ separate calls: the Flash adapter observes after each action, while the
 Validator -- which runs its own UI-change polling -- simply never calls it.
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
+import copy
 import time
 
 from artemis.config import get_temp_dir
 from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.mcp.action_types import ActionCode, ObserveResult
-from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml
+from artemis.utils.vision import SnapshotRef, create_snapshot, stamp_elements, uses_minimax
+from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml, pure_xml_hierarchy
 from artemis.utils.visualization import format_minimal_list_with_elements
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ["observe"]
+__all__ = ["observe", "apply_observation_to_state"]
+
+
+def apply_observation_to_state(
+    state, observation: ObserveResult, screenshot_bytes: bytes | None = None
+) -> None:
+    """Write the same capture identity and raw XML through Flash/Pro adapters."""
+    if not observation.ok:
+        return
+    if observation.hierarchy_ok:
+        state.indexed_points = [element["center"] for element in observation.elements]
+        state.indexed_elements = observation.elements
+    if observation.screenshot_path:
+        state.latest_screenshot = observation.screenshot_path
+    snapshot = getattr(observation, "snapshot", None)
+    if not isinstance(snapshot, SnapshotRef):
+        return
+    previous = getattr(state, "operator_raw_data", None)
+    raw = dict(previous) if isinstance(previous, dict) else {}
+    xml = getattr(observation, "xml_hierarchy", None)
+    xml = copy.deepcopy(xml) if isinstance(xml, list) and observation.hierarchy_ok else None
+    raw.update(
+        snapshot=snapshot.model_dump(mode="json"),
+        xml_hierarchy=xml,
+        width=snapshot.width,
+        height=snapshot.height,
+        hierarchy_ok=observation.hierarchy_ok,
+        ocr_results=copy.deepcopy(observation.ocr_results),
+        ocr_outcome=dict(observation.ocr_outcome),
+    )
+    if screenshot_bytes:
+        raw["screenshot_b64"] = base64.b64encode(screenshot_bytes).decode("ascii")
+    else:
+        raw.pop("screenshot_b64", None)
+    state.operator_raw_data = raw
+    state.latest_ui_hierarchy = copy.deepcopy(xml)
 
 
 async def observe(
@@ -62,6 +101,12 @@ async def observe(
             logger.info("Retrieving screen data directly (skip settling)...")
         device_data = await controller.get_screen_data()
         screenshot_bytes = base64.b64decode(device_data.base64)
+        snapshot = getattr(device_data, "snapshot", None)
+        if not isinstance(snapshot, SnapshotRef):
+            snapshot = create_snapshot(ctx, screenshot_bytes, device_data, bind=False)
+        if uses_minimax(ctx) and not snapshot.capture_valid:
+            raise ValueError(f"Invalid capture: {snapshot.invalid_reason}")
+        ctx._current_snapshot = snapshot
     except Exception as e:
         logger.error(f"Failed to capture screen state: {e}")
         return (
@@ -76,19 +121,47 @@ async def observe(
 
     xml_hierarchy = None
     ocr_results = ocr_results or []
+    ocr_status = {}
     elements: list[dict] = []
     hierarchy_ok = True
     width = height = None
     try:
         xml_hierarchy = device_data.elements
-        width = device_data.width or 1080
-        height = device_data.height or 2400
+        if uses_minimax(ctx):
+            xml_hierarchy = pure_xml_hierarchy(xml_hierarchy)
+            ocr_results = [
+                row
+                for row in ocr_results
+                if row.get("source") == "minimax"
+                and row.get("ocr_version") == "regions-ltrb-v1"
+                and row.get("snapshot_id") == snapshot.capture_id
+            ]
+            ocr_status = (
+                {
+                    "status": "partial"
+                    if any(row.get("ocr_status") == "partial" for row in ocr_results)
+                    else "complete",
+                    "source": "minimax",
+                    "snapshot_id": snapshot.capture_id,
+                }
+                if ocr_results
+                else {
+                    "status": "disabled",
+                    "reason": "ocr_not_requested_for_observation",
+                    "source": "minimax",
+                    "snapshot_id": snapshot.capture_id,
+                }
+            )
+        width = snapshot.width or device_data.width or 1080
+        height = snapshot.height or device_data.height or 2400
         if ctx.device:
             ctx.device.device_width = width
             ctx.device.device_height = height
 
         fused_xml = fuse_ocr_with_xml(xml_hierarchy, ocr_results)
         minimal_list_str, elements, _ = format_minimal_list_with_elements(fused_xml, width, height)
+        if snapshot.width > 0 and snapshot.height > 0:
+            stamp_elements(elements, snapshot)
     except Exception as e:
         logger.error(f"Failed to fetch or fuse UI hierarchy: {e}")
         minimal_list_str = "Not available due to hierarchy error."
@@ -121,12 +194,16 @@ async def observe(
         ObserveResult(
             ok=True,
             message="Screen observed.",
+            snapshot=snapshot,
             screenshot_path=screenshot_path,
             image_name=Path(screenshot_path).stem if screenshot_path else None,
             width=width,
             height=height,
             elements_text=minimal_list_str,
             elements=elements,
+            xml_hierarchy=xml_hierarchy if hierarchy_ok else None,
+            ocr_results=ocr_results,
+            ocr_outcome=ocr_status,
             hierarchy_ok=hierarchy_ok,
         ),
         screenshot_bytes,

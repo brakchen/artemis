@@ -989,7 +989,12 @@ async def get_graph(ctx: ArtemisContext) -> CompiledStateGraph:
     operator_specialized_tools = get_tools_from_wrappers(ctx, operator_specialized_wrappers)
 
     # Customize descriptions for run_adb_command and manage_task to match exploratory role
+    from artemis.utils.vision import uses_minimax
+
+    minimax_agent = uses_minimax(ctx)
     for t in operator_specialized_tools:
+        if minimax_agent and t.name in {"run_adb_command", "manage_task"}:
+            continue  # Preserve the factories' enforced MiniMax restrictions.
         if t.name == "run_adb_command":
             t.description = (
                 "[SHELL] Executes a shell command directly on the Android"

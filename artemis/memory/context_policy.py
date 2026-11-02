@@ -119,7 +119,7 @@ CONTEXT_POLICIES: dict[str, ContextPolicy] = {
 _POLICY_FIELDS = {f.name for f in fields(ContextPolicy)}
 
 
-def resolve_policy(agent: str) -> ContextPolicy:
+def resolve_policy(agent: str, ctx: Any = None) -> ContextPolicy:
     """The agent's policy with any ``agent.memory.policies`` overrides applied."""
     try:
         policy = CONTEXT_POLICIES[agent]
@@ -131,9 +131,9 @@ def resolve_policy(agent: str) -> ContextPolicy:
 
     overrides: dict[str, Any] = {}
     try:
-        from artemis.config import load_agent_config
+        from artemis.config.task import get_task_agent_config
 
-        configured = (load_agent_config().memory.policies or {}).get(agent) or {}
+        configured = (get_task_agent_config(ctx).memory.policies or {}).get(agent) or {}
         overrides = {k: v for k, v in configured.items() if k in _POLICY_FIELDS}
         unknown = set(configured) - _POLICY_FIELDS
         if unknown:
@@ -154,7 +154,7 @@ def _chunk_digest_text(rendered_text: str, start: int, end: int) -> str:
     return f"{head.rstrip()}\n\n{marker}"
 
 
-def load_chunk_blocks(engine: Any, view: str | None) -> list[dict] | None:
+def load_chunk_blocks(engine: Any, view: str | None, ctx: Any = None) -> list[dict] | None:
     """The persisted history chunks rendered for the compiled view, or None.
 
     Returns None (→ byte-identical legacy rendering) unless the transcript
@@ -162,10 +162,11 @@ def load_chunk_blocks(engine: Any, view: str | None) -> list[dict] | None:
     """
     if engine is None or view not in ("full", "digest"):
         return None
+    ctx = ctx if ctx is not None else getattr(engine, "ctx", None)
     try:
-        from artemis.config import load_agent_config
+        from artemis.config.task import get_task_agent_config
 
-        if not load_agent_config().memory.transcript.enabled:
+        if not get_task_agent_config(ctx).memory.transcript.enabled:
             return None
     except Exception:
         return None
@@ -196,6 +197,7 @@ def build_history_for(
     keep_subgoal_hashes: set | None = None,
     last_n_detailed: int | None = None,
     engine: Any = None,
+    ctx: Any = None,
 ) -> str:
     """Render the agent's compiled plan-and-history view per its policy.
 
@@ -208,7 +210,8 @@ def build_history_for(
     """
     from artemis.utils.task_tree import build_plan_and_history
 
-    policy = resolve_policy(agent)
+    ctx = ctx if ctx is not None else getattr(engine, "ctx", None)
+    policy = resolve_policy(agent, ctx)
     kwargs: dict[str, Any] = {
         "min_summaries": len(steps) if policy.uncompressed else policy.min_summaries,
         "last_n_detailed": (policy.last_n_detailed if last_n_detailed is None else last_n_detailed),
@@ -219,7 +222,7 @@ def build_history_for(
     if policy.whitelist:
         kwargs["keep_subgoal_hashes"] = keep_subgoal_hashes
 
-    chunks = load_chunk_blocks(engine, policy.chunk_view)
+    chunks = load_chunk_blocks(engine, policy.chunk_view, ctx)
     if chunks:
         kwargs["chunks"] = chunks
 

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import asyncio
 import inspect
 import os
@@ -19,10 +21,9 @@ import re
 
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 from dotenv import load_dotenv
-from google import genai
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from artemis.clients.screen_client_factory import (
     describe_backend,
@@ -47,7 +48,7 @@ from artemis.sdk.run_outcome import attach_test_summary, resolve_trace_suffix
 from artemis.sdk.types.agent import AgentConfig
 from artemis.utils.startup_progress import publish_startup_progress
 from third_party.mobile_use.sdk.types.exceptions import AgentError
-from third_party.mobile_use.sdk.types.task import Task
+from third_party.mobile_use.sdk.types.task import AgentProfile, Task, TaskRequest
 from third_party.mobile_use.sdk.agent import AgentBase, TOutput
 from third_party.mobile_use.utils.logger import get_logger
 
@@ -127,59 +128,40 @@ class Agent(AgentBase):
         self._task_lock = asyncio.Lock()
 
     async def _prewarm_llm_connections(self, api_key: str | None = None):
-        """Pre-warms the HTTP2/gRPC connection pools for both Native GenAI and LangChain clients in the background."""
-        if os.environ.get("ARTEMIS_FAKE_LLM") == "1":
-            logger.info("ARTEMIS_FAKE_LLM=1 — skipping real LLM connection pre-warming.")
-            publish_startup_progress(
-                "model_ready", "Model connection is ready (fake LLM)", session_id=self._session_id
-            )
-            return
+        """Keep the startup hook without issuing a paid speculative request.
+
+        The selected task profile is not known during SDK initialization.
+        Clients are created lazily when that task actually calls its endpoint.
+        """
         publish_startup_progress(
-            "model_warmup", "Warming the model connection", session_id=self._session_id
+            "model_ready",
+            "Model connection will initialize on first use",
+            session_id=self._session_id,
         )
-        logger.info("Starting background pre-warming of Gemini API connection pools...")
-        try:
-            key = api_key
-            if not key and settings.GOOGLE_API_KEY:
-                key = settings.GOOGLE_API_KEY.get_secret_value()
 
-            if not key:
-                # Gemini-only warm-up: a custom default provider (OpenAI-compatible
-                # gateway) is warmed up by the router on its first request.
-                logger.info(
-                    "Skipping Gemini LLM pre-warming: no Google API key available. "
-                    "Custom default providers warm up on first use."
-                )
-                publish_startup_progress(
-                    "model_ready",
-                    "Model connection will initialize on first use",
-                    session_id=self._session_id,
-                )
-                return
+    def prepare_task_config(self, profile: str | None = None) -> SimpleNamespace:
+        """Pure preflight for ingresses before traces, queues or device probes.
 
-            # 1. Pre-warm Native SDK client
-            client = genai.Client(api_key=key)
+        No SDK initialization or device is required. The returned object is
+        server-side task state; only ``model_snapshot`` is a public allowlist.
+        """
+        from artemis.config.task import prepare_selected_task_config
 
-            # 2. Pre-warm LangChain client
-            chat = ChatGoogleGenerativeAI(model="gemini-3.8-flash", google_api_key=key)
+        selected = self._select_agent_profile(profile)
+        prepared = prepare_selected_task_config(self._config, selected, profile)
+        prepared._sdk_task_config_identity = (prepared.agent_config, prepared.llm_config)
+        return prepared
 
-            # Fire both calls concurrently in the background
-            await asyncio.gather(
-                client.aio.models.count_tokens(model="gemini-3.8-flash", contents="ping"),
-                chat.ainvoke("ping"),
-                return_exceptions=True,
-            )
-            logger.success("Gemini API connection pools successfully pre-warmed.")
-            publish_startup_progress(
-                "model_ready", "Model connection is ready", session_id=self._session_id
-            )
-        except Exception as e:
-            logger.warning(f"Failed to pre-warm LLM connections: {e}")
-            publish_startup_progress(
-                "model_ready",
-                "Model connection will initialize on first use",
-                session_id=self._session_id,
-            )
+    def _prepare_task_context(
+        self, context: ArtemisContext, request: TaskRequest, agent_profile: AgentProfile
+    ):
+        from artemis.config.task import prepare_selected_task_config
+
+        prepared = prepare_selected_task_config(self._config, agent_profile, request.profile)
+        for name in ("agent_config", "llm_config", "selected_llm_profile", "model_snapshot"):
+            setattr(context, name, getattr(prepared, name))
+        context._llm_endpoint_snapshot = prepared._llm_endpoint_snapshot
+        context._sdk_task_config_identity = (context.agent_config, context.llm_config)
 
     async def _watch_external_cancel(self, task_name: str) -> None:
         """Cancel the running task when another process drops a cancel marker.
@@ -239,7 +221,7 @@ class Agent(AgentBase):
 
     async def _prepare_device_environment(self, context: ArtemisContext):
         """Prepare device environment flags (like forcing Web Accessibility) before the task runs."""
-        if not self._config.force_web_accessibility:
+        if not context.agent_config.force_web_accessibility:
             logger.info(
                 "Forcing web accessibility is disabled in AgentConfig. Skipping"
                 " device environment prep..."
@@ -287,6 +269,36 @@ class Agent(AgentBase):
 
     def _prepare_tracing(self, task: Task, context: ArtemisContext):
         """Prepare tracing and data engine setup."""
+        prepared = getattr(context, "_sdk_task_config_identity", None)
+        already_prepared = (
+            isinstance(prepared, tuple)
+            and len(prepared) == 2
+            and prepared[0] is context.agent_config
+            and prepared[1] is context.llm_config
+        )
+        if not already_prepared:
+            # Standalone tracing callers may supply their own typed context.
+            # A public display snapshot says nothing about its data ownership.
+            from artemis.config.task import copy_task_config
+
+            context.agent_config = copy_task_config(
+                context.agent_config if context.agent_config is not None else self._config
+            )
+            if context.llm_config is None:
+                selected = self._select_agent_profile(task.request.profile)
+                context.llm_config = selected.llm_config.model_copy(deep=True)
+                context.selected_llm_profile = selected.name
+            else:
+                context.llm_config = context.llm_config.model_copy(deep=True)
+        from artemis.llm.resolution import context_uses_minimax, public_model_snapshot
+
+        # A public snapshot is display evidence, never proof of a successful
+        # preflight. Existing private task endpoints make this a read-only hit.
+        context_uses_minimax(context)
+        context.model_snapshot = public_model_snapshot(
+            context, requested_profile=task.request.profile
+        )
+        context._sdk_task_config_identity = (context.agent_config, context.llm_config)
         task_name = self._prepare_trace_paths(task)
 
         context.execution_setup = ExecutionSetup(
@@ -295,32 +307,34 @@ class Agent(AgentBase):
             enable_remote_tracing=task.request.enable_remote_tracing
             if task.request.record_trace
             else False,
-            video_recording_tools_enabled=self._config.video_recording_tools_enabled,
-            disable_checker=self._config.disable_checker,
-            disable_midway_checks=self._config.disable_midway_checks,
-            disable_final_check=self._config.disable_final_check,
-            checker_max_iterations=self._config.checker_max_iterations,
-            final_check_max_attempts=self._config.final_check_max_attempts,
-            checkpoint_max_repairs=self._config.checkpoint_max_repairs,
-            max_concurrent_checkpoints=self._config.max_concurrent_checkpoints,
-            checkpoint_timeout=self._config.checkpoint_timeout,
-            settlement_timeout=self._config.settlement_timeout,
-            assert_failure_policy=self._config.assert_failure_policy,
-            disable_device_probes=self._config.disable_device_probes,
-            disable_planner_validation=self._config.disable_planner_validation,
-            enable_committee=self._config.enable_committee,
-            committee_debate_rounds=self._config.committee_debate_rounds,
-            disable_outputter=self._config.disable_outputter,
-            outputter=self._config.outputter,
-            explorer=self._config.explorer,
-            explorer_versions=self._config.explorer_versions,
+            video_recording_tools_enabled=context.agent_config.video_recording_tools_enabled,
+            disable_checker=context.agent_config.disable_checker,
+            disable_midway_checks=context.agent_config.disable_midway_checks,
+            disable_final_check=context.agent_config.disable_final_check,
+            checker_max_iterations=context.agent_config.checker_max_iterations,
+            final_check_max_attempts=context.agent_config.final_check_max_attempts,
+            checkpoint_max_repairs=context.agent_config.checkpoint_max_repairs,
+            max_concurrent_checkpoints=context.agent_config.max_concurrent_checkpoints,
+            checkpoint_timeout=context.agent_config.checkpoint_timeout,
+            settlement_timeout=context.agent_config.settlement_timeout,
+            assert_failure_policy=context.agent_config.assert_failure_policy,
+            disable_device_probes=context.agent_config.disable_device_probes,
+            disable_planner_validation=context.agent_config.disable_planner_validation,
+            enable_committee=context.agent_config.enable_committee,
+            committee_debate_rounds=context.agent_config.committee_debate_rounds,
+            disable_outputter=context.agent_config.disable_outputter,
+            outputter=context.agent_config.outputter,
+            explorer=context.agent_config.explorer,
+            ocr=context.agent_config.ocr,
+            explorer_versions=context.agent_config.explorer_versions,
         )
 
         context.data_engine = DataEngine(ctx=context)
         device_data = context.device.model_dump() if context.device else {}
+        device_data["model_snapshot"] = context.model_snapshot
         if task.request.profile:
             device_data["profile"] = task.request.profile
-        run_tuning = run_tuning_summary(self._config, task.request.profile)
+        run_tuning = run_tuning_summary(context.agent_config, task.request.profile)
         if run_tuning:
             device_data["run_tuning"] = run_tuning
 
