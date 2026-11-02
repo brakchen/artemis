@@ -228,6 +228,8 @@ class Explorer(PerceptionToolsMixin, UniversalRunnerMixin, RunSetupMixin, Native
         without a configured OCR backend.
         """
         hidden = set(self.denylisted_tools)
+        if uses_minimax(self.ctx, "explorer") or uses_minimax(self.ctx):
+            hidden.add("ask_image_processor")
         if not is_ocr_configured(self.ctx):
             hidden.add("get_ocr_list")
         return hidden

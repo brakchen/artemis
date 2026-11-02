@@ -1,7 +1,7 @@
 # Artemis 全 MiniMax 技术方案
 
 - 日期：2026-11-01（Asia/Shanghai）。
-- 版本：1.2，用户已批准实施；A–D3已完成离线验证，E仍待，本文不表示完整功能或精度已经验证。
+- 版本：1.2，本次代码实现、独立复核与本地离线验证完成；真实账号能力、定位精度及设备/Docker 运行仍未实测。
 - 代码基线：`e7cbe5950fba16b7d31c852aa1e92309d7d6405c`，分支 `feat/model-config`。
 - 适用范围：主 Agent 推理、视频分析、Explorer 屏幕探索、联网检索、OCR、目标坐标定位。
 - 依据：本次会话已确认的需求、基线代码、MiniMax 官方文档及官方文档 MCP。
@@ -515,7 +515,7 @@ Google 路径核查除六模块外，还包括 `artemis/constants.py`、`artemis
 - 官方 Files 删除用途清单尚未列 video_understanding；该可选升级的主动删除与实际账号行为待验证，基本视频分析使用关键帧/本地分片内联不受其阻塞。[S4][S9]
 - 本机 RTX 3050 不作为本方案依赖；普通 CPU 执行媒体预处理，模型耗时取决于云端服务与网络。
 
-方案已进入实施。基础配置链的进展见 Changelog 与实施检查点；运行配置迁移、剩余模块、真实模型调用、模拟器和端到端验收不因某一阶段通过而视为完成。程序检查与真实能力验证分别报告，业务阈值仍待实际评测确定。
+本次代码开发与本地离线验证已完成，交付在 `feat/model-config`；程序证据见 Changelog 与实施验收表。完整默认测试、前端及安装包检查通过，不构成真实账号权限、200 目标精度或设备/Docker 部署验收；业务阈值仍待实际评测确定。Google SDK 和旧厂商分支保留兼容，MiniMax 任务按固定端点运行；本次不进行依赖瘦身或静默换厂商。
 
 ## 13. 官方资料与核对记录
 
@@ -540,6 +540,21 @@ Google 路径核查除六模块外，还包括 `artemis/constants.py`、`artemis
 
 本节记录技术方案的变更与逐阶段实施证据；标明“实施中”的条目仍未完成验收。后续修订本文时须同步更新本节，按版本倒序记录日期、变更内容及验证范围。
 
+### 实施进度：E 旁路、协议与质量收口 — 2026-11-02
+
+- MiniMax 在中央 ImageProcessor、工具适配器和 Explorer 的真实执行入口拒绝自动生成 Python；native/universal 声明及 requires 提示词过滤该工具，历史缓存调用与 Replay 也返回错误，不创建图像、标注、来源或候选。固定 CPU inspect/crop/zoom、目标检测和 OCR 保留；legacy 厂商及用户直接使用低层 PythonExecutor 的行为保持。工具导出避免通用适配器提前获取设备，保留同步/异步及状态注入。
+- 真实 SDK 矩阵发现旧 Operator 把 SystemMessage 放在 HumanMessage 后，锁定 Anthropic formatter 会在 HTTP 前拒绝。现将静态执行契约放入初始 system prefix并同步 transcript turn base，仅 MiniMax 的迭代上限提醒使用 HumanMessage。实际默认 Operator 三次请求覆盖 helper、上限提醒和下一轮，active ledger 不混入 SystemMessage；契约文本、预算、终止门禁及 legacy 提醒保持。
+- 修正六项 mixin/坐标类型错误；按实际 I/O、解析和模型错误契约收窄异常，保留取消收尾、未知设备结果、插件及凭据脱敏边界。中途一次过度收窄被既有目录异常/秘密 cause 回归抓出并恢复；不修改断言或提高基线。当前 pyright 0 错，ratchet 为 broad 754、silent 0、ignore 16，原基线 754/0/18 保持。
+- 质量复核又发现旧 OCR 的 HTTP/JSON 错误及图像池非对象 JSON 会越过收窄后的恢复流程。修复在两个解析所有者中明确类型与对象形状，HTTP 错误只含状态码；保留合法空结果、XML 回退及图像池已成功条目，不扩调用方 catch 或新增框架。原三反例与相关检查关闭，v3 冻结 22 路径、208 项通过，独立规格 43 项及质量 33 项改动检查通过。
+- 旧视频测试使用真实微小合成文件，prompt 模拟对无关读取委托原方法，移除全局 Path.stat/exists 覆盖。原 thought_signature、confidence、借入媒体断言保留，增加无关目录和读取正对照；相关检查将线程异常视为错误，不修改 Windows 目录或日志行为。
+- 实际 SDK/MockTransport 矩阵补主模型初始化与请求、默认 Operator、Planner、Explorer、定位/OCR、搜索、视频 utility chunk/原生 ASR，以及辅助/历史/Replay 的已有回归。保留 raw Gemini 字符串、残留 Google Key/共享客户端并拒绝 Google 构造及实际 HTTP；这些具名方法检查不等同于真实账号或完整设备任务实测。
+- 发行约束固定已验证的 langchain-anthropic 1.5.6 和直接 anthropic 0.122.0，均已核对 MIT；offline lock 的 197 个包版本与来源保持不变。私有 complete-payload hook 的升级必须重验；wheel 清洁安装仍待最终检查。
+- 初版 21 路径相关 964 项通过，后续 v3 的 22 路径受影响组 208 项通过，线程异常设为 error。独立初次规格 49 项、最终改动规格 43 项及质量 33 项通过；最终跨模块审查 36 项通过、172 源文件冻结保持，无新可行动发现。完整及发行结果见下；旧失败反例保留，不把源码环境通过当作安装包或模型精度验证。
+- root 最终默认 Python 测试 **3427 passed、9 skipped、8 deselected、88 既有普通 warnings，389.76 秒**，将线程异常作为 error，未出现旧视频线程异常；前端完整 **145 SUCCESS**，生产构建 **12.287 秒**。Ruff、674 文件格式、受保护核心 pyright 0 错及 ratchet/公开依赖源检查通过。
+- client/core wheel 与 sdist 新鲜构建，从 sdist 单独重建 wheel 成功；归档配置/UI 与本次源文件匹配，无缓存、注册表、`.env` 或 node_modules。初次离线构建因 Cython 缓存不足失败，改用公开 PyPI 获取现有构建依赖成功，运行时 lock 未变，失败日志保留。
+- 在仓库外 Python3.12 空环境安装重建 wheel，175 包依赖一致性通过；实际 CLI `--version`、`--help`、MiniMax 初始化和中文路径/受保护注册表/模板不变检查通过。实际 SDK 的 MockTransport 正向请求及超限图片 HTTP 前拒绝通过，源码与安装环境分别验证 langchain-core 1.5.6、1.7.3；Anthropic/LC-Anthropic 固定版本保持。未调用真实模型或设备。
+- 测试、构建和安装后 172 个源码/配置/提示词/依赖哈希保持。README/CN 同步 fork 分支克隆、初始化及能力边界；C01–C32 对账保留真实权限、定位精度、设备及 Docker 未验证项。仅交付 feature 分支，不合并或部署 main。
+
 ### 实施进度：D3 诊断、父入口与容器 — 2026-11-02
 
 - 候选实现从探针源头移除原始Key，MCP内部鉴权改读canonical私有端点，公开区分配置、鉴权、禁用与未验证。新任务在trace/queue/device前纯预检，MCP父入口和worker复用实际legacy override/explicit主文件选择；已接受的幂等任务保留原返回。
@@ -557,10 +572,10 @@ Google 路径核查除六模块外，还包括 `artemis/constants.py`、`artemis
 - 19路径v4通过独立规格及质量复核；root完整单测3282 passed/8 skipped/88既有warnings，384.46秒。Angular15例、生产build11.797秒、应用/测试TypeScript检查通过；root哈希/范围/Ruff/format/diff保持，隔离Chrome+假接口检查当前构建。失败历史与已关闭反例详实施记录，不以局部通过替代完整suite。
 - README/CN补实际初始化、Key存储、显式导入、保护备份、条件回滚及长期进程配置来源说明。D3诊断/MCP/API父入口/容器和E整链仍待；保留旧通用文件名占位符等UI边界，未宣称全面无障碍、真实账号权限或设备定位精度已验证。
 
-### 实施范围补漏：Explorer 生成 Python 的动作旁路 — 2026-11-02（待 E 收口）
+### 实施范围补漏：Explorer 生成 Python 的动作旁路 — 2026-11-02（已在 E 关闭）
 
 - 静态复核确认 Explorer 可经 ImageProcessor 调用 Jupyter PythonExecutor，现 AST 校验仅禁止直接 resize，不能约束设备命令或系统副作用。此前三个 shell 导出入口的限制没有覆盖此路，不能据此宣称所有 MiniMax 动作已受门禁。
-- 在第 7.4 节补入相同的任意代码限制；本轮 E 将在既有 Agent 入口阻断 MiniMax 自动生成 Python，保留固定 CPU 图像操作及 legacy/用户直接低层入口，验证零 kernel/模型/设备副作用与错误不升级为候选。尚未实施，不以静态发现当已修复。
+- 发现时尚未实施，在第 7.4 节补入相同的任意代码限制；E 已在中央及既有 Agent 入口阻断 MiniMax 自动生成 Python，保留固定 CPU 操作及 legacy/用户直接低层入口。零 coder kernel/模型/设备副作用、错误不升级为候选及实际回放路径经独立复核，证据见本节 E 记录。
 
 ### 实施进度：D1 任务配置、辅助模型及历史回放 — 2026-11-02
 

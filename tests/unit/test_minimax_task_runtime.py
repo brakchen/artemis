@@ -620,19 +620,73 @@ def sdk_body(text="fixture summary"):
 @pytest_asyncio.fixture
 async def sdk_transport(registry, monkeypatch):
     """Production MiniMax factory/SDK; only HTTP is replaced with MockTransport."""
+    import google.genai
+    import langchain_google_genai
+
+    prohibited = Mock(side_effect=AssertionError("Google constructor or live HTTP prohibited"))
+    monkeypatch.setattr(google.genai, "Client", prohibited)
+    monkeypatch.setattr(langchain_google_genai, "ChatGoogleGenerativeAI", prohibited)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", prohibited)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", prohibited)
     requests = []
     responder = {"fn": lambda request, body: sdk_body()}
 
     async def handle(request):
-        payload = json.loads(request.content)
+        payload = (
+            {"multipart": request.content}
+            if request.headers.get("content-type", "").startswith("multipart/")
+            else json.loads(request.content)
+        )
         requests.append((request, payload))
         result = responder["fn"](request, payload)
         if inspect.isawaitable(result):
             result = await result
+        if payload.get("stream") and isinstance(result, dict):
+            # The module owners use the production streaming completion path.
+            # Encode the same responder body as official Messages SSE events.
+            start = {**result, "content": [], "stop_reason": None}
+            events = [("message_start", {"message": start})]
+            for index, block in enumerate(result["content"]):
+                initial = (
+                    {**block, "text": ""} if block["type"] == "text" else {**block, "input": {}}
+                )
+                delta = (
+                    {"type": "text_delta", "text": block["text"]}
+                    if block["type"] == "text"
+                    else {"type": "input_json_delta", "partial_json": json.dumps(block["input"])}
+                )
+                events.extend(
+                    [
+                        ("content_block_start", {"index": index, "content_block": initial}),
+                        ("content_block_delta", {"index": index, "delta": delta}),
+                        ("content_block_stop", {"index": index}),
+                    ]
+                )
+            events.extend(
+                [
+                    (
+                        "message_delta",
+                        {
+                            "delta": {"stop_reason": result["stop_reason"], "stop_sequence": None},
+                            "usage": result["usage"],
+                        },
+                    ),
+                    ("message_stop", {}),
+                ]
+            )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content="".join(
+                    f"event: {name}\ndata: {json.dumps({'type': name, **data})}\n\n"
+                    for name, data in events
+                ),
+            )
         return result if isinstance(result, httpx.Response) else httpx.Response(200, json=result)
 
     original = ModelFactory.create_model
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        responder["client"] = client
 
         def create(endpoint):
             assert endpoint.vendor == "minimax", "Google/other client construction is prohibited"
@@ -994,8 +1048,9 @@ def test_replay_invalid_current_config_is_not_swallowed_or_sandboxed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["ask_explorer", "ask_image_processor"])
 async def test_minimax_replay_context_and_actual_sdk_path_never_import_google_models(
-    sdk_transport, monkeypatch, tmp_path
+    sdk_transport, monkeypatch, tmp_path, tool_name
 ):
     from apps.admin_console import replay_manager as module
     from artemis.graph.state import State
@@ -1069,7 +1124,18 @@ async def test_minimax_replay_context_and_actual_sdk_path_never_import_google_mo
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
-    await manager.replay_step_tool(sid, 1, replay_id=str(uuid4()))
+    if tool_name == "ask_image_processor":
+        from langchain_core.tools import ToolException
+
+        with pytest.raises(ToolException, match="unsupported for MiniMax"):
+            await manager.replay_step_tool(sid, 1, replay_id=str(uuid4()), tool_name=tool_name)
+        assert not sdk_transport[0] and not contexts
+        results = list(manager.test_outputs_dir.rglob("result.json"))
+        assert len(results) == 1
+        rejected = json.loads(results[0].read_text(encoding="utf-8"))
+        assert rejected["success"] is False and "unsupported" in rejected["error"]
+        return
+    await manager.replay_step_tool(sid, 1, replay_id=str(uuid4()), tool_name=tool_name)
     assert contexts and isinstance(contexts[0].agent_config, AgentGlobalConfig)
     assert get_effective_endpoint(contexts[0], "explorer").vendor == "minimax"
     assert any(row.get("name") == "llm_usage" for row in records)
@@ -1084,3 +1150,263 @@ async def test_minimax_replay_context_and_actual_sdk_path_never_import_google_mo
         )["model"]
         == "MiniMax-M3.1-Flash"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "surface", ["main", "operator", "planner", "explorer", "detector", "ocr", "search", "video"]
+)
+async def test_actual_module_sdk_matrix_with_residual_google_and_live_http_denied(
+    sdk_transport, monkeypatch, tmp_path, surface
+):
+    """Exercise module owners with production resolution, client factory and SDK."""
+    import base64
+    from io import BytesIO
+
+    from PIL import Image
+    from artemis.graph.state import State
+    from artemis.utils.vision import create_snapshot
+
+    requests, responder = sdk_transport
+    selected = config(provider="google", model="gemini-raw-residue", fallback="google")
+    selected.default.enable_grounding = True
+    context = ctx(AgentGlobalConfig(), selected)
+    image = BytesIO()
+    Image.new("RGB", (100, 100), "white").save(image, "JPEG")
+    data = image.getvalue()
+    screenshot = tmp_path / "synthetic.jpg"
+    screenshot.write_bytes(data)
+    snapshot = create_snapshot(context, data)
+    state = State(initial_goal="offline request")
+    state.latest_screenshot = str(screenshot)
+    state.latest_ui_hierarchy = []
+    state.operator_raw_data = {
+        "screenshot_b64": base64.b64encode(data).decode(),
+        "xml_hierarchy": [],
+        "snapshot": snapshot.model_dump(),
+        "width": 100,
+        "height": 100,
+    }
+    monkeypatch.setattr(settings, "TRACES_PATH", tmp_path / "traces")
+    monkeypatch.setattr(settings, "DATA_ENGINE_DB_PATH", tmp_path / "unused.db")
+
+    def text_reply(value):
+        return sdk_body(json.dumps(value))
+
+    def tool_reply(name, args):
+        result = sdk_body()
+        result.update(
+            content=[{"type": "tool_use", "id": "matrix", "name": name, "input": args}],
+            stop_reason="tool_use",
+        )
+        return result
+
+    if surface == "main":
+        from artemis.agents.flash.runner import FlashRunner
+
+        runner = object.__new__(FlashRunner)
+        runner.ctx = context
+        response = await runner._init_llm().ainvoke([HumanMessage(content="offline request")])
+        assert response.content == "fixture summary"
+    elif surface == "operator":
+        from artemis.agents.operator.operator import OperatorNode
+        from langchain_core.messages import SystemMessage
+        from langchain_core.tools import StructuredTool
+
+        async def lookup() -> str:
+            """Return an offline fixture fact."""
+            return "fixture fact"
+
+        monkeypatch.setattr("artemis.agents.operator.operator.OPERATOR_MAX_TOOL_ITERATIONS", 2)
+        responder["fn"] = lambda *_: tool_reply("lookup", {}) if len(requests) == 1 else sdk_body()
+        node = OperatorNode(context, tools=[StructuredTool.from_function(coroutine=lookup)])
+        result = await node(state)
+        assert result["structured_decisions"] is None
+        await node(state)
+        assert len(requests) == 3
+        assert "maximum number of tool calls" in str(requests[1][1]["messages"][-1])
+        assert context.transcript_ledger.turn_count == 1
+        active = context.transcript_ledger.active_messages
+        assert active and isinstance(active[0], HumanMessage)
+        assert not any(isinstance(message, SystemMessage) for message in active)
+    elif surface == "planner":
+        from artemis.agents.planner.planner import run_async_planner_validation
+
+        responder["fn"] = lambda *_: text_reply({"is_approved": True, "feedback": "fixture"})
+        result = await run_async_planner_validation(context, "offline request", "before", "after")
+        assert result == {"status": "success", "feedback": "fixture"}
+    elif surface == "explorer":
+        from artemis.agents.explorer.explorer import Explorer
+
+        responder["fn"] = lambda *_: tool_reply(
+            "submit_answer", {"candidates": [], "fallback_message": "fixture unknown"}
+        )
+        result = await Explorer(context).run(
+            "nontext icon", "", str(screenshot), state, version="ultra"
+        )
+        assert json.loads(result) == {"candidates": [], "fallback_message": "fixture unknown"}
+        assert all(tool["name"] != "ask_image_processor" for tool in requests[0][1]["tools"])
+        assert "ask_image_processor" not in str(requests[0][1]["system"])
+    elif surface == "detector":
+        from artemis.agents.object_detector.object_detector import _run_object_detection
+
+        responder["fn"] = lambda *_: text_reply(
+            {"status": "found", "candidates": [{"label": "fixture", "bbox": [100, 200, 500, 600]}]}
+        )
+        result = await _run_object_detection(context, data, ["fixture"], snapshot=snapshot)
+        assert result["detected"][0]["point"] == [300, 400]
+        assert result["detected"][0]["snapshot_id"] == snapshot.capture_id
+    elif surface == "ocr":
+        from artemis.utils.ocr_api import perform_ocr
+
+        responder["fn"] = lambda *_: text_reply(
+            {
+                "status": "complete",
+                "regions": [{"text": "fixture", "bbox": [100, 200, 500, 600], "uncertain": False}],
+            }
+        )
+        result = await perform_ocr(base64.b64encode(data).decode(), ctx=context, snapshot=snapshot)
+        assert result[0]["text"] == "fixture" and result[0]["source"] == "minimax"
+    elif surface == "search":
+        from artemis.services.web_search import web_search
+
+        def search_reply(*_):
+            result = sdk_body("fixture source")
+            result["content"].append(
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "search",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "url": "https://source.invalid/fixture",
+                            "title": "fixture",
+                            "encrypted_content": "opaque",
+                        }
+                    ],
+                }
+            )
+            return result
+
+        responder["fn"] = search_reply
+        result = await web_search(context, "offline fact")
+        assert (
+            result.status == "complete"
+            and result.sources[0].url == "https://source.invalid/fixture"
+        )
+    else:
+        from artemis.agents.video_analyzer.video_analyzer import VideoAnalyzer
+
+        responder["fn"] = lambda *_: tool_reply(
+            "submit_answer",
+            {
+                "summary": "fixture",
+                "analysis": "synthetic frame",
+                "timeline_events": [],
+                "temporal_evidence_sufficient": True,
+                "unknowns": [],
+            },
+        )
+        monkeypatch.setattr(
+            "artemis.agents.video_analyzer.video_analyzer.probe_duration",
+            AsyncMock(return_value=1.0),
+        )
+        monkeypatch.setattr(
+            "artemis.agents.video_analyzer.video_analyzer.extract_frames_at_timestamps",
+            lambda path, timestamps, **kwargs: [(0.0, data), (0.5, data)],
+        )
+        analyzer = VideoAnalyzer(context)
+        media = tmp_path / "synthetic.mp4"
+        media.write_bytes(b"synthetic fixture; decoding is supplied by the frame fixture")
+        result = await analyzer._exec_single_chunk_universal(
+            media, media, 0.0, 1.0, 0.0, "offline", "fixture"
+        )
+        assert "fixture" in result and analyzer.media_coverage[0]["strategy"] == "keyframes"
+
+    assert requests
+    for request, payload in requests:
+        assert request.url.host == "mini-primary.invalid"
+        assert payload["model"] == "MiniMax-M3.1-Flash"
+        assert request.headers["x-api-key"] == "fixture-mini-primary"
+
+
+@pytest.mark.asyncio
+async def test_native_asr_uses_same_offline_transport_and_task_key(sdk_transport, tmp_path):
+    from artemis.agents.video_analyzer.native_speech import transcribe_audio
+
+    requests, responder = sdk_transport
+    responder["fn"] = lambda *_: httpx.Response(
+        200, json={"segments": [{"start": 0.0, "end": 1.0, "text": "fixture speech"}]}
+    )
+    selected = get_effective_endpoint(ctx(AgentGlobalConfig()), "video_analyzer", is_utils=True)
+    selected = selected.model_copy(update={"api_base": "https://api.minimax.cn/anthropic"})
+    audio = tmp_path / "synthetic.mp3"
+    audio.write_bytes(b"synthetic audio; duration supplied by the fixture")
+    result = await transcribe_audio(
+        selected,
+        audio,
+        actual_start=5.0,
+        duration=1.0,
+        work_dir=tmp_path,
+        client=responder["client"],
+    )
+    assert result.status == "transcribed" and result.segments[0]["start"] == 5.0
+    request, payload = requests[0]
+    assert request.url.path == "/v1/speech_to_text"
+    assert request.headers["authorization"] == "Bearer fixture-mini-primary"
+    assert b'filename="synthetic.mp3"' in payload["multipart"]
+
+
+@pytest.mark.asyncio
+async def test_operator_final_iteration_reminder_keeps_actual_sdk_message_order(
+    sdk_transport, monkeypatch
+):
+    from langchain_core.messages import SystemMessage
+    from langchain_core.tools import StructuredTool
+    from artemis.agents.operator.operator import OperatorNode
+    from artemis.graph.state import State
+
+    requests, responder = sdk_transport
+    context = ctx(AgentGlobalConfig())
+    monkeypatch.setattr("artemis.agents.operator.operator.OPERATOR_MAX_TOOL_ITERATIONS", 2)
+
+    async def lookup() -> str:
+        """Return an offline fixture fact."""
+        return "fixture fact"
+
+    def respond(*_):
+        result = sdk_body("fixture final thought")
+        if len(requests) == 1:
+            result.update(
+                content=[{"type": "tool_use", "id": "lookup", "name": "lookup", "input": {}}],
+                stop_reason="tool_use",
+            )
+        return result
+
+    responder["fn"] = respond
+    messages = [SystemMessage(content="fixture policy"), HumanMessage(content="offline")]
+    result = await OperatorNode(context)._invoke_llm_loop(
+        gateway.get_llm(context, "operator"),
+        messages,
+        [StructuredTool.from_function(coroutine=lookup)],
+        [],
+        State(initial_goal="offline"),
+    )
+    assert result[1] == "fixture final thought" and len(requests) == 2
+    assert "MiniMax execution contract" in str(requests[0][1]["system"])
+    assert "maximum number of tool calls" in str(requests[1][1]["messages"][-1])
+
+
+@pytest.mark.asyncio
+async def test_image_coder_invalid_real_config_propagates_before_model_or_kernel(
+    registry, monkeypatch
+):
+    from artemis.agents.image_processor import image_processor as module
+
+    context = ctx(AgentGlobalConfig(memory={"chunking": {"model": "gemini-explicit"}}))
+    prohibited = Mock(side_effect=AssertionError("invalid task constructed model or kernel"))
+    monkeypatch.setattr(module, "get_llm", prohibited)
+    monkeypatch.setattr(module, "PythonExecutor", prohibited)
+    with pytest.raises(ValueError, match="auxiliary model"):
+        await module.ImageProcessor(context).run("opaque", "missing.png")
+    prohibited.assert_not_called()

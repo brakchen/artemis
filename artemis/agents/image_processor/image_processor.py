@@ -14,6 +14,8 @@
 
 """Universal Multi-Model Image Processor for Artemis."""
 
+from __future__ import annotations
+
 import base64
 import json
 from pathlib import Path
@@ -27,6 +29,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.tools import ToolException
 
 from artemis.config import settings
 from artemis.context import ArtemisContext
@@ -34,9 +37,20 @@ from artemis.core.tool_declaration import ToolDeclaration
 from artemis.data_engine.trace import TraceSpan, trace
 from artemis.services.llm import get_llm
 from artemis.utils.python_executor import PythonExecutor
+from artemis.utils.vision import uses_minimax
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def ensure_image_processor_supported(ctx: ArtemisContext | None) -> None:
+    """Reject autonomous Python before client, image, or kernel creation."""
+    if any(uses_minimax(ctx, role) for role in ("default", "explorer", "operator")):
+        raise ToolException(
+            "ask_image_processor is unsupported for MiniMax: model-authored Python cannot "
+            "pass the target validity gate. Use inspect_region, detect_objects, or OCR."
+        )
+
 
 EXECUTE_PYTHON_TOOL = ToolDeclaration(
     name="execute_python",
@@ -79,10 +93,16 @@ class ImageProcessor:
 
     @trace(type="agent", name="image_processor")
     async def run(self, instruction: str, target_image_path: str) -> dict:
-        try:
-            llm = get_llm(self.ctx, name="image_processor")
-        except Exception:
-            llm = get_llm(self.ctx, name="operator")
+        ensure_image_processor_supported(self.ctx)
+        # Typed task configs have no independent image_processor role. Legacy
+        # injected configs may supply one; its resolution errors must propagate.
+        image_config = getattr(getattr(self.ctx, "llm_config", None), "image_processor", None)
+        role = (
+            "image_processor"
+            if isinstance(getattr(image_config, "model", None), str)
+            else "operator"
+        )
+        llm = get_llm(self.ctx, name=role)
 
         base_dir = settings.TRACES_PATH
         image_processor_dir = base_dir / "images" / "image_processor"
@@ -127,7 +147,7 @@ class ImageProcessor:
         img_0_path = intermediate_artifact_save_path / "img_0.jpg"
         try:
             shutil.copy2(target_image_path, img_0_path)
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Failed to copy original screenshot to intermediate pool: {e}")
             img_0_path = Path(target_image_path)
 
@@ -192,7 +212,7 @@ class ImageProcessor:
                                         }
                                     )
                                     image_blocks.append({"type": "text", "text": f"\n{label}\n"})
-                            except Exception as e:
+                            except OSError as e:
                                 logger.error(
                                     f"Failed to read intermediate image {entry['path']}: {e}"
                                 )
@@ -275,17 +295,34 @@ class ImageProcessor:
                             try:
                                 with open(pool_json_path) as f:
                                     loaded_pool = json.load(f)
+                                if not isinstance(loaded_pool, dict):
+                                    raise ValueError("Image processor pool must be an object")
                                 for img_id, entry in loaded_pool.items():
+                                    if not isinstance(entry, dict):
+                                        raise ValueError(
+                                            "Image processor pool entries must be objects"
+                                        )
                                     if img_id not in self.intermediate_image_pool:
+                                        path = entry["path"]
+                                        transform = entry["transform"]
+                                        annotations = entry.get("annotations", {})
+                                        if (
+                                            not isinstance(path, str)
+                                            or not isinstance(transform, dict)
+                                            or not isinstance(annotations, dict)
+                                        ):
+                                            raise ValueError(
+                                                "Image processor pool entry has invalid shapes"
+                                            )
                                         self.intermediate_image_pool[img_id] = {
                                             "image_id": img_id,
-                                            "path": entry["path"],
+                                            "path": path,
                                             "turn_id": iterations,
-                                            "transform": entry["transform"],
+                                            "transform": transform,
                                             "is_output": entry.get("is_output", False),
-                                            "annotations": entry.get("annotations", {}),
+                                            "annotations": annotations,
                                         }
-                            except Exception as e:
+                            except (OSError, ValueError, TypeError, KeyError) as e:
                                 logger.error(f"Failed to read pool_json_path: {e}")
 
                 if submit_called:

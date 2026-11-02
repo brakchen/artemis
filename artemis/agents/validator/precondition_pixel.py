@@ -75,7 +75,7 @@ def _init_llm_and_prompt(ctx: ArtemisContext, get_llm_fn):
     """Resolves the VLM and loads the prompt template (once per validation)."""
     try:
         llm = get_llm_fn(ctx, name="validator_pixel_safety_net")
-    except Exception:
+    except (AttributeError, ValueError):
         if uses_minimax(ctx):
             raise
         llm = get_llm_fn(ctx, name="validator")

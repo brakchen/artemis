@@ -266,10 +266,10 @@ async def get_action_session(ctx: Any, actuator: Any = None) -> ActionSession:
         lock = asyncio.Lock()
         try:
             ctx._action_session_init_lock = lock
-        except Exception:
+        except (AttributeError, ValueError, TypeError):
             # Legacy strict injected contexts cannot be extended. They retain
             # the historical unattached-session contract.
-            pass
+            logger.debug("Could not store the action session initialization lock on ctx.")
     async with lock:
         return await _get_or_start_action_session(ctx, actuator)
 
@@ -294,7 +294,7 @@ async def _get_or_start_action_session(ctx: Any, actuator: Any = None) -> Action
     session = ActionSession(server, ctx=ctx)
     try:
         ctx.action_session = session
-    except Exception:
+    except (AttributeError, ValueError, TypeError):
         # Contexts that forbid new attributes (strict mocks) can still use the session.
         logger.debug("Could not store action session on ctx; proceeding unattached.")
     try:

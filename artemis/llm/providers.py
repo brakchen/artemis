@@ -364,7 +364,8 @@ class LLMProviderRegistry:
         for raw in self._read().get("providers", []):
             try:
                 providers.append(LLMProvider.model_validate(raw))
-            except Exception:  # Invalid storage must not echo a plaintext key in validation errors.
+            except ValueError:
+                # Invalid storage must not echo a plaintext key in validation errors.
                 name = raw.get("name") if isinstance(raw, dict) else None
                 logger.warning(f"Skipping malformed LLM provider entry {name!r}")
         return providers

@@ -85,7 +85,8 @@
 
 ```bash
 # 1. 克隆代码仓库并进入目录
-git clone https://github.com/google/artemis.git && cd artemis
+git clone --branch feat/model-config https://github.com/brakchen/artemis.git
+cd artemis
 
 # 2. 一键启动
 ./start.sh
@@ -95,7 +96,7 @@ git clone https://github.com/google/artemis.git && cd artemis
 
 ```powershell
 # 1. 克隆代码仓库并进入目录
-git clone https://github.com/google/artemis.git
+git clone --branch feat/model-config https://github.com/brakchen/artemis.git
 cd artemis
 
 # 2. 一键启动
@@ -129,6 +130,8 @@ CLI、控制台和 SDK 应使用一致的 `ARTEMIS_APP_DIR` 及主配置选择�
 已有文件会在原位置生成受保护的 `<文件名>.backup-<UTC时间戳>` 备份，命令会输出备份和原文件对应关系。回滚前停止新任务、比较当前文件；在保留后续编辑的前提下，一起恢复对应的配置、注册表和环境文件备份。发布采用逐文件原子替换和条件回滚，不是多文件原子事务。
 
 容器需显式挂载配置。先在仓库根目录执行 `docker build -t artemis-runtime:latest .`；两个 Playground 镜像复用其中的 UI 与 client/core wheel。Compose 示例要求将 `ARTEMIS_MAIN_CONFIG`、`ARTEMIS_PROVIDER_REGISTRY`、`ARTEMIS_SELECTED_ENV_FILE` 设为源文件的绝对路径（只用注册表的 MiniMax 可提供受保护的空 dotenv 文件）。backend manager 还要求 `ARTEMIS_EXPORT_HOST_ROOT` 指向 Docker 宿主机的绝对目录，并挂到 manager 的 `ARTEMIS_EXPORT_ROOT`；它只向子容器导出选中 profile 使用的凭据。注入文件只读，修改配置返回 403，运行状态目录仍可写。路径与清理约定见[技术方案](docs/designs/2026-11-01-minimax-anthropic.md#9-控制台cli-与兼容迁移)。本机尚未验证真实 Docker 运行。
+
+MiniMax 任务使用固定图像操作及受门禁保护的设备动作。自动生成 Python 的图像处理和任意 Agent 生成的 shell 脚本返回不支持错误；裁剪、缩放、检测和 OCR 仍可使用。
 
 本分支的 MiniMax 验证使用合成输入和 SDK HTTP 模拟响应。账号能力、定位精度及真实设备表现仍需单独验证；本文其他位置的上游基准完成率和单步耗时不代表已实测的 MiniMax 结果。
 

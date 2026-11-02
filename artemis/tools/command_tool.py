@@ -1263,7 +1263,8 @@ class RunShortAdbCommandTool(ArtemisTool):
             try:
                 process.terminate()
                 await asyncio.wait_for(process.wait(), timeout=_TERMINATE_GRACE_SECONDS)
-            except Exception:  # pylint: disable=broad-exception-caught
+            except (OSError, RuntimeError, TimeoutError) as stop_error:
+                logger.debug(f"ADB terminate did not settle: {type(stop_error).__name__}")
                 try:
                     process.kill()
                 except (ProcessLookupError, OSError):
@@ -1273,8 +1274,8 @@ class RunShortAdbCommandTool(ArtemisTool):
                 if ctx is not None and uses_minimax(ctx):
                     try:
                         await asyncio.wait_for(process.wait(), timeout=_TERMINATE_GRACE_SECONDS)
-                    except Exception:
-                        pass
+                    except (OSError, RuntimeError, TimeoutError) as wait_error:
+                        logger.debug(f"ADB kill did not settle: {type(wait_error).__name__}")
             await _retain_raw_process(ctx, process, cmd_line)
             return ToolFailure(f"Error: Command timed out after {timeout:.0f} seconds.")
         except Exception as e:  # pylint: disable=broad-exception-caught

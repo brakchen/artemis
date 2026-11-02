@@ -45,7 +45,7 @@ async def _close_asr_resource(resource, original_error: BaseException | None) ->
         if original_error is None:
             raise
         logger.debug("ASR cleanup drained repeated cancellation; preserving original failure")
-    except Exception as cleanup_error:
+    except (httpx.HTTPError, OSError, RuntimeError) as cleanup_error:
         logger.debug(f"Native ASR cleanup failed ({type(cleanup_error).__name__})")
 
 

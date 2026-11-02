@@ -35,6 +35,7 @@ from threading import Event
 import time
 from typing import Any
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
 from langchain_core.messages import (
@@ -54,7 +55,12 @@ from artemis.agents.video_analyzer.blackboard import uncovered_intervals
 from artemis.agents.video_analyzer.chunk_conversation import _validate_answer
 from artemis.agents.video_analyzer.native_speech import SpeechResult, transcribe_video
 from artemis.core.tool_failure import ToolFailure, is_tool_failure
-from artemis.llm.reliability import LLMInvalidOutputError, classify_failure, logical_call_scope
+from artemis.llm.reliability import (
+    LLMCallError,
+    LLMInvalidOutputError,
+    classify_failure,
+    logical_call_scope,
+)
 from artemis.llm.structured import content_to_text
 from artemis.utils.video import communicate_process, drain_media_task, get_ffmpeg_path
 from artemis.data_engine.trace import CURRENT_TRACE_ID, TraceSpan
@@ -120,7 +126,7 @@ async def _speech_for_chunk(
     analyzer._assert_recording_source()
     try:
         result = await transcribe_video(analyzer, path, actual_start)
-    except Exception as exc:
+    except (LLMCallError, httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
         failure = classify_failure(exc)
         analyzer.media_errors.append(
             {

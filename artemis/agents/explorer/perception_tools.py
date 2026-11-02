@@ -32,15 +32,20 @@ import re
 from typing import TYPE_CHECKING, Any
 
 import cv2
+import httpx
 
-from artemis.agents.explorer.geometry import norm_to_pixel, pixel_to_norm
+from artemis.agents.explorer.geometry import is_valid_norm_point, norm_to_pixel, pixel_to_norm
 from artemis.agents.explorer.screen_index import ScreenElement, ScreenIndex, normalize_text
-from artemis.agents.image_processor.image_processor import ImageProcessor
+from artemis.agents.image_processor.image_processor import (
+    ImageProcessor,
+    ensure_image_processor_supported,
+)
 from artemis.agents.object_detector.object_detector import _run_object_detection
 from artemis.config import settings
 from artemis.data_engine.trace import trace
+from artemis.llm.reliability import LLMCallError
 from artemis.utils.visualization import draw_dots
-from artemis.utils.vision import ImageTransform, copy_provenance, uses_minimax
+from artemis.utils.vision import ImageTransform, SnapshotRef, copy_provenance, uses_minimax
 from artemis.utils.ocr_api import ocr_status_text
 from third_party.mobile_use.utils.logger import get_logger
 
@@ -66,7 +71,7 @@ def load_detector_templates() -> tuple[list[str], float]:
         raw_timeout = detector_config.get("global_timeout")
         if isinstance(raw_timeout, (int, float)) and raw_timeout > 0:
             global_timeout = float(raw_timeout)
-    except Exception as e:
+    except (OSError, ValueError, TypeError) as e:
         logger.warning(f"Failed to load detector prompt config: {e}")
         detector_templates = ["Point to the following objects in the provided image: {labels_str}."]
         detector_instructions = ""
@@ -93,6 +98,10 @@ class PerceptionToolsMixin:
         next_img_id: int
         screen_index: ScreenIndex
         label_registry: dict[str, ScreenElement]
+        detection_registry: dict[str, dict[str, Any]]
+        snapshot: SnapshotRef | None
+
+        async def _load_ocr_on_demand(self) -> None: ...
 
     # ------------------------------------------------------------------ #
     # Label registry and annotation helpers
@@ -160,7 +169,7 @@ class PerceptionToolsMixin:
             output_path = self._next_output_path(subdir)
             draw_dots(self.screenshot_path, points, labels, str(output_path), color=color)
             return str(output_path)
-        except Exception as e:
+        except (OSError, ValueError, TypeError, cv2.error) as e:
             logger.warning(f"Failed to draw {subdir} dots: {e}")
             return None
 
@@ -372,10 +381,10 @@ class PerceptionToolsMixin:
                     "image_path": str(output_path),
                 }
 
-            except Exception as e:
+            except (OSError, ValueError, TypeError, KeyError, cv2.error) as e:
                 logger.warning(f"Failed to process detection output for annotation: {e}")
                 return {"text": str(result), "image_path": None}
-        except Exception as e:
+        except (LLMCallError, OSError, ValueError, TypeError, KeyError, cv2.error) as e:
             return {
                 "text": f"Error: Object detection failed: {e}",
                 "image_path": None,
@@ -385,6 +394,10 @@ class PerceptionToolsMixin:
         candidates = []
         points, labels, descriptions = [], [], []
         for item in result.get("detected", []):
+            coords = item.get("point")
+            if not is_valid_norm_point(coords, strict=True):
+                raise ValueError("MiniMax detection requires a finite normalized xy point")
+            nx, ny = float(coords[0]), float(coords[1])
             label = f"{prefix}{self.global_label_idx}"
             self.global_label_idx += 1
             candidate = {
@@ -395,7 +408,7 @@ class PerceptionToolsMixin:
             }
             self.detection_registry[label] = candidate
             candidates.append(candidate)
-            points.append(list(norm_to_pixel(*candidate["coords"], self.width, self.height)))
+            points.append(list(norm_to_pixel(nx, ny, self.width, self.height)))
             labels.append(label)
             descriptions.append(f'[{label}] "{candidate["description"]}" at {candidate["coords"]}')
         if result.get("ambiguous"):
@@ -482,6 +495,7 @@ class PerceptionToolsMixin:
     async def exec_ask_image_processor(
         self, instruction: str, target_image_id: str = "img_0"
     ) -> dict:
+        ensure_image_processor_supported(self.ctx)
         coder = ImageProcessor(self.ctx)
         target_info = self.image_pool.get(target_image_id)
         if not target_info:
@@ -611,14 +625,12 @@ class PerceptionToolsMixin:
                 "image_path": image_path,
             }
 
-        except Exception as e:
+        except (LLMCallError, httpx.HTTPError, OSError, ValueError, TypeError, cv2.error) as e:
             self._ocr_outcome = {
                 "status": "error",
                 "reason": type(e).__name__,
                 "source": "minimax",
-                "snapshot_id": self.snapshot.capture_id
-                if getattr(self, "snapshot", None)
-                else None,
+                "snapshot_id": self.snapshot.capture_id if self.snapshot else None,
             }
             return {
                 "text": "\n".join(

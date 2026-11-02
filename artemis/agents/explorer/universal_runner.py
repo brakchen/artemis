@@ -309,6 +309,7 @@ class UniversalRunnerMixin:
                         tool_call_id=call_id,
                         name=name,
                         content=f"Tool '{name}' is denylisted and unavailable.",
+                        status="error",
                     )
                 )
                 continue
@@ -325,6 +326,7 @@ class UniversalRunnerMixin:
                         tool_call_id=call_id,
                         name=name,
                         content=f"Error executing tool '{name}': {tool_err}",
+                        status="error",
                     )
                 )
 

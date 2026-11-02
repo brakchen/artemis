@@ -103,15 +103,15 @@ def _preflight_run_config(config, profile):
     agent = Agent(config=config.build(validate_profiles=False))
     try:
         return agent.prepare_task_config(profile)
-    except Exception as error:
+    except (ValueError, OSError) as error:
         # Recover only public routing identity with the same canonical selector.
         # Validation inputs and private endpoint snapshots never enter CLI output.
         try:
             selected = agent._select_agent_profile(profile)
             configured = selected.llm_config.default or selected.llm_config.operator
             setattr(error, "configured_provider", str(configured.provider))
-        except Exception:
-            pass
+        except (AttributeError, ValueError, TypeError) as identity_error:
+            logger.debug("Could not recover configured provider: %s", type(identity_error).__name__)
         raise
 
 
@@ -370,7 +370,7 @@ def run_command(
 
         try:
             path = str(get_main_config_path("llm-config.json"))
-        except Exception:
+        except (OSError, ValueError, TypeError):
             path = "the explicitly selected configuration path"
         console.print(
             f"Task configuration preflight failed in {path} (profile: {profile or 'default'}, provider: {getattr(error, 'configured_provider', 'selected configuration')}).",

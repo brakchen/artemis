@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import anthropic
 import httpx
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.tools import ToolException
 from PIL import Image
 from pydantic import ValidationError
 import pytest
@@ -48,6 +49,101 @@ from artemis.utils.vision import (
 from artemis.utils.vision_models import DetectionOutput, OCRModelOutput
 from artemis.utils.visual_ocr import recognize_ocr, ocr_to_legacy, ocr_cache_key
 from artemis.utils.visualization import format_minimal_list_with_elements
+
+
+@pytest.mark.parametrize("pinned_role", ["all", "explorer"])
+def test_minimax_image_coder_is_absent_from_both_declarations_and_prompt(pinned_role, monkeypatch):
+    monkeypatch.setenv("OCR_API_KEY", "fixture-only-ocr-key")
+    ctx = context()
+    if pinned_role != "all":
+        ctx._llm_endpoint_snapshot = {(pinned_role, False, False): endpoint()}
+    explorer = Explorer(ctx)
+    tier = get_tier("ultra")
+    explorer._apply_tier(tier)
+    assert "ask_image_processor" not in {tool.name for tool in explorer.get_exposed_tools()}
+    names = {tool["function"]["name"] for tool in explorer._universal_exposed_tools()}
+    assert "ask_image_processor" not in names
+    assert {"inspect_region", "detect_objects", "get_ocr_list"} <= names
+    prompt, error = explorer._build_prompt_template(tier)
+    assert error is None
+    assert "ask_image_processor" not in prompt
+    assert "inspect_region" in prompt and "detect_objects" in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry", ["central", "tool", "export", "history", "explorer", "native", "universal"]
+)
+async def test_minimax_cached_image_coder_rejects_before_any_effect(monkeypatch, tmp_path, entry):
+    from google.genai import types
+    from artemis.agents.image_processor import image_processor as module
+    from artemis.tools.image_processor_tool import ask_image_processor, get_ask_image_processor_tool
+    from artemis.tools.tool_wrapper import invoke_tool_with_injection
+    from artemis.graph.state import State
+
+    ctx = context()
+    monkeypatch.setenv("GOOGLE_API_KEY", "residual-fixture-key")
+    forbidden = MagicMock(side_effect=AssertionError("image coder created an external effect"))
+    monkeypatch.setattr(module, "get_llm", forbidden)
+    monkeypatch.setattr(module, "PythonExecutor", forbidden)
+    monkeypatch.setattr("artemis.tools.base.get_driver", forbidden)
+    monkeypatch.setattr("google.genai.Client", forbidden)
+    monkeypatch.setattr(module.settings, "TRACES_PATH", tmp_path / "must-not-create")
+    explorer = Explorer(ctx)
+    explorer.image_pool = {"img_0": {"path": "missing-original.png", "transform": {}}}
+    original_pool = dict(explorer.image_pool)
+    state = State(initial_goal="offline")
+    state.latest_screenshot = "missing-original.png"
+    arguments = {"instruction": "opaque Python", "target_image_id": "img_0"}
+    tool = get_ask_image_processor_tool(ctx)
+    if entry == "universal":
+        messages = []
+        await explorer._universal_dispatch_tools(
+            [{"name": "ask_image_processor", "id": "cached", "args": arguments}], messages, 1
+        )
+        assert len(messages) == 1 and isinstance(messages[0], ToolMessage)
+        assert messages[0].status == "error" and "unsupported" in messages[0].content
+    elif entry == "native":
+        record, parts = {"tool_calls": []}, []
+        await explorer._dispatch_tool_calls(
+            [types.FunctionCall(name="ask_image_processor", args=arguments)],
+            forbidden,
+            record,
+            parts,
+        )
+        assert "unsupported" in record["tool_calls"][0]["response"]["error"]
+        assert len(parts) == 1 and parts[0].function_response.response.get("error")
+    else:
+        with pytest.raises(ToolException, match="unsupported for MiniMax"):
+            if entry == "central":
+                await module.ImageProcessor(ctx).run("opaque Python", "missing-original.png")
+            elif entry == "tool":
+                await ask_image_processor.execute(ctx=ctx, state=state, **arguments)
+            elif entry == "export":
+                await ask_image_processor.to_langchain_tool(ctx).ainvoke(arguments)
+            elif entry == "history":
+                await invoke_tool_with_injection(tool, arguments, "cached", state=state)
+            else:
+                await explorer.exec_ask_image_processor(**arguments)
+    forbidden.assert_not_called()
+    assert explorer.image_pool == original_pool
+    assert explorer.next_img_id == 1 and explorer.detection_registry == {}
+    assert not (tmp_path / "must-not-create").exists()
+
+
+@pytest.mark.asyncio
+async def test_legacy_image_coder_resolution_error_is_not_an_operator_retry(monkeypatch):
+    from artemis.agents.image_processor import image_processor as module
+
+    ctx = SimpleNamespace(
+        llm_config=SimpleNamespace(image_processor=SimpleNamespace(model="legacy")),
+        data_engine=None,
+    )
+    broken = MagicMock(side_effect=ValueError("invalid image processor config"))
+    monkeypatch.setattr(module, "get_llm", broken)
+    with pytest.raises(ValueError, match="invalid image processor config"):
+        await module.ImageProcessor(ctx).run("fixture", "missing.png")
+    broken.assert_called_once_with(ctx, name="image_processor")
 
 
 @pytest.fixture(autouse=True)

@@ -47,6 +47,7 @@ from artemis.agents.object_detector.object_detector import _run_object_detection
 from artemis.config import settings
 from artemis.data_engine.storage import StorageManager
 from artemis.graph.state import State
+from artemis.llm.reliability import LLMCallError
 from artemis.utils.ocr_api import is_ocr_configured, perform_ocr, automatic_ocr_enabled, ocr_outcome
 from artemis.utils.vision import snapshot_for_image, image_size, uses_minimax
 from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml, pure_xml_hierarchy
@@ -164,7 +165,7 @@ class RunSetupMixin:
                 },
                 ensure_ascii=False,
             )
-        except Exception as e:
+        except (LLMCallError, OSError, ValueError, TypeError, KeyError) as e:
             logger.error(f"Flash mode object detection failed: {e}")
             if uses_minimax(self.ctx):
                 return json.dumps(
@@ -303,7 +304,7 @@ class RunSetupMixin:
 
         try:
             data = load_prompt_sections(prompt_path)
-        except Exception as e:
+        except (OSError, ValueError, TypeError) as e:
             return None, f"Error loading or parsing explorer.json: {e}"
 
         exposed = self._exposed_tool_names(tier)
@@ -418,7 +419,7 @@ class RunSetupMixin:
         ):
             try:
                 ocr_results = await self._request_ocr(screenshot_path)
-            except Exception as error:
+            except (LLMCallError, httpx.HTTPError, OSError, ValueError) as error:
                 logger.warning(f"Explorer OCR unavailable; using XML only: {type(error).__name__}")
                 self._ocr_outcome = {
                     "status": "error",

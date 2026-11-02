@@ -83,7 +83,8 @@ Ensure an Android device (with **USB Debugging** enabled) or emulator is connect
 
 ```bash
 # 1. Clone repo & navigate to directory
-git clone https://github.com/google/artemis.git && cd artemis
+git clone --branch feat/model-config https://github.com/brakchen/artemis.git
+cd artemis
 
 # 2. One-click launch
 ./start.sh
@@ -93,7 +94,7 @@ git clone https://github.com/google/artemis.git && cd artemis
 
 ```powershell
 # 1. Clone repo & navigate to directory
-git clone https://github.com/google/artemis.git
+git clone --branch feat/model-config https://github.com/brakchen/artemis.git
 cd artemis
 
 # 2. One-click launch
@@ -127,6 +128,8 @@ Use the same `ARTEMIS_APP_DIR` and main-config selection for the CLI, console an
 Existing files receive adjacent protected `<filename>.backup-<UTC timestamp>` copies. Setup prints each backup and its original path. For rollback, stop new tasks, compare current files, and restore the matching configuration, registry and environment backups together only when that would preserve subsequent edits. Publication uses individual atomic file replacements with conditional rollback; it is not a multi-file atomic transaction.
 
 Container deployments need explicit configuration mounts. Build the repository's runtime first with `docker build -t artemis-runtime:latest .`; both Playground images reuse that runtime and its bundled UI and client/core wheels. Set `ARTEMIS_MAIN_CONFIG`, `ARTEMIS_PROVIDER_REGISTRY` and `ARTEMIS_SELECTED_ENV_FILE` to absolute source-file paths for the Compose examples (an empty protected dotenv file is sufficient for registry-only MiniMax). The backend manager also requires `ARTEMIS_EXPORT_HOST_ROOT`, the absolute Docker-host directory mounted at its `ARTEMIS_EXPORT_ROOT`. It exports only the selected profile's credentials to child containers. Injected files are read-only and configuration changes return 403; runtime state remains writable. See the [deployment contract](docs/designs/2026-11-01-minimax-anthropic.md#9-控制台cli-与兼容迁移) for lifecycle and path details. Real Docker execution has not been verified on this host.
+
+MiniMax tasks use fixed image operations and guarded device actions. Autonomous Python image coding and arbitrary agent-authored shell scripts return an unsupported-operation error; crop, zoom, detection and OCR remain available.
 
 This branch's MiniMax checks use synthetic inputs and simulated SDK HTTP responses. Account capabilities, grounding accuracy and real-device performance require separate verification. The upstream benchmark and per-step timing figures elsewhere in this README do not describe measured MiniMax results.
 

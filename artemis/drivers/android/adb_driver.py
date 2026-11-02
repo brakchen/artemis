@@ -24,6 +24,7 @@ import re
 from typing import Any, Literal
 
 from adbutils import AdbClient, AdbDevice
+from adbutils.errors import AdbError
 from artemis.config.paths import get_temp_dir
 from artemis.drivers.base import BaseDeviceDriver, KeyCode, ScreenData, SwipeDirection
 from artemis.toolchain import find_ffmpeg, find_scrcpy
@@ -202,7 +203,7 @@ class AndroidAdbDriver(BaseDeviceDriver):
                     rotation = current_rotation
                 if size_match:
                     reported_display_size = tuple(int(value) for value in size_match.groups())
-        except Exception as error:
+        except (AdbError, OSError, RuntimeError, ValueError) as error:
             logger.debug(f"Display metadata unavailable: {type(error).__name__}")
 
         # 2. Capture UI Hierarchy via UIAutomator

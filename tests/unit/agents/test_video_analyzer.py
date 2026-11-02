@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -32,8 +31,37 @@ from google.genai import types
 import pytest
 
 
+@pytest.fixture
+def video_prompts(monkeypatch):
+    """Replace only these prompts; logger/config reads retain real filesystem behavior."""
+    original_read_text = Path.read_text
+    prompt_dir = Path(chunk_conversation.__file__).parent
+    prompts = {
+        prompt_dir / "video_analyzer.md": "# Dynamic Video Analyzer...",
+        prompt_dir / "video_sub_agent.md": "# Sub Agent...",
+        prompt_dir / "video_sub_agent_audio.md": "# Audio Sub Agent...",
+    }
+
+    def read_text(path, *args, **kwargs):
+        if path in prompts:
+            return prompts[path]
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+
+def test_video_prompt_fixture_preserves_unrelated_files_and_directories(video_prompts, tmp_path):
+    directory = tmp_path / "logger-state"
+    directory.mkdir()
+    directory.mkdir(exist_ok=True)
+    assert directory.exists() and directory.is_dir()
+    config = directory / "config.json"
+    config.write_text('{"unrelated": true}', encoding="utf-8")
+    assert config.read_text(encoding="utf-8") == '{"unrelated": true}'
+
+
 @pytest.mark.asyncio
-async def test_video_analyzer_run():
+async def test_video_analyzer_run(video_prompts):
     # Mock context
     mock_ctx = MagicMock(spec=ArtemisContext)
     mock_ctx.data_engine = None
@@ -56,20 +84,11 @@ async def test_video_analyzer_run():
 
     mock_client.aio.models.generate_content_stream = AsyncMock(return_value=mock_stream())
 
-    # Mock file reading for prompts
-    mock_prompt = "# Dynamic Video Analyzer..."
-
     with (
         patch(
             "artemis.agents.video_analyzer.video_analyzer.genai.Client",
             return_value=mock_client,
         ),
-        patch(
-            "pathlib.Path.exists",
-            autospec=True,
-            side_effect=lambda self: not str(self).endswith(".jpg"),
-        ),
-        patch("pathlib.Path.read_text", return_value=mock_prompt),
         patch(
             "artemis.agents.video_analyzer.video_analyzer.cleanup_abandoned_gemini_files",
             AsyncMock(),
@@ -86,7 +105,7 @@ async def test_video_analyzer_run():
 
 
 @pytest.mark.asyncio
-async def test_video_analyzer_preserves_thought_signature():
+async def test_video_analyzer_preserves_thought_signature(video_prompts, tmp_path):
     # Mock context
     mock_ctx = MagicMock(spec=ArtemisContext)
     mock_ctx.data_engine = None
@@ -95,12 +114,15 @@ async def test_video_analyzer_preserves_thought_signature():
     mock_ctx.llm_config.utils.video_analyzer.model = "gemini-3.7-flash"
     mock_ctx.agent_config = SimpleNamespace(video_analyzer=SimpleNamespace(processing="static"))
 
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"synthetic video fixture")
+
     # Mock MobileDeviceController
     mock_controller = MagicMock()
     mock_controller.extract_segment_metadata = AsyncMock(
         return_value=MagicMock(
             success=True,
-            video_path="/tmp/video.mp4",
+            video_path=str(video),
             actual_start_relative_time=10.0,
         )
     )
@@ -212,9 +234,6 @@ async def test_video_analyzer_preserves_thought_signature():
         side_effect=mock_generate_content_stream
     )
 
-    # Mock file reading for prompts
-    mock_prompt = "# Dynamic Video Analyzer..."
-
     with (
         patch(
             "artemis.agents.video_analyzer.video_analyzer.genai.Client",
@@ -225,22 +244,12 @@ async def test_video_analyzer_preserves_thought_signature():
             return_value=mock_controller,
         ),
         patch(
-            "pathlib.Path.exists",
-            autospec=True,
-            side_effect=lambda self: not str(self).endswith(".jpg"),
-        ),
-        patch(
-            "pathlib.Path.stat",
-            return_value=os.stat_result((0o100644, 0, 0, 0, 0, 0, 1024 * 1024, 0, 0, 0)),
-        ),
-        patch("pathlib.Path.read_text", return_value=mock_prompt),
-        patch(
             "artemis.agents.video_analyzer.video_analyzer.cleanup_abandoned_gemini_files",
             AsyncMock(),
         ),
         patch(
             "artemis.agents.video_analyzer.video_analyzer.compress_video_for_api",
-            AsyncMock(return_value=Path("/tmp/video.mp4")),
+            AsyncMock(side_effect=lambda path, **kwargs: path),
         ),
     ):
         analyzer = VideoAnalyzer(mock_ctx)
@@ -264,7 +273,7 @@ async def test_video_analyzer_preserves_thought_signature():
 
 
 @pytest.mark.asyncio
-async def test_video_analyzer_sub_agent_confidence_validation(tmp_path):
+async def test_video_analyzer_sub_agent_confidence_validation(tmp_path, video_prompts):
     # Mock context
     mock_ctx = MagicMock(spec=ArtemisContext)
     mock_ctx.data_engine = None
@@ -411,17 +420,6 @@ async def test_video_analyzer_sub_agent_confidence_validation(tmp_path):
         side_effect=mock_generate_content_stream
     )
 
-    # Mock file reading for prompts
-    mock_main_prompt = "# Dynamic Video Analyzer..."
-    mock_sub_prompt = "# Sub Agent..."
-
-    def mock_read_text(self, encoding="utf-8"):
-        if "video_analyzer.md" in str(self):
-            return mock_main_prompt
-        elif "video_sub_agent.md" in str(self):
-            return mock_sub_prompt
-        return ""
-
     async def mock_compress_video(path, **kwargs):
         assert path != borrowed_video
         assert path.read_bytes() == video_bytes
@@ -436,7 +434,6 @@ async def test_video_analyzer_sub_agent_confidence_validation(tmp_path):
             "artemis.agents.video_analyzer.video_analyzer.get_controller",
             return_value=mock_controller,
         ),
-        patch("pathlib.Path.read_text", mock_read_text),
         patch(
             "artemis.agents.video_analyzer.video_analyzer.cleanup_abandoned_gemini_files",
             AsyncMock(),

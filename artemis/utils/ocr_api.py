@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 from artemis.config import settings
+from artemis.llm.reliability import LLMCallError
 from artemis.utils.vision import uses_minimax
 from third_party.mobile_use.utils.logger import get_logger
 
@@ -108,7 +109,7 @@ async def perform_ocr(
             result = await recognize_ocr(
                 screenshot_b64, ctx=ctx, snapshot=snapshot, transform=transform
             )
-        except Exception as error:
+        except (LLMCallError, OSError, ValueError) as error:
             ctx._ocr_last_outcome = {
                 "status": "error",
                 "reason": type(error).__name__,
@@ -153,19 +154,31 @@ async def perform_ocr(
 
 
 def _parse_ocr_response(response: httpx.Response) -> list[dict[str, Any]]:
-    if response.status_code == 200:
-        res_json = response.json()
-        responses = res_json.get("responses", [])
-        if responses and "textAnnotations" in responses[0]:
-            annotations = responses[0]["textAnnotations"]
-            results = []
-            # Skip the first annotation (index 0) as it is the full-screen combined text
-            for ann in annotations[1:]:
-                desc = ann.get("description", "")
-                vertices = ann.get("boundingPoly", {}).get("vertices", [])
-                results.append({"text": desc, "position": vertices})
-            return results
-        else:
-            return []
-    else:
-        raise Exception(f"Vision API returned status {response.status_code}: {response.text}")
+    if response.status_code != 200:
+        # An upstream body may echo the request key or other private input.
+        raise ValueError(f"Vision API returned status {response.status_code}")
+    res_json = response.json()
+    if not isinstance(res_json, dict):
+        raise ValueError("Vision API response must be an object")
+    responses = res_json.get("responses", [])
+    if not isinstance(responses, list) or any(not isinstance(row, dict) for row in responses):
+        raise ValueError("Vision API responses must be a list of objects")
+    if not responses or "textAnnotations" not in responses[0]:
+        return []
+    annotations = responses[0]["textAnnotations"]
+    if not isinstance(annotations, list) or any(not isinstance(ann, dict) for ann in annotations):
+        raise ValueError("Vision API text annotations must be a list of objects")
+    results = []
+    # Skip the first annotation (index 0) as it is the full-screen combined text.
+    for ann in annotations[1:]:
+        desc = ann.get("description", "")
+        polygon = ann.get("boundingPoly", {})
+        if not isinstance(desc, str) or not isinstance(polygon, dict):
+            raise ValueError("Vision API annotation text and polygon have invalid shapes")
+        vertices = polygon.get("vertices", [])
+        if not isinstance(vertices, list) or any(
+            not isinstance(vertex, dict) for vertex in vertices
+        ):
+            raise ValueError("Vision API annotation vertices must be a list of objects")
+        results.append({"text": desc, "position": vertices})
+    return results

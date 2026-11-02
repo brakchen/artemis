@@ -18,7 +18,7 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from langchain_core.messages import SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from artemis.core.tool_failure import is_tool_failure
@@ -492,7 +492,8 @@ class OperatorNode:
         plan_gate_bounced = False
 
         if uses_minimax(self.ctx):
-            current_messages.append(
+            current_messages.insert(
+                0,
                 SystemMessage(
                     content=(
                         "MiniMax execution contract: emit one screen-changing action, then inspect a fresh "
@@ -502,16 +503,19 @@ class OperatorNode:
                         "and diagnose, never replay it. Dispatched does not mean the task goal succeeded. "
                         "Raw ADB scripts invalidate targets; finish/terminate active scripts and re-observe."
                     )
-                )
+                ),
             )
+            if self._transcript_turn_base is not None:
+                self._transcript_turn_base += 1
 
         for iteration in range(max_iterations):
             if iteration == max_iterations - 1:
                 logger.warning(
                     "Operator has reached the maximum number of tool calls. Adding reminder."
                 )
+                reminder_message = HumanMessage if uses_minimax(self.ctx) else SystemMessage
                 current_messages.append(
-                    SystemMessage(
+                    reminder_message(
                         content=(
                             "You have reached the maximum number of tool calls"
                             " for this turn. You must make a final action, or"

@@ -209,8 +209,8 @@ def _ffprobe_candidates() -> list[Path]:
 
         bundled = Path(imageio_ffmpeg.get_ffmpeg_exe()).parent / executable
         candidates.append(bundled)
-    except Exception:
-        pass
+    except (ImportError, OSError, RuntimeError) as error:
+        logger.debug(f"Bundled ffprobe lookup unavailable: {type(error).__name__}")
     return candidates
 
 
